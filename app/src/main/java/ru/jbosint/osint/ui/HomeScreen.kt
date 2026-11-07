@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -50,6 +51,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import ru.jbosint.osint.core.model.Confidence
 import ru.jbosint.osint.data.HistoryEntry
 import ru.jbosint.osint.data.QueryDetector
 import ru.jbosint.osint.data.QueryKind
@@ -151,6 +153,27 @@ fun HomeScreen(state: UiState, vm: AppViewModel) {
                     }
                 }
 
+                Spacer(Modifier.height(6.dp))
+                TextButton(
+                    onClick = vm::previewSearch,
+                    enabled = !state.searching && state.preview?.running != true,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (state.preview?.running == true) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            color = JbAccent2,
+                            strokeWidth = 1.6.dp
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Проверяем модули…", style = MaterialTheme.typography.labelMedium, color = JbAccent2)
+                    } else {
+                        Icon(Icons.Filled.Science, contentDescription = null, tint = JbAccent2, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Тестировать поиск", style = MaterialTheme.typography.labelMedium, color = JbAccent2)
+                    }
+                }
+
                 if (state.searching) {
                     Spacer(Modifier.height(14.dp))
                     LinearProgressIndicator(
@@ -194,6 +217,91 @@ fun HomeScreen(state: UiState, vm: AppViewModel) {
                         if (state.activeModules > 0) JbGreen else JbAmber
                     )
                     if (state.demoMode) Pill("Демо-режим", JbAccent2)
+                }
+            }
+        }
+
+        val preview = state.preview
+        if (preview != null) {
+            item {
+                Spacer(Modifier.height(12.dp))
+                GlowCard(modifier = Modifier.fillMaxWidth(), padding = 16) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("ПРОВЕРКА МОДУЛЕЙ", style = MaterialTheme.typography.labelSmall, color = JbFaint)
+                        Spacer(Modifier.weight(1f))
+                        if (!preview.running && preview.error == null) {
+                            Pill(
+                                if (preview.sourcesResponded > 0)
+                                    "Отвечают: ${preview.sourcesResponded} из ${preview.sourcesAttempted}"
+                                else "Нет ответов",
+                                if (preview.sourcesResponded > 0) JbGreen else JbRed
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    when {
+                        preview.running -> Text(
+                            "Тестовый запрос отправлен во все активные модули. Отчёт не формируется.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = JbMuted
+                        )
+                        preview.error != null -> Text(
+                            preview.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = JbAmber
+                        )
+                        preview.isEmpty -> Text(
+                            "Ни один активный модуль не вернул сведений. Проверьте ключи и адреса модулей — полный отчёт по такому запросу будет пустым.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = JbAmber
+                        )
+                        else -> {
+                            Text(
+                                "Найдено фактов: ${preview.facts.size} · исходных наблюдений: ${preview.rawFacts}. Предварительный список без отчёта и без сохранения в историю.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = JbMuted
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            preview.facts.take(8).forEach { fact ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            fact.kind,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = JbFaint
+                                        )
+                                        Text(
+                                            fact.value,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = JbText,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    Spacer(Modifier.width(8.dp))
+                                    Pill(
+                                        fact.confidence.title,
+                                        when (fact.confidence) {
+                                            Confidence.CONFIRMED -> JbGreen
+                                            Confidence.PROBABLE -> JbAccent2
+                                            Confidence.UNVERIFIED -> JbAmber
+                                        }
+                                    )
+                                }
+                            }
+                            if (preview.facts.size > 8) {
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    "и ещё ${preview.facts.size - 8}…",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = JbFaint
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }

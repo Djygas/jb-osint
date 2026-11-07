@@ -13,11 +13,14 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.jbosint.osint.core.model.AggregatedData
+import ru.jbosint.osint.core.model.Fact
 import ru.jbosint.osint.data.CustomAuth
 import ru.jbosint.osint.data.CustomModule
 import ru.jbosint.osint.data.CustomModuleChecker
 import ru.jbosint.osint.data.CustomModuleSpec
 import ru.jbosint.osint.data.CustomModuleStore
+import ru.jbosint.osint.data.FieldRule
+import ru.jbosint.osint.data.KeyCheck
 import ru.jbosint.osint.data.HistoryEntry
 import ru.jbosint.osint.data.HistoryStore
 import ru.jbosint.osint.data.KeyRepository
@@ -43,6 +46,18 @@ data class ProviderUi(
 
 data class ShareRequest(val uri: Uri, val mime: String, val fileName: String)
 
+/** Предварительная выборка: факты без сохранения истории и без отчёта. */
+data class PreviewState(
+    val running: Boolean = false,
+    val facts: List<Fact> = emptyList(),
+    val rawFacts: Int = 0,
+    val sourcesAttempted: Int = 0,
+    val sourcesResponded: Int = 0,
+    val error: String? = null
+) {
+    val isEmpty: Boolean get() = facts.isEmpty()
+}
+
 data class UiState(
     val ready: Boolean = false,
     val screen: Screen = Screen.HOME,
@@ -58,6 +73,8 @@ data class UiState(
     val providers: List<ProviderUi> = emptyList(),
     val customModules: List<CustomModule> = emptyList(),
     val customChecking: Set<String> = emptySet(),
+    val customChecks: Map<String, KeyCheck> = emptyMap(),
+    val preview: PreviewState? = null,
     val analyst: String = "",
     val demoMode: Boolean = false,
     val secureScreen: Boolean = true,
@@ -144,7 +161,51 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------------- поиск
 
-    fun setQuery(value: String) = _state.update { it.copy(query = value, searchError = null) }
+    fun setQuery(value: String) = _state.update {
+        it.copy(query = value, searchError = null, preview = null)
+    }
+
+    /** «Тестировать поиск»: предварительный список фактов без отчёта и без сохранения. */
+    fun previewSearch() {
+        val current = _state.value
+        if (current.preview?.running == true || current.searching) return
+        val query = current.query.trim()
+        if (query.length < 2) {
+            _state.update { it.copy(preview = PreviewState(error = "Введите запрос длиной от 2 символов")) }
+            return
+        }
+        _state.update { it.copy(preview = PreviewState(running = true), searchError = null) }
+        viewModelScope.launch {
+            val modules = customStore.activeModules()
+            val outcome = runCatching {
+                engine.search(query, { _, _ -> }, modules)
+            }
+            outcome.onSuccess { data ->
+                _state.update {
+                    it.copy(
+                        preview = PreviewState(
+                            running = false,
+                            facts = data.facts,
+                            rawFacts = data.stats.rawFacts,
+                            sourcesAttempted = data.stats.sourcesAttempted,
+                            sourcesResponded = data.stats.sourcesResponded
+                        )
+                    )
+                }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        preview = PreviewState(
+                            running = false,
+                            error = "Предпросмотр не удался: ${error.message ?: "неизвестная ошибка"}"
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun clearPreview() = _state.update { it.copy(preview = null) }
 
     fun startSearch() {
         val current = _state.value
@@ -286,9 +347,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         auth: CustomAuth,
         headerName: String,
         paramName: String,
-        key: String?
+        key: String?,
+        fields: List<FieldRule> = emptyList()
     ) {
         val error = CustomModuleSpec.validate(title, urlTemplate)
+            ?: CustomModuleSpec.validateRules(fields)
         if (error != null) {
             _state.update { it.copy(toast = error) }
             return
@@ -302,11 +365,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             headerName = headerName.trim(),
             paramName = paramName.trim(),
             enabled = existing?.enabled ?: true,
-            createdAt = existing?.createdAt ?: System.currentTimeMillis()
+            createdAt = existing?.createdAt ?: System.currentTimeMillis(),
+            fields = fields
         )
         customStore.save(module, key)
         refreshCustom()
         _state.update { it.copy(toast = if (existing == null) "Модуль добавлен" else "Модуль обновлён") }
+        // ТЗ: при добавлении модуля сразу проверяем связь; при ошибке модуль отключается.
+        checkCustomModule(module.id)
     }
 
     fun setCustomModuleEnabled(id: String, enabled: Boolean) {
@@ -326,11 +392,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(customChecking = it.customChecking + id) }
         viewModelScope.launch {
             val result = customChecker.check(module)
+            val failed = result.state == KeyState.INVALID || result.state == KeyState.OFFLINE ||
+                result.state == KeyState.EMPTY
+            if (failed && module.enabled) customStore.setEnabled(id, false)
             _state.update {
                 it.copy(
                     customChecking = it.customChecking - id,
+                    customChecks = it.customChecks + (id to result),
                     customModules = customStore.list(),
-                    toast = result.detail
+                    toast = if (failed) result.detail + " — модуль отключён" else result.detail
                 )
             }
         }

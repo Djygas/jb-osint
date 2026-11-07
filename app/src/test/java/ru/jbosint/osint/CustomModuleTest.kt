@@ -8,6 +8,10 @@ import org.junit.Test
 import ru.jbosint.osint.data.CustomAuth
 import ru.jbosint.osint.data.CustomModule
 import ru.jbosint.osint.data.CustomModuleSpec
+import ru.jbosint.osint.data.FactField
+import ru.jbosint.osint.data.FieldRule
+import ru.jbosint.osint.data.JsonPath
+import ru.jbosint.osint.data.Normalizer
 
 class CustomModuleSpecTest {
 
@@ -59,5 +63,38 @@ class CustomModuleSpecTest {
     @Test
     fun sourceIdIsNeutral() {
         assertEquals("custom", CustomModuleSpec.SOURCE_ID)
+    }
+
+    @Test
+    fun rulesAreValidated() {
+        assertNull(CustomModuleSpec.validateRules(listOf(FieldRule("data.email", FactField.EMAIL))))
+        assertNotNull(CustomModuleSpec.validateRules(listOf(FieldRule("", FactField.EMAIL))))
+        assertNotNull(CustomModuleSpec.validateRules(listOf(FieldRule("data.email", FactField.EMAIL, "("))))
+    }
+
+    @Test
+    fun jsonPathReadsNestedObjectsAndArrays() {
+        val root = mapOf(
+            "data" to mapOf(
+                "username" to "ivan_p",
+                "items" to listOf(
+                    mapOf("email" to "Ivan@Mail.RU"),
+                    mapOf("email" to "second@mail.ru")
+                )
+            )
+        )
+        assertEquals(listOf<Any?>("ivan_p"), JsonPath.select(root, ".data.username"))
+        assertEquals(listOf("Ivan@Mail.RU", "second@mail.ru"), JsonPath.strings(root, "data.items[].email"))
+        assertEquals(listOf("second@mail.ru"), JsonPath.strings(root, "data.items[1].email"))
+        assertTrue(JsonPath.strings(root, "data.missing").isEmpty())
+    }
+
+    @Test
+    fun valuesAreBroughtToUnifiedForm() {
+        assertEquals("ivan@mail.ru", Normalizer.canonical(FactField.EMAIL, " Ivan@Mail.RU "))
+        assertEquals("+79161234567", Normalizer.canonical(FactField.PHONE, "8 (916) 123-45-67"))
+        assertEquals("ivan_p", Normalizer.canonical(FactField.USERNAME, "@Ivan_P"))
+        assertEquals("example.org", Normalizer.canonical(FactField.DOMAIN, "https://www.Example.org/path"))
+        assertEquals("Иван Петров", Normalizer.canonical(FactField.FULLNAME, "  Иван   Петров "))
     }
 }

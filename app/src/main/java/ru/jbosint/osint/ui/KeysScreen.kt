@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -56,9 +57,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.runtime.mutableStateListOf
 import ru.jbosint.osint.data.CustomAuth
 import ru.jbosint.osint.data.CustomModule
 import ru.jbosint.osint.data.CustomModuleSpec
+import ru.jbosint.osint.data.FactField
+import ru.jbosint.osint.data.FieldRule
+import ru.jbosint.osint.data.KeyCheck
 import ru.jbosint.osint.data.KeyState
 import ru.jbosint.osint.data.ProviderGroup
 
@@ -180,6 +187,7 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                 CustomModuleCard(
                     module = module,
                     checking = state.customChecking.contains(module.id),
+                    check = state.customChecks[module.id],
                     onToggle = { vm.setCustomModuleEnabled(module.id, it) },
                     onCheck = { vm.checkCustomModule(module.id) },
                     onEdit = {
@@ -205,7 +213,7 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
         CustomModuleDialog(
             initial = editing,
             onDismiss = { editorOpen = false },
-            onSave = { title, url, auth, header, param, key ->
+            onSave = { title, url, auth, header, param, key, rules ->
                 vm.saveCustomModule(
                     id = editing?.id.orEmpty(),
                     title = title,
@@ -213,7 +221,8 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                     auth = auth,
                     headerName = header,
                     paramName = param,
-                    key = key
+                    key = key,
+                    fields = rules
                 )
                 editorOpen = false
             }
@@ -384,6 +393,7 @@ private fun dateShort(timestamp: Long): String =
 private fun CustomModuleCard(
     module: CustomModule,
     checking: Boolean,
+    check: KeyCheck?,
     onToggle: (Boolean) -> Unit,
     onCheck: () -> Unit,
     onEdit: () -> Unit,
@@ -437,6 +447,28 @@ private fun CustomModuleCard(
             }
         }
 
+        if (check != null && !checking) {
+            Spacer(Modifier.height(4.dp))
+            val (symbol, tint) = when (check.state) {
+                KeyState.VALID -> "✅" to JbGreen
+                KeyState.OFFLINE -> "🚫" to JbRed
+                else -> "⚠️" to JbAmber
+            }
+            Text(
+                "$symbol ${check.detail}",
+                style = MaterialTheme.typography.labelSmall,
+                color = tint
+            )
+        }
+        if (module.fields.isNotEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Правил разбора: ${module.fields.size}",
+                style = MaterialTheme.typography.labelSmall,
+                color = JbFaint
+            )
+        }
+
         Spacer(Modifier.height(6.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onCheck, enabled = !checking) {
@@ -459,7 +491,7 @@ private fun CustomModuleCard(
 private fun CustomModuleDialog(
     initial: CustomModule?,
     onDismiss: () -> Unit,
-    onSave: (String, String, CustomAuth, String, String, String?) -> Unit
+    onSave: (String, String, CustomAuth, String, String, String?, List<FieldRule>) -> Unit
 ) {
     var title by remember { mutableStateOf(initial?.title.orEmpty()) }
     var url by remember { mutableStateOf(initial?.urlTemplate.orEmpty()) }
@@ -470,6 +502,9 @@ private fun CustomModuleDialog(
     var revealed by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val hasStoredKey = initial?.hasKey == true
+    val rules = remember {
+        mutableStateListOf<FieldRule>().apply { addAll(initial?.fields.orEmpty()) }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -594,6 +629,84 @@ private fun CustomModuleDialog(
                     )
                 }
 
+                Text("Правила разбора ответа", style = MaterialTheme.typography.labelMedium, color = JbMuted)
+                Text(
+                    "JSON-путь → поле отчёта. Пример: data.username, .data.items[].email. Без правил используется автоматический разбор.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = JbFaint
+                )
+                rules.forEachIndexed { index, rule ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(JbSurfaceHigh)
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(
+                                value = rule.path,
+                                onValueChange = { rules[index] = rule.copy(path = it) },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                label = { Text("Путь", color = JbFaint) },
+                                placeholder = { Text("data.email", color = JbFaint, style = MaterialTheme.typography.labelSmall) },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = fieldColors(),
+                                textStyle = MaterialTheme.typography.bodySmall
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            IconButton(onClick = { rules.removeAt(index) }) {
+                                Icon(Icons.Filled.Delete, contentDescription = "Удалить правило", tint = JbFaint, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            var menu by remember { mutableStateOf(false) }
+                            Box {
+                                TextButton(onClick = { menu = true }) {
+                                    Text(rule.field.kind, style = MaterialTheme.typography.labelSmall, color = JbAccent2)
+                                    Text(" ▾", style = MaterialTheme.typography.labelSmall, color = JbFaint)
+                                }
+                                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                    FactField.entries.forEach { field ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    "${field.kind} (${field.token})",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = if (field == rule.field) JbAccent2 else JbText
+                                                )
+                                            },
+                                            onClick = {
+                                                rules[index] = rule.copy(field = field)
+                                                menu = false
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                            OutlinedTextField(
+                                value = rule.regex,
+                                onValueChange = { rules[index] = rule.copy(regex = it) },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                label = { Text("Regex (необязательно)", color = JbFaint) },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = fieldColors(),
+                                textStyle = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                }
+                TextButton(onClick = {
+                    if (rules.size < 24) rules.add(FieldRule(path = "", field = FactField.OTHER))
+                }) {
+                    Icon(Icons.Filled.Add, contentDescription = null, tint = JbAccent2, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Добавить правило", style = MaterialTheme.typography.labelSmall, color = JbAccent2)
+                }
+
                 Text(
                     "Название модуля видно только вам и никогда не попадает в отчёты — в документах источник не раскрывается.",
                     style = MaterialTheme.typography.labelSmall,
@@ -607,12 +720,13 @@ private fun CustomModuleDialog(
         confirmButton = {
             TextButton(onClick = {
                 val problem = CustomModuleSpec.validate(title, url)
+                    ?: CustomModuleSpec.validateRules(rules.toList())
                 when {
                     problem != null -> error = problem
                     auth != CustomAuth.NONE && key.isBlank() && !hasStoredKey -> error = "Укажите API-ключ"
                     else -> {
                         error = null
-                        onSave(title, url, auth, header, param, key.ifBlank { null })
+                        onSave(title, url, auth, header, param, key.ifBlank { null }, rules.toList())
                     }
                 }
             }) {

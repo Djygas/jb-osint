@@ -28,12 +28,13 @@ object Aggregator {
             val value = clean(item.value)
             if (value.isBlank()) continue
             val subject = clean(item.subject)
-            val key = buildKey(item.category, item.kind, value, subject)
+            val kind = canonicalKind(clean(item.kind).ifBlank { "Сведение" })
+            val key = buildKey(item.category, kind, value, subject)
             val existing = merged[key]
             if (existing == null) {
                 merged[key] = MutableBundle(
                     category = item.category,
-                    kind = clean(item.kind).ifBlank { "Сведение" },
+                    kind = kind,
                     value = value,
                     subject = subject,
                     attributes = item.attributes.filterValues { it.isNotBlank() }.toMutableMap(),
@@ -142,7 +143,28 @@ object Aggregator {
     }
 
     private fun buildKey(category: FactCategory, kind: String, value: String, subject: String): String =
-        listOf(category.name, normalize(kind), normalize(value), normalize(subject)).joinToString("|")
+        listOf(category.name, normalize(canonicalKind(kind)), normalize(value), normalize(subject)).joinToString("|")
+
+    /**
+     * Приведение названий сведений к единым: разные модули называют одно и то же
+     * по-своему («Никнейм», «Логин», «Профиль»), и без этого подтверждения
+     * из разных источников не склеивались бы.
+     */
+    fun canonicalKind(kind: String): String {
+        val key = kind.trim().lowercase()
+        return when (key) {
+            "почта", "email", "e-mail", "mail", "адрес почты" -> "Почта"
+            "телефон", "phone", "mobile", "мобильный", "номер телефона" -> "Телефон"
+            "никнейм", "логин", "профиль", "username", "login", "аккаунт", "nickname" -> "Профиль"
+            "полное имя", "имя", "фио", "fullname", "full name", "name" -> "Полное имя"
+            "ip-адрес", "ip", "ip адрес", "ip_address" -> "IP-адрес"
+            "домен", "domain", "сайт", "website", "site" -> "Домен"
+            "утечка", "leak", "breach", "утечки" -> "Утечка"
+            "организация", "org", "company", "organization" -> "Организация"
+            "город", "city" -> "Город"
+            else -> kind.trim()
+        }
+    }
 
     /** Нормализация значения для поиска дубликатов. */
     fun normalize(value: String): String {

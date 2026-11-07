@@ -587,8 +587,9 @@ class SearchEngine(
         ProviderCatalog.all.forEach { spec ->
             if (active.containsKey(spec.id)) Connectors.byId(spec.id)?.let { modules += it }
         }
-        customModules.forEachIndexed { index, (module, key) ->
-            modules += CustomConnector(module, key, "custom${index + 1}")
+        customModules.forEach { (module, key) ->
+            // Стабильный нейтральный слот: не зависит от порядка и не раскрывает сервис.
+            modules += CustomConnector(module, key, "custom_" + module.id.take(8))
         }
         val demo = settings.demoMode
         if (demo) modules += DemoConnector

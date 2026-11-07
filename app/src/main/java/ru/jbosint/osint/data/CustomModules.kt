@@ -17,6 +17,36 @@ import java.util.UUID
  * нейтральным идентификатором [CustomModuleSpec.SOURCE_ID], а отчёт и так
  * показывает только марку «Поиск JB OSINT».
  */
+/**
+ * Единый формат сведений, к которому приводится ответ любого модуля.
+ * Совпадающие [kind] у разных модулей сливаются агрегатором и подтверждают друг друга.
+ */
+enum class FactField(val token: String, val kind: String, val category: FactCategory) {
+    EMAIL("email", "Почта", FactCategory.CONTACT),
+    PHONE("phone", "Телефон", FactCategory.CONTACT),
+    USERNAME("username", "Никнейм", FactCategory.PERSON),
+    FULLNAME("fullname", "Полное имя", FactCategory.PERSON),
+    IP("ip", "IP-адрес", FactCategory.TECHNICAL),
+    DOMAIN("domain", "Домен", FactCategory.TECHNICAL),
+    LEAK("leak", "Утечка", FactCategory.OTHER),
+    OTHER("other", "Сведение", FactCategory.OTHER);
+
+    companion object {
+        fun fromToken(token: String): FactField =
+            entries.firstOrNull { it.token.equals(token, ignoreCase = true) } ?: OTHER
+    }
+}
+
+/**
+ * Правило разбора: JSON-путь в ответе модуля → поле единого формата.
+ * [regex] необязателен: если задан, из значения берётся первая группа совпадения.
+ */
+data class FieldRule(
+    val path: String,
+    val field: FactField = FactField.OTHER,
+    val regex: String = ""
+)
+
 data class CustomModule(
     val id: String,
     val title: String,
@@ -26,7 +56,8 @@ data class CustomModule(
     val paramName: String = "api_key",
     val enabled: Boolean = true,
     val createdAt: Long = 0L,
-    val hasKey: Boolean = false
+    val hasKey: Boolean = false,
+    val fields: List<FieldRule> = emptyList()
 )
 
 enum class CustomAuth(val title: String, val hint: String) {
@@ -57,6 +88,17 @@ object CustomModuleSpec {
         return null
     }
 
+    fun validateRules(rules: List<FieldRule>): String? {
+        if (rules.size > 24) return "Слишком много правил разбора (максимум 24)"
+        rules.forEach { rule ->
+            if (rule.path.isBlank()) return "Укажите путь к полю в ответе"
+            if (rule.regex.isNotBlank() && runCatching { Regex(rule.regex) }.isFailure) {
+                return "Некорректное регулярное выражение: ${rule.regex}"
+            }
+        }
+        return null
+    }
+
     fun buildUrl(module: CustomModule, key: String, query: String): String {
         var url = module.urlTemplate.trim().replace(PLACEHOLDER, Net.urlEncode(query))
         if (module.auth == CustomAuth.PARAM && key.isNotBlank()) {
@@ -82,10 +124,117 @@ object CustomModuleSpec {
     }.getOrDefault(urlTemplate.trim())
 }
 
+/** Приведение значений к единому виду, чтобы совпадения из разных модулей склеивались. */
+object Normalizer {
+
+    fun canonical(field: FactField, raw: String): String {
+        val value = raw.trim().trim('"').replace('\u00A0', ' ')
+        if (value.isEmpty()) return ""
+        return when (field) {
+            FactField.EMAIL -> value.lowercase()
+            FactField.PHONE -> {
+                val digits = value.filter { it.isDigit() }
+                when {
+                    digits.length == 11 && digits.startsWith("8") -> "+7" + digits.drop(1)
+                    digits.length == 10 -> "+7$digits"
+                    digits.length > 11 && digits.startsWith("00") -> "+" + digits.drop(2)
+                    else -> "+" + digits
+                }
+            }
+            FactField.USERNAME -> value.lowercase().trim('@').trimStart('@').ifBlank { value }
+            FactField.DOMAIN -> value.lowercase()
+                .removePrefix("https://").removePrefix("http://")
+                .substringBefore('/').substringBefore('?').removePrefix("www.").trimEnd('.')
+            FactField.IP -> value.lowercase()
+            FactField.FULLNAME -> value.split(Regex("\\s+")).joinToString(" ")
+            FactField.LEAK, FactField.OTHER -> value
+        }
+    }
+}
+
 /**
- * Универсальный разбор ответа произвольного сервиса.
- * Известные ключи переводятся в понятные подписи, остальные остаются как есть —
- * это имена полей, а не названия сервисов, поэтому они безопасны для отчёта.
+ * Простейший JSON-путь: `data.username`, `data.items[0].email`, `.items[].value`.
+ * Пустой сегмент `[]` означает «все элементы массива».
+ */
+object JsonPath {
+
+    fun select(root: Any?, path: String): List<Any?> {
+        val clean = path.trim().removePrefix("$").removePrefix(".")
+        if (clean.isBlank()) return listOf(root)
+        var current: List<Any?> = listOf(root)
+        val segments = clean.split('.')
+        for (segment in segments) {
+            if (segment.isBlank()) continue
+            val name = segment.substringBefore('[')
+            val selectors = Regex("\\[([^\\]]*)]").findAll(segment).map { it.groupValues[1].trim() }.toList()
+            val next = ArrayList<Any?>()
+            for (node in current) {
+                var values: List<Any?> = when (node) {
+                    is JSONObject -> if (name.isBlank()) listOf(node) else listOfNotNull(node.opt(name).takeIf { it != JSONObject.NULL })
+                    is JSONArray -> if (name.isBlank()) listOf(node) else listOfNotNull(
+                        (0 until node.length()).map { node.opt(it) }.firstOrNull { it is JSONObject && it.has(name) }
+                            ?.let { (it as JSONObject).opt(name) }
+                    )
+                    is Map<*, *> -> listOfNotNull(node[name])
+                    is List<*> -> listOf(node)
+                    else -> emptyList()
+                }
+                for (selector in selectors) {
+                    values = values.flatMap { value ->
+                        when (value) {
+                            is JSONArray -> when {
+                                selector.isBlank() -> (0 until value.length()).map { value.opt(it) }
+                                selector == "*" -> (0 until value.length()).map { value.opt(it) }
+                                selector.toIntOrNull() != null -> listOfNotNull(value.opt(selector.toInt()))
+                                else -> emptyList()
+                            }
+                            is Map<*, *> -> when {
+                                selector.isBlank() || selector == "*" -> value.values.toList()
+                                else -> listOfNotNull(value[selector])
+                            }
+                            is List<*> -> when {
+                                selector.isBlank() || selector == "*" -> value
+                                selector.toIntOrNull() != null -> listOfNotNull(value.getOrNull(selector.toInt()))
+                                else -> emptyList()
+                            }
+                            else -> emptyList()
+                        }
+                    }
+                }
+                next.addAll(values)
+            }
+            current = next
+            if (current.isEmpty()) return emptyList()
+        }
+        return current
+    }
+
+    /** Плоские строковые значения по пути — без вложенных объектов и массивов. */
+    fun strings(root: Any?, path: String): List<String> = select(root, path)
+        .flatMap { node ->
+            when (node) {
+                is JSONArray -> (0 until node.length()).mapNotNull { node.opt(it) }
+                else -> listOf(node)
+            }
+        }
+        .mapNotNull { node ->
+            when (node) {
+                null, JSONObject.NULL -> null
+                is JSONObject -> null
+                is JSONArray -> null
+                is String -> node
+                is Number, is Boolean -> node.toString()
+                else -> null
+            }
+        }
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+}
+
+/**
+ * Универсальный разбор ответа: сначала — правила пользователя (JSON-путь + поле +
+ * необязательная регулярка), затем — эвристика по известным именам полей.
+ * Названия сервисов в данные отчёта не попадают: только тип поля и значение.
  */
 object CustomResponseParser {
 
@@ -93,34 +242,74 @@ object CustomResponseParser {
         "data", "results", "items", "response", "hits", "matches", "records", "entries", "list", "docs", "objects"
     )
 
-    private val labels = mapOf(
-        "email" to "Почта", "email_address" to "Почта", "mail" to "Почта",
-        "phone" to "Телефон", "phone_number" to "Телефон", "mobile" to "Телефон",
-        "name" to "Имя", "full_name" to "Имя", "first_name" to "Имя", "last_name" to "Фамилия",
-        "username" to "Никнейм", "login" to "Логин", "nickname" to "Никнейм",
-        "address" to "Адрес", "city" to "Город", "country" to "Страна", "region" to "Регион",
-        "url" to "Ссылка", "link" to "Ссылка", "website" to "Сайт", "domain" to "Домен",
-        "ip" to "IP-адрес", "ip_address" to "IP-адрес",
-        "company" to "Организация", "organization" to "Организация", "org" to "Организация",
-        "position" to "Должность", "title" to "Наименование", "id" to "Идентификатор",
-        "created_at" to "Создано", "date" to "Дата", "description" to "Описание"
+    private val heuristic = mapOf(
+        "email" to FactField.EMAIL, "email_address" to FactField.EMAIL, "mail" to FactField.EMAIL,
+        "phone" to FactField.PHONE, "phone_number" to FactField.PHONE, "mobile" to FactField.PHONE,
+        "username" to FactField.USERNAME, "login" to FactField.USERNAME, "nickname" to FactField.USERNAME,
+        "name" to FactField.FULLNAME, "full_name" to FactField.FULLNAME,
+        "ip" to FactField.IP, "ip_address" to FactField.IP,
+        "domain" to FactField.DOMAIN, "website" to FactField.DOMAIN, "site" to FactField.DOMAIN,
+        "breach" to FactField.LEAK, "leak" to FactField.LEAK, "breaches" to FactField.LEAK
     )
 
-    fun parse(json: JSONObject, query: String, maxFacts: Int = 24): List<RawFact> {
+    fun parse(
+        json: JSONObject,
+        query: String,
+        sourceKey: String,
+        rules: List<FieldRule> = emptyList(),
+        maxFacts: Int = 24
+    ): List<RawFact> {
+        if (rules.isNotEmpty()) return parseByRules(json, query, sourceKey, rules, maxFacts)
+        return parseHeuristic(json, query, sourceKey, maxFacts)
+    }
+
+    private fun parseByRules(
+        json: JSONObject,
+        query: String,
+        sourceKey: String,
+        rules: List<FieldRule>,
+        maxFacts: Int
+    ): List<RawFact> {
+        val facts = ArrayList<RawFact>()
+        rules.forEach { rule ->
+            if (facts.size >= maxFacts) return@forEach
+            val regex = rule.regex.takeIf { it.isNotBlank() }?.let { runCatching { Regex(it) }.getOrNull() }
+            JsonPath.strings(json, rule.path).forEach { raw ->
+                val extracted = if (regex == null) raw else {
+                    val match = regex.find(raw) ?: return@forEach
+                    match.groupValues.getOrNull(1)?.takeIf { it.isNotBlank() } ?: match.value
+                }
+                val value = Normalizer.canonical(rule.field, extracted)
+                if (value.isNotBlank()) {
+                    facts += RawFact(
+                        category = rule.field.category,
+                        kind = rule.field.kind,
+                        value = value.take(200),
+                        subject = query,
+                        attributes = emptyMap(),
+                        sourceId = sourceKey
+                    )
+                }
+            }
+        }
+        return facts.distinctBy { it.kind + "|" + it.value }
+    }
+
+    private fun parseHeuristic(json: JSONObject, query: String, sourceKey: String, maxFacts: Int): List<RawFact> {
         val facts = ArrayList<RawFact>()
         val array = findArray(json, 0)
         if (array != null) {
             for (i in 0 until minOf(array.length(), 8)) {
                 if (facts.size >= maxFacts) break
                 when (val item = array.opt(i)) {
-                    is JSONObject -> collectObject(item, query, facts, maxFacts, 5)
-                    is JSONArray -> collectArray(item, query, facts, maxFacts)
+                    is JSONObject -> collectObject(item, query, sourceKey, facts, maxFacts, 5)
+                    is JSONArray -> collectArray(item, query, sourceKey, facts, maxFacts)
                     null -> Unit
-                    else -> addFact(facts, "Запись", item.toString().take(180), query)
+                    else -> addFact(facts, FactField.OTHER, item.toString().take(180), query, sourceKey)
                 }
             }
         }
-        if (facts.isEmpty()) collectObject(json, query, facts, maxFacts, 8)
+        if (facts.isEmpty()) collectObject(json, query, sourceKey, facts, maxFacts, 8)
         return facts.distinctBy { it.kind + "|" + it.value }
     }
 
@@ -129,7 +318,6 @@ object CustomResponseParser {
         arrayKeys.forEach { keyName ->
             node.optJSONArray(keyName)?.let { if (it.length() > 0) return it }
         }
-        // Вложенные контейнеры: data → items, response → results и т.п.
         node.keys().forEach { keyName ->
             val child = node.optJSONObject(keyName) ?: return@forEach
             findArray(child, depth + 1)?.let { return it }
@@ -140,6 +328,7 @@ object CustomResponseParser {
     private fun collectObject(
         node: JSONObject,
         query: String,
+        sourceKey: String,
         facts: MutableList<RawFact>,
         maxFacts: Int,
         maxFields: Int
@@ -150,51 +339,43 @@ object CustomResponseParser {
             when (val value = node.opt(rawKey)) {
                 null, JSONObject.NULL -> Unit
                 is JSONObject -> Unit
-                is JSONArray -> collectArray(value, query, facts, maxFacts)
+                is JSONArray -> collectArray(value, query, sourceKey, facts, maxFacts)
                 else -> {
-                    val text = value.toString().trim()
-                    if (text.isEmpty()) return@forEach
-                    addFact(facts, kindOf(rawKey), text.take(200), query)
+                    val field = heuristic[rawKey.lowercase()]
+                        ?: if (rawKey.contains("url", true) || rawKey.contains("link", true)) FactField.DOMAIN else FactField.OTHER
+                    addFact(facts, field, value.toString(), query, sourceKey)
                     fields++
                 }
             }
         }
     }
 
-    private fun collectArray(array: JSONArray, query: String, facts: MutableList<RawFact>, maxFacts: Int) {
+    private fun collectArray(array: JSONArray, query: String, sourceKey: String, facts: MutableList<RawFact>, maxFacts: Int) {
         for (i in 0 until minOf(array.length(), 6)) {
             val value = array.opt(i) ?: continue
             if (value is JSONObject || value is JSONArray) continue
-            val text = value.toString().trim()
-            if (text.isNotEmpty()) addFact(facts, "Запись", text.take(200), query)
+            addFact(facts, FactField.OTHER, value.toString(), query, sourceKey)
             if (facts.size >= maxFacts) return
         }
     }
 
-    private fun addFact(facts: MutableList<RawFact>, kind: String, value: String, query: String) {
+    private fun addFact(
+        facts: MutableList<RawFact>,
+        field: FactField,
+        raw: String,
+        query: String,
+        sourceKey: String
+    ) {
+        val value = Normalizer.canonical(field, raw)
         if (value.isBlank()) return
-        val category = when {
-            kind == "Ссылка" || kind == "Сайт" || kind == "Домен" || kind == "IP-адрес" -> FactCategory.TECHNICAL
-            kind == "Почта" || kind == "Телефон" -> FactCategory.CONTACT
-            kind == "Имя" || kind == "Фамилия" || kind == "Никнейм" || kind == "Логин" -> FactCategory.PERSON
-            kind == "Адрес" || kind == "Город" || kind == "Страна" || kind == "Регион" -> FactCategory.LOCATION
-            kind == "Организация" || kind == "Должность" -> FactCategory.ORGANIZATION
-            else -> FactCategory.OTHER
-        }
         facts += RawFact(
-            category = category,
-            kind = kind,
-            value = value,
+            category = field.category,
+            kind = field.kind,
+            value = value.take(200),
             subject = query,
             attributes = emptyMap(),
-            sourceId = CustomModuleSpec.SOURCE_ID
+            sourceId = sourceKey
         )
-    }
-
-    private fun kindOf(rawKey: String): String {
-        val key = rawKey.lowercase()
-        labels[key]?.let { return it }
-        return if (key.startsWith("http") || rawKey.contains("url", true)) "Ссылка" else rawKey
     }
 }
 
@@ -214,7 +395,7 @@ class CustomConnector(
         val response = Net.fetch(url, CustomModuleSpec.headers(module, key))
         if (!response.ok) return emptyList()
         val json = runCatching { JSONObject(response.body) }.getOrNull() ?: return emptyList()
-        return CustomResponseParser.parse(json, query).map { it.copy(sourceId = sourceKey) }
+        return CustomResponseParser.parse(json, query, sourceKey, module.fields)
     }
 }
 
@@ -223,7 +404,7 @@ class CustomModuleChecker(private val store: CustomModuleStore) {
 
     suspend fun check(module: CustomModule): KeyCheck = withContext(Dispatchers.IO) {
         val error = CustomModuleSpec.validate(module.title, module.urlTemplate)
-        if (error != null) return@withContext KeyCheck(KeyState.INVALID, error)
+        if (error != null) return@withContext KeyCheck(KeyState.INVALID, "Ошибка настроек: $error")
         val key = store.key(module.id)
         if (module.auth != CustomAuth.NONE && key.isBlank()) {
             return@withContext KeyCheck(KeyState.EMPTY, "Ключ не задан")
@@ -231,16 +412,28 @@ class CustomModuleChecker(private val store: CustomModuleStore) {
         runCatching {
             val url = CustomModuleSpec.buildUrl(module, key, "osint")
             val response = Net.fetch(url, CustomModuleSpec.headers(module, key), attempts = 1)
+            val code = response.code
             when {
-                response.code in 200..299 -> KeyCheck(KeyState.VALID, "Модуль ответил, ключ принят")
-                response.code == 401 || response.code == 403 -> KeyCheck(KeyState.INVALID, "Ключ отклонён (${response.code})")
-                response.code == 404 || response.code == 400 -> KeyCheck(KeyState.VALID, "Адрес доступен (${response.code})")
-                response.code == 429 -> KeyCheck(KeyState.VALID, "Ключ активен, лимит запросов")
-                else -> KeyCheck(KeyState.INVALID, "Ответ сервиса ${response.code}")
+                code in 200..299 -> KeyCheck(KeyState.VALID, "Модуль отвечает")
+                code == 401 -> KeyCheck(KeyState.INVALID, "Ошибка 401: Unauthorized — ключ отклонён")
+                code == 403 -> KeyCheck(KeyState.INVALID, "Ошибка 403: Forbidden — доступ запрещён")
+                code == 404 -> KeyCheck(KeyState.INVALID, "Ошибка 404: Not Found — адрес не найден")
+                code == 400 -> KeyCheck(KeyState.INVALID, "Ошибка 400: Bad Request — проверьте шаблон адреса")
+                code == 429 -> KeyCheck(KeyState.VALID, "Модуль отвечает (429: превышен лимит запросов)")
+                code in 500..599 -> KeyCheck(KeyState.INVALID, "Ошибка $code: ${reason(code)} — сервер недоступен")
+                else -> KeyCheck(KeyState.VALID, "Модуль отвечает (код $code)")
             }
         }.getOrElse {
-            KeyCheck(KeyState.OFFLINE, "Нет соединения с модулем")
+            KeyCheck(KeyState.OFFLINE, "Нет соединения")
         }
+    }
+
+    private fun reason(code: Int): String = when (code) {
+        500 -> "Internal Server Error"
+        502 -> "Bad Gateway"
+        503 -> "Service Unavailable"
+        504 -> "Gateway Timeout"
+        else -> "Server Error"
     }
 }
 
@@ -307,6 +500,14 @@ class CustomModuleStore(context: Context) {
         .put("param", module.paramName)
         .put("enabled", module.enabled)
         .put("created", module.createdAt)
+        .put("fields", JSONArray().apply {
+            module.fields.forEach { rule ->
+                put(JSONObject()
+                    .put("path", rule.path)
+                    .put("field", rule.field.token)
+                    .put("regex", rule.regex))
+            }
+        })
         .toString()
 
     private fun decode(json: String): CustomModule? = runCatching {
@@ -321,7 +522,17 @@ class CustomModuleStore(context: Context) {
             paramName = root.optString("param", "api_key"),
             enabled = root.optBoolean("enabled", true),
             createdAt = root.optLong("created"),
-            hasKey = key(id).isNotBlank()
+            hasKey = key(id).isNotBlank(),
+            fields = root.optJSONArray("fields")?.let { array ->
+                (0 until array.length()).mapNotNull { index ->
+                    val item = array.optJSONObject(index) ?: return@mapNotNull null
+                    FieldRule(
+                        path = item.optString("path"),
+                        field = FactField.fromToken(item.optString("field")),
+                        regex = item.optString("regex")
+                    )
+                }
+            }.orEmpty()
         )
     }.getOrNull()
 }

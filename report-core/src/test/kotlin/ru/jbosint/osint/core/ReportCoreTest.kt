@@ -181,3 +181,43 @@ class ReportExportTest {
         assertFalse(name.contains("/"))
     }
 }
+
+
+class CrossSourceConfirmationTest {
+
+    private fun raw(kind: String, value: String, source: String) = RawFact(
+        category = FactCategory.PERSON,
+        kind = kind,
+        value = value,
+        subject = "Иван Петров",
+        sourceId = source
+    )
+
+    @Test
+    fun differentKindNamesConfirmEachOther() {
+        val data = Aggregator.aggregate(
+            "Иван Петров",
+            listOf(
+                raw("Профиль", "ivan_p", "s1"),
+                raw("Никнейм", "ivan_p", "s2"),
+                raw("ЛОГИН", "ivan_p", "s3")
+            ),
+            SearchStats(sourcesAttempted = 3, sourcesResponded = 3)
+        )
+        val fact = data.facts.single()
+        assertEquals("Профиль", fact.kind)
+        assertEquals(3, fact.sourceCount)
+        assertEquals(Confidence.CONFIRMED, fact.confidence)
+    }
+
+    @Test
+    fun kindSynonymsMapToSingleNames() {
+        assertEquals("Почта", Aggregator.canonicalKind("email"))
+        assertEquals("Телефон", Aggregator.canonicalKind("phone"))
+        assertEquals("Полное имя", Aggregator.canonicalKind("fullname"))
+        assertEquals("IP-адрес", Aggregator.canonicalKind("ip"))
+        assertEquals("Домен", Aggregator.canonicalKind("domain"))
+        assertEquals("Утечка", Aggregator.canonicalKind("breach"))
+        assertEquals("Нестандартное", Aggregator.canonicalKind("Нестандартное"))
+    }
+}
