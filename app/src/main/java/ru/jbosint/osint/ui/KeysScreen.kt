@@ -224,8 +224,17 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
 
     if (editorOpen) {
         CustomModuleDialog(
-            initial = editing,
-            onDismiss = { editorOpen = false },
+            initial = state.manualDraft ?: editing,
+            initialKey = state.manualKey,
+            startInQuick = state.manualDraft == null && editing == null,
+            onDismiss = {
+                editorOpen = false
+                vm.clearManualDraft()
+            },
+            onQuick = { title, key, link ->
+                editorOpen = false
+                vm.createModuleQuick(title, key, link)
+            },
             onSave = { title, url, auth, header, param, key, rules, method ->
                 vm.saveCustomModule(
                     id = editing?.id.orEmpty(),
@@ -241,6 +250,81 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                 editorOpen = false
             }
         )
+    }
+
+    state.autoSetup?.let { auto ->
+        if (auto.running) {
+            AlertDialog(
+                onDismissRequest = { vm.cancelAutoSetup() },
+                containerColor = JbSurface,
+                title = {
+                    Text(
+                        "Быстрая настройка",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = JbText
+                    )
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        CircularProgressIndicator(color = JbAccent, modifier = Modifier.size(28.dp))
+                        Text(
+                            auto.stage.ifBlank { "Определяем способ подключения…" },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = JbMuted
+                        )
+                        Text(
+                            "Приложение пробует адреса и способы передачи ключа: GET и POST, Bearer, X-Api-Key, параметр адреса, JSON-тело. Это занимает меньше минуты.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = JbFaint
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { vm.cancelAutoSetup() }) {
+                        Text("Отмена", color = JbMuted)
+                    }
+                }
+            )
+        } else if (auto.failed) {
+            AlertDialog(
+                onDismissRequest = { vm.cancelAutoSetup() },
+                containerColor = JbSurface,
+                title = {
+                    Text(
+                        "Не удалось настроить автоматически",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = JbText
+                    )
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            auto.stage,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = JbMuted
+                        )
+                        Text(
+                            "Проверьте, что ключ действителен, а ссылка ведёт на страницу сервиса. Можно повторить подбор (продолжатся другие комбинации) или задать адрес вручную — самый вероятный вариант уже подставлен.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = JbFaint
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { vm.retryAutoSetup() }) {
+                        Text("Повторить автонастройку", color = JbAccent2)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        vm.openManualAfterAuto()
+                        editorOpen = true
+                    }) {
+                        Text("Ручная настройка", color = JbMuted)
+                    }
+                }
+            )
+        }
     }
 
     if (state.diagRunning) {
@@ -574,15 +658,20 @@ private fun CustomModuleCard(
 @Composable
 private fun CustomModuleDialog(
     initial: CustomModule?,
+    initialKey: String = "",
+    startInQuick: Boolean,
     onDismiss: () -> Unit,
+    onQuick: (String, String, String) -> Unit,
     onSave: (String, String, CustomAuth, String, String, String?, List<FieldRule>, String) -> Unit
 ) {
+    var quick by remember { mutableStateOf(startInQuick) }
+    var sourceLink by remember { mutableStateOf("") }
     var title by remember { mutableStateOf(initial?.title.orEmpty()) }
     var url by remember { mutableStateOf(initial?.urlTemplate.orEmpty()) }
     var auth by remember { mutableStateOf(initial?.auth ?: CustomAuth.AUTO) }
     var header by remember { mutableStateOf(initial?.headerName ?: "X-API-Key") }
     var param by remember { mutableStateOf(initial?.paramName ?: "api_key") }
-    var key by remember { mutableStateOf("") }
+    var key by remember { mutableStateOf(initialKey) }
     var revealed by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val hasStoredKey = initial?.hasKey == true
@@ -595,7 +684,11 @@ private fun CustomModuleDialog(
         containerColor = JbSurface,
         title = {
             Text(
-                if (initial == null) "Новый модуль" else "Модуль: ${initial.title}",
+                when {
+                    initial != null -> "Модуль: ${initial.title}"
+                    quick -> "Новый модуль · быстрая настройка"
+                    else -> "Новый модуль"
+                },
                 style = MaterialTheme.typography.titleMedium,
                 color = JbText,
                 maxLines = 1
@@ -606,6 +699,91 @@ private fun CustomModuleDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                if (initial == null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(JbSurfaceHigh)
+                            .clickable { quick = !quick }
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        androidx.compose.material3.Checkbox(
+                            checked = quick,
+                            onCheckedChange = { quick = it },
+                            colors = androidx.compose.material3.CheckboxDefaults.colors(
+                                checkedColor = JbAccent,
+                                uncheckedColor = JbFaint
+                            )
+                        )
+                        Column {
+                            Text(
+                                "Режим быстрой настройки",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = JbText
+                            )
+                            Text(
+                                "Приложение само определит адрес, метод и способ передачи ключа",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = JbFaint
+                            )
+                        }
+                    }
+                }
+
+                if (quick && initial == null) {
+                    OutlinedTextField(
+                        value = title,
+                        onValueChange = { title = it.take(CustomModuleSpec.MAX_TITLE) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Название модуля", color = JbFaint) },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = fieldColors(),
+                        textStyle = MaterialTheme.typography.bodyMedium
+                    )
+                    OutlinedTextField(
+                        value = sourceLink,
+                        onValueChange = { sourceLink = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Ссылка на источник (сайт или @бот)", color = JbFaint) },
+                        placeholder = { Text("https://service.com или @telesint_bot", color = JbFaint, style = MaterialTheme.typography.labelSmall) },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = fieldColors(),
+                        textStyle = MaterialTheme.typography.bodySmall
+                    )
+                    OutlinedTextField(
+                        value = key,
+                        onValueChange = { key = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("API-ключ", color = JbFaint) },
+                        placeholder = { Text("вставьте ключ сервиса", color = JbFaint, style = MaterialTheme.typography.labelSmall) },
+                        visualTransformation = if (revealed) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { revealed = !revealed }) {
+                                Icon(
+                                    if (revealed) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                    contentDescription = null,
+                                    tint = JbFaint
+                                )
+                            }
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = fieldColors(),
+                        textStyle = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        "Кнопка «Создать» запустит автоподбор: приложение изучит страницу сервиса, попробует стандартные эндпоинты поиска и способы передачи ключа (Bearer, X-Api-Key, параметр адреса, JSON-тело). Название видно только вам.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = JbFaint
+                    )
+                    error?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = JbRed) }
+                }
+
+                if (!quick || initial != null) {
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it.take(CustomModuleSpec.MAX_TITLE) },
@@ -799,9 +977,28 @@ private fun CustomModuleDialog(
                 error?.let {
                     Text(it, style = MaterialTheme.typography.labelSmall, color = JbRed)
                 }
+                }
+
+                if (quick && initial == null) Unit
             }
         },
         confirmButton = {
+            if (quick && initial == null) {
+                TextButton(onClick = {
+                    when {
+                        title.isBlank() -> error = "Укажите название модуля"
+                        key.isBlank() -> error = "Укажите API-ключ"
+                        ru.jbosint.osint.data.SourceLink.parse(sourceLink) == null ->
+                            error = "Укажите ссылку на сайт или Telegram-бота сервиса"
+                        else -> {
+                            error = null
+                            onQuick(title.trim(), key, sourceLink.trim())
+                        }
+                    }
+                }) {
+                    Text("Создать", color = JbAccent2)
+                }
+            } else {
             TextButton(onClick = {
                 val problem = CustomModuleSpec.validate(title, url)
                     ?: CustomModuleSpec.validateRules(rules.toList())
@@ -818,6 +1015,7 @@ private fun CustomModuleDialog(
                 }
             }) {
                 Text("Сохранить", color = JbAccent2)
+            }
             }
         },
         dismissButton = {

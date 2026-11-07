@@ -66,6 +66,7 @@ enum class CustomAuth(val title: String, val hint: String) {
     BEARER("Bearer-заголовок", "Authorization: Bearer <ключ>"),
     HEADER("Свой заголовок", "например, X-API-Key: <ключ>"),
     PARAM("Параметр адреса", "ключ добавляется в URL, например ?api_key=<ключ>"),
+    JSON_BODY("JSON-тело запроса", "POST с телом {\"key\": \"<ключ>\"}"),
     NONE("Без ключа", "модуль без авторизации")
 }
 
@@ -116,7 +117,7 @@ object CustomModuleSpec {
         CustomAuth.HEADER ->
             if (key.isBlank()) emptyMap()
             else mapOf(module.headerName.trim().ifBlank { "X-API-Key" } to key)
-        CustomAuth.PARAM, CustomAuth.NONE, CustomAuth.AUTO -> emptyMap()
+        CustomAuth.PARAM, CustomAuth.NONE, CustomAuth.AUTO, CustomAuth.JSON_BODY -> emptyMap()
     }
 
     /** Хост для карточки модуля — название сервиса аналитик видит только у себя. */
@@ -430,7 +431,10 @@ class CustomConnector(
         if (CustomModuleSpec.validate(module.title, module.urlTemplate) != null) return emptyList()
         if (module.auth != CustomAuth.NONE && key.isBlank()) return emptyList()
         val url = CustomModuleSpec.buildUrl(module, key, query)
-        val response = Net.fetch(url, CustomModuleSpec.headers(module, key), method = module.method)
+        val body = if (module.auth == CustomAuth.JSON_BODY && key.isNotBlank()) {
+            JSONObject().put(module.paramName.trim().ifBlank { "key" }, key).toString()
+        } else null
+        val response = Net.fetch(url, CustomModuleSpec.headers(module, key), method = module.method, body = body)
         if (!response.ok) return emptyList()
         val json = runCatching { JSONObject(response.body) }.getOrNull() ?: return emptyList()
         return CustomResponseParser.parse(json, query, sourceKey, module.fields)
@@ -468,6 +472,13 @@ class CustomConnectionProbe {
         CustomAuth.PARAM
     )
 
+    private val postTransports: List<CustomAuth> = listOf(
+        CustomAuth.JSON_BODY,
+        CustomAuth.BEARER,
+        CustomAuth.HEADER,
+        CustomAuth.PARAM
+    )
+
     suspend fun detect(module: CustomModule, key: String): Result = withContext(Dispatchers.IO) {
         val candidates = if (key.isBlank()) listOf(CustomAuth.NONE) else transports
         val attempts = ArrayList<Attempt>()
@@ -475,7 +486,7 @@ class CustomConnectionProbe {
 
         for (method in listOf("GET", "POST")) {
             var rejected: Attempt? = null
-            for (auth in candidates) {
+            for (auth in if (method == "POST" && key.isNotBlank()) postTransports else candidates) {
                 if (networkError) break
                 val variant = module.copy(auth = auth, method = method)
                 val url = CustomModuleSpec.buildUrl(variant, key, "osint")

@@ -22,7 +22,10 @@ import ru.jbosint.osint.data.CustomAuth
 import ru.jbosint.osint.data.CustomConnectionProbe
 import ru.jbosint.osint.data.CustomModule
 import ru.jbosint.osint.data.CustomModuleChecker
+import ru.jbosint.osint.data.AutoSetup
 import ru.jbosint.osint.data.Connectors
+import ru.jbosint.osint.data.DocHints
+import ru.jbosint.osint.data.SourceLink
 import ru.jbosint.osint.data.CustomModuleSpec
 import ru.jbosint.osint.data.CustomModuleStore
 import ru.jbosint.osint.data.CustomResponseParser
@@ -46,6 +49,19 @@ import ru.jbosint.osint.data.SettingsStore
 import ru.jbosint.osint.report.ReportExporter
 
 enum class Screen { HOME, RESULTS, KEYS, SETTINGS }
+
+/** Состояние быстрой настройки модуля: прогресс или предложение ручной настройки. */
+data class AutoSetupUi(
+    val running: Boolean,
+    val stage: String,
+    val failed: Boolean,
+    val title: String,
+    val key: String,
+    val link: String,
+    val skip: Int = 0,
+    val suggested: CustomModule? = null,
+    val hints: DocHints = DocHints()
+)
 
 data class ProviderUi(
     val spec: ProviderSpec,
@@ -95,6 +111,9 @@ data class UiState(
     val exporting: Boolean = false,
     val diagRunning: Boolean = false,
     val diagReport: String? = null,
+    val autoSetup: AutoSetupUi? = null,
+    val manualDraft: CustomModule? = null,
+    val manualKey: String = "",
     val toast: String? = null
 ) {
     val activeModules: Int
@@ -352,6 +371,104 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             _state.value.providers.filter { it.hasKey && !it.checking }.forEach { provider ->
                 checkKey(provider.spec.id)
             }
+        }
+    }
+
+    // ------------------------------------------------------- быстрая настройка
+
+    /** Быстрый режим: только название, ключ и ссылка на сервис — остальное подбирает приложение. */
+    fun createModuleQuick(title: String, key: String, link: String) {
+        if (_state.value.autoSetup?.running == true) return
+        val cleanTitle = title.trim()
+        if (cleanTitle.isBlank()) { notify("Укажите название модуля"); return }
+        if (cleanTitle.length > CustomModuleSpec.MAX_TITLE) { notify("Название длиннее ${CustomModuleSpec.MAX_TITLE} символов"); return }
+        if (key.isBlank()) { notify("Укажите API-ключ"); return }
+        val source = SourceLink.parse(link)
+        if (source == null) { notify("Укажите ссылку на сайт сервиса или его Telegram-бота"); return }
+        _state.update {
+            it.copy(
+                autoSetup = AutoSetupUi(
+                    running = true, stage = "Изучаем ${source.display}…",
+                    failed = false, title = cleanTitle, key = key, link = link.trim()
+                )
+            )
+        }
+        viewModelScope.launch {
+            val hints = runCatching { AutoSetup.fetchHints(source) }.getOrDefault(DocHints())
+            _state.update { it.copy(autoSetup = it.autoSetup?.copy(stage = "Подбираем способ подключения…", hints = hints)) }
+            val outcome = AutoSetup.detect(source, key, hints, skip = _state.value.autoSetup?.skip ?: 0)
+            applyAutoOutcome(cleanTitle, key, outcome)
+        }
+    }
+
+    fun retryAutoSetup() {
+        val ui = _state.value.autoSetup ?: return
+        _state.update { it.copy(autoSetup = ui.copy(running = true, stage = "Пробуем оставшиеся варианты…", failed = false)) }
+        viewModelScope.launch {
+            val source = SourceLink.parse(ui.link) ?: return@launch
+            val outcome = AutoSetup.detect(source, ui.key, ui.hints, skip = ui.skip)
+            applyAutoOutcome(ui.title, ui.key, outcome)
+        }
+    }
+
+    fun openManualAfterAuto() {
+        val ui = _state.value.autoSetup ?: return
+        _state.update {
+            it.copy(
+                autoSetup = null,
+                manualKey = ui.key,
+                manualDraft = ui.suggested ?: CustomModule(
+                    id = "", title = ui.title, urlTemplate = "",
+                    auth = CustomAuth.AUTO, enabled = true, hasKey = false
+                )
+            )
+        }
+    }
+
+    fun clearManualDraft() = _state.update { it.copy(manualDraft = null, manualKey = "") }
+
+    fun cancelAutoSetup() = _state.update { it.copy(autoSetup = null) }
+
+    private fun applyAutoOutcome(title: String, key: String, outcome: AutoSetup.Outcome) {
+        if (_state.value.autoSetup == null) return
+        val setup = outcome.setup
+        if (outcome.fixed && setup != null && !outcome.urlTemplate.isNullOrBlank()) {
+            val module = CustomModule(
+                id = java.util.UUID.randomUUID().toString(),
+                title = title,
+                urlTemplate = outcome.urlTemplate,
+                auth = setup.auth,
+                method = setup.method,
+                headerName = setup.headerName.ifBlank { "X-API-Key" },
+                paramName = setup.paramName.ifBlank { "api_key" },
+                enabled = true,
+                createdAt = System.currentTimeMillis(),
+                hasKey = true
+            )
+            customStore.save(module, key)
+            refreshCustom()
+            _state.update {
+                it.copy(
+                    autoSetup = null,
+                    toast = if (outcome.strict) "Модуль настроен! Можно начинать поиск"
+                    else "Адрес найден, но ключ отклонён (${outcome.code}) — проверьте ключ"
+                )
+            }
+            if (outcome.strict) checkCustomModule(module.id)
+        } else {
+            val host = SourceLink.parse(_state.value.autoSetup?.link.orEmpty())?.host ?: ""
+            val suggested = CustomModule(
+                id = "",
+                title = title,
+                urlTemplate = outcome.urlTemplate ?: "https://$host/search?q=${CustomModuleSpec.PLACEHOLDER}",
+                auth = setup?.auth ?: CustomAuth.AUTO,
+                method = setup?.method ?: "GET",
+                headerName = setup?.headerName?.ifBlank { "X-API-Key" } ?: "X-API-Key",
+                paramName = setup?.paramName?.ifBlank { "api_key" } ?: "api_key",
+                enabled = true,
+                hasKey = false
+            )
+            _state.update { it.copy(autoSetup = it.autoSetup?.copy(running = false, failed = true, skip = outcome.attempts, suggested = suggested)) }
         }
     }
 

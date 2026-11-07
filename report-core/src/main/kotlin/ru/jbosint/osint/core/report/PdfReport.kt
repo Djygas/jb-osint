@@ -98,7 +98,10 @@ class PdfReport(
     fun build(): ByteArray {
         titlePage()
         methodology()
+        summarySection()
         linksSection()
+        leaksSection()
+        telegramSection()
         factsSection()
         confidenceSection()
         limitationsSection()
@@ -237,7 +240,7 @@ class PdfReport(
         p("Проведено сопоставление атрибутов между объектами исследования. Выявлены пересечения, при которых " +
             "один и тот же идентификатор — адрес электронной почты, номер, домен, никнейм или иное значение — " +
             "встречается у нескольких субъектов. Такие пересечения формируют связи, визуализированные и " +
-            "перечисленные в разделе 2. Пересечение, обнаруженное в двух и более источниках, рассматривается " +
+            "перечисленные в разделе 3. Пересечение, обнаруженное в двух и более источниках, рассматривается " +
             "как устойчивая связь.")
 
         h2("1.4. Анализ метаданных")
@@ -294,11 +297,219 @@ class PdfReport(
         }
     }
 
+
+    // ------------------------------------------------------- сводная информация
+
+    private fun summarySection() {
+        newContentPage("Сводная информация")
+        h1("2. Сводная информация")
+        p("Раздел содержит краткий профиль объекта исследования: ключевые атрибуты, распределение объектов " +
+            "и общую картину подтверждённости сведений. Он предназначен для быстрого ознакомления; " +
+            "подробные данные приведены в реестре (раздел 6).")
+
+        if (data.facts.isEmpty()) {
+            callout("Сводка недоступна: по запросу «${data.query}» не получено сведений. Проверьте активность " +
+                "модулей сбора и повторите поиск.")
+            return
+        }
+
+        val order = listOf("Полное имя", "Никнейм", "Почта", "Телефон", "Организация", "IP-адрес", "Домен", "Ссылка")
+        val keyFacts = order.mapNotNull { kind ->
+            data.facts.filter { it.kind.equals(kind, ignoreCase = true) }
+                .maxByOrNull { it.sourceCount }
+        }.take(8)
+
+        label("КЛЮЧЕВЫЕ АТРИБУТЫ")
+        gap(4f)
+        table(
+            columns = listOf(
+                Column("Атрибут", 92f),
+                Column("Значение", 190f),
+                Column("Субъект", contentW - 92f - 190f - 76f),
+                Column("Достоверность", 76f)
+            ),
+            rows = keyFacts.map {
+                listOf(it.kind, it.value, it.subject.ifBlank { "—" }, "● ${it.confidence.title}")
+            },
+            cellColors = { row, col -> if (col == 3) Palette.forConfidence(keyFacts[row].confidence) else null }
+        )
+
+        gap(14f)
+        val confirmed = data.facts.count { it.confidence == Confidence.CONFIRMED }
+        val unverified = data.facts.count { it.confidence == Confidence.UNVERIFIED }
+        h2("2.1. Общая картина")
+        table(
+            columns = listOf(
+                Column("Показатель", contentW - 90f),
+                Column("Значение", 90f, Align.RIGHT)
+            ),
+            rows = listOf(
+                listOf("Объектов (субъектов) в выборке", data.subjects.size.toString()),
+                listOf("Установленных сведений", data.facts.size.toString()),
+                listOf("Подтверждено независимо", confirmed.toString()),
+                listOf("Требует проверки", unverified.toString()),
+                listOf("Связей между объектами", data.links.size.toString())
+            )
+        )
+
+        if (data.subjects.isNotEmpty()) {
+            gap(12f)
+            h2("2.2. Объекты исследования")
+            data.subjects.take(8).forEach { subject ->
+                val count = data.facts.count { it.subject == subject }
+                bullet("${subject.take(70)} — ${count} сведений")
+            }
+        }
+    }
+
+    // -------------------------------------------------------------- утечки
+
+    private fun leakFacts(): List<Fact> = data.facts.filter {
+        val kind = it.kind.lowercase()
+        kind.contains("утеч") || kind.contains("leak") || kind.contains("breach") ||
+            kind.contains("пароль") || kind.contains("компром")
+    }
+
+    private fun leaksSection() {
+        newContentPage("Анализ утечек")
+        h1("4. Анализ утечек и компрометации")
+        p("Раздел обобщает сведения о попадании объекта в публичные базы утечек. Отсутствие записей не " +
+            "гарантирует отсутствие компрометации: учитываются только те базы, к которым был доступ у " +
+            "подключённых модулей сбора.")
+
+        val leaks = leakFacts()
+        if (leaks.isEmpty()) {
+            gap(4f)
+            callout("Следы компрометации в доступных базах не обнаружены. Рекомендуется проверить, что модули " +
+                "поиска утечек активны, и повторить запрос позднее.")
+            return
+        }
+
+        val records = leaks.sumOf { it.attributes["Записей"]?.toLongOrNull() ?: 0L }
+        val confirmed = leaks.count { it.confidence != Confidence.UNVERIFIED }
+        val dataClasses = leaks.mapNotNull { it.attributes["Данные"]?.takeIf { d -> d.isNotBlank() } }
+            .flatMap { it.split(',', ';').map { part -> part.trim() } }
+            .filter { it.isNotEmpty() }
+            .distinct()
+
+        label("НАЙДЕННЫЕ ИНЦИДЕНТЫ (${leaks.size})")
+        gap(4f)
+        table(
+            columns = listOf(
+                Column("№", 20f),
+                Column("Источник утечки", 128f),
+                Column("Дата", 56f),
+                Column("Домен", contentW - 20f - 128f - 56f - 92f - 52f),
+                Column("Скомпрометировано", 92f),
+                Column("Записей", 52f, Align.RIGHT)
+            ),
+            rows = leaks.take(40).mapIndexed { i, f ->
+                listOf(
+                    (i + 1).toString(),
+                    f.value.take(70),
+                    f.attributes["Дата"].orEmpty().ifBlank { "—" },
+                    f.attributes["Домен"].orEmpty().ifBlank { "—" },
+                    f.attributes["Данные"].orEmpty().ifBlank { "—" }.take(48),
+                    f.attributes["Записей"].orEmpty().ifBlank { "—" }
+                )
+            }
+        )
+
+        gap(14f)
+        h2("4.1. Оценка риска")
+        val level = when {
+            confirmed >= 2 || leaks.size >= 3 -> "ВЫСОКИЙ"
+            confirmed == 1 || leaks.size == 2 -> "СРЕДНИЙ"
+            else -> "НИЗКИЙ"
+        }
+        callout("Уровень риска: $level. Инцидентов в доступных базах: ${leaks.size}, из них подтверждено " +
+            "независимо: $confirmed." +
+            if (records > 0) " Суммарный объём затронутых записей: $records." else "")
+        bullet("Затронутые категории данных: " +
+            (if (dataClasses.isEmpty()) "не конкретизированы в ответах модулей."
+            else dataClasses.take(10).joinToString(", ") + "."))
+        bullet("Подтверждение в двух и более наблюдениях повышает достоверность инцидента; единичное " +
+            "упоминание следует перепроверить по первичному источнику.")
+
+        gap(8f)
+        h2("4.2. Рекомендации по снижению риска")
+        bullet("Сменить пароли всех учётных записей, связанных с найденными адресами, и включить " +
+            "двухфакторную аутентификацию.")
+        bullet("Проверить активные сессии и подключённые приложения в почтовых и облачных сервисах.")
+        bullet("Включить мониторинг новых утечек по затронутым идентификаторам.")
+    }
+
+    // ------------------------------------------------------------ telegram
+
+    private fun telegramFacts(): List<Fact> = data.facts.filter { f ->
+        val kind = f.kind.lowercase()
+        kind.contains("telegram") ||
+            f.value.startsWith("@") ||
+            f.value.contains("t.me/") ||
+            f.attributes.any { (k, v) ->
+                k.equals("Ссылка", ignoreCase = true) && v.lowercase().contains("t.me/")
+            }
+    }
+
+    private fun telegramSection() {
+        newContentPage("Telegram-аналитика")
+        h1("5. Telegram-аналитика")
+        p("Раздел объединяет сведения о присутствии объекта в Telegram: каналы, боты и публичные профили, " +
+            "а также связанные с ними метрики. Данные приведены в том виде, в котором их вернули модули сбора.")
+
+        val tg = telegramFacts()
+        if (tg.isEmpty()) {
+            gap(4f)
+            callout("Профили и каналы Telegram по запросу не обнаружены. Покрытие зависит от активных модулей " +
+                "сбора; при необходимости подключите дополнительные источники и повторите поиск.")
+            return
+        }
+
+        val audience = tg.sumOf { it.attributes["Подписчиков"]?.toLongOrNull() ?: 0L }
+        val usernames = tg.mapNotNull { f ->
+            f.attributes.entries.firstOrNull { it.key.equals("Ссылка", ignoreCase = true) }?.value
+                ?: f.value.takeIf { it.startsWith("@") }
+        }.distinct()
+
+        label("НАЙДЕННЫЕ ОБЪЕКТЫ (${tg.size})")
+        gap(4f)
+        table(
+            columns = listOf(
+                Column("№", 20f),
+                Column("Объект", 150f),
+                Column("Аудитория", 58f, Align.RIGHT),
+                Column("Ссылка", 108f),
+                Column("Описание", contentW - 20f - 150f - 58f - 108f)
+            ),
+            rows = tg.take(40).mapIndexed { i, f ->
+                listOf(
+                    (i + 1).toString(),
+                    f.value.take(64),
+                    f.attributes["Подписчиков"].orEmpty().ifBlank { "—" },
+                    f.attributes["Ссылка"].orEmpty().ifBlank { "—" },
+                    f.attributes["Описание"].orEmpty().ifBlank { "—" }.take(64)
+                )
+            }
+        )
+
+        gap(14f)
+        h2("5.1. Наблюдения")
+        bullet("Объектов Telegram в выборке: ${tg.size}; публичных ссылок: ${usernames.size}.")
+        if (audience > 0) {
+            bullet("Суммарная заявленная аудитория: $audience подписчиков (по данным модулей сбора).")
+        }
+        if (usernames.isNotEmpty()) {
+            bullet("Идентификаторы: " + usernames.take(12).joinToString(", ") + ".")
+        }
+        bullet("Метрики аудитории приведены на момент сбора и могут отличаться от текущих значений; " +
+            "для каналов учитывается последнее опубликованное значение.")
+    }
+
     // ------------------------------------------------------- профиль связей
 
     private fun linksSection() {
-        newContentPage("Профилирование связей")
-        h1("2. Профилирование связей")
+        newContentPage("Цифровые следы")
+        h1("3. Цифровые следы и связи")
         p("Раздел отражает структуру отношений между установленными объектами. Узел схемы — объект " +
             "(субъект или значение), ребро — подтверждённое совпадение либо принадлежность атрибута. " +
             "Толщина ребра соответствует числу наблюдений, насыщенность цвета — числу независимых источников, " +
@@ -312,7 +523,7 @@ class PdfReport(
             gap(4f)
             graphPanel()
             gap(12f)
-            h2("2.1. Ключевые связи")
+            h2("3.1. Ключевые связи")
             val topLinks = data.links.take(14)
             table(
                 columns = listOf(
@@ -429,7 +640,7 @@ class PdfReport(
         val subjects = data.subjects.take(6)
         if (subjects.size < 2) return
         ensure(60f + subjects.size * 18f)
-        h2("2.2. Матрица пересечений")
+        h2("3.2. Матрица пересечений")
         p("Ячейка матрицы показывает число связей между объектами. Заполненные ячейки — подтверждённые " +
             "пересечения, пустые — отсутствие связи в текущей выборке.", leading = 12.4f)
 
@@ -473,7 +684,7 @@ class PdfReport(
 
     private fun factsSection() {
         newContentPage("Реестр установленных фактов")
-        h1("3. Реестр установленных фактов")
+        h1("6. Реестр установленных фактов")
         p("Сведения сгруппированы по категориям. Для каждого факта указано число независимых источников, " +
             "подтвердивших значение, и производный уровень достоверности. Дубликаты устранены на этапе " +
             "нормализации; слияние выполнялось по нормализованному значению и субъекту.")
@@ -489,7 +700,7 @@ class PdfReport(
         ordered.forEachIndexed { index, category ->
             val facts = data.factsOf(category)
             gap(10f)
-            h2("3.${index + 1}. ${category.title} · ${facts.size}")
+            h2("6.${index + 1}. ${category.title} · ${facts.size}")
             factTable(facts)
             factDetails(facts)
         }
@@ -537,7 +748,7 @@ class PdfReport(
 
     private fun confidenceSection() {
         newContentPage("Оценка достоверности")
-        h1("4. Оценка достоверности (Confidence Level)")
+        h1("7. Оценка достоверности (Confidence Level)")
         p("Достоверность каждого факта определяется числом независимых источников, в которых значение " +
             "встретилось после нормализации. Шкала трёхуровневая и применяется единообразно ко всем " +
             "категориям сведений; интерпретация приведена в таблице.")
@@ -567,7 +778,7 @@ class PdfReport(
         )
 
         gap(16f)
-        h2("4.1. Распределение достоверности")
+        h2("7.1. Распределение достоверности")
         gap(4f)
         for (level in Confidence.entries.reversed()) {
             val count = counts[level] ?: 0
@@ -585,7 +796,7 @@ class PdfReport(
         }
 
         gap(14f)
-        h2("4.2. Правила интерпретации")
+        h2("7.2. Правила интерпретации")
         bullet("Подтверждено — сведение воспроизведено в трёх и более независимых наблюдениях, " +
             "расхождений в значении не выявлено; может использоваться как опорный факт.")
         bullet("Вероятно — совпадение в двух наблюдениях; допустимо к использованию с оговоркой " +
@@ -600,8 +811,8 @@ class PdfReport(
 
     private fun limitationsSection() {
         newContentPage("Ограничения и рекомендации")
-        h1("5. Ограничения и рекомендации")
-        h2("5.1. Ограничения исследования")
+        h1("8. Ограничения и рекомендации")
+        h2("8.1. Ограничения исследования")
         bullet("Отчёт отражает состояние открытых источников на момент сбора данных; сведения могут " +
             "измениться без уведомления.")
         bullet("Отсутствие сведений в реестре не является доказательством их отсутствия: часть модулей " +
@@ -611,7 +822,7 @@ class PdfReport(
         bullet("Метаданные технических артефактов подвержены искажению и не рассматриваются как " +
             "самостоятельное доказательство.")
 
-        h2("5.2. Рекомендации аналитику")
+        h2("8.2. Рекомендации аналитику")
         bullet("Проверить вручную сведения со статусом «Требует проверки», начиная с объектов с " +
             "наибольшим числом связей.")
         bullet("Для устойчивых пересечений (два и более подтверждения) запросить подтверждающий " +
@@ -635,7 +846,8 @@ class PdfReport(
             "Cross-referencing" to "Перекрёстная проверка: сопоставление атрибутов между объектами.",
             "Confidence Level" to "Оценка достоверности факта по числу независимых подтверждений.",
             "Нормализация" to "Приведение значений к единому виду для корректного сравнения.",
-            "Профилирование связей" to "Построение структуры отношений между установленными объектами."
+            "Профилирование связей" to "Построение структуры отношений между установленными объектами.",
+            "Цифровой след" to "Совокупность данных, оставленных субъектом в открытых источниках, и связей между ними."
         )
         table(
             columns = listOf(Column("Термин", 130f), Column("Определение", contentW - 130f)),

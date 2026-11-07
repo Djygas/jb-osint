@@ -49,10 +49,17 @@ class CustomModuleSpecTest {
     }
 
     @Test
+    fun jsonBodyAuthDoesNotLeakKeyIntoUrl() {
+        val url = CustomModuleSpec.buildUrl(module(CustomAuth.JSON_BODY), "secret", "ivan")
+        assertEquals("https://api.example.org/v1/search?q=ivan", url)
+    }
+
+    @Test
     fun headersDependOnAuthType() {
         assertEquals(mapOf("Authorization" to "Bearer abc"), CustomModuleSpec.headers(module(CustomAuth.BEARER), "abc"))
         assertEquals(mapOf("X-API-Key" to "abc"), CustomModuleSpec.headers(module(CustomAuth.HEADER), "abc"))
         assertTrue(CustomModuleSpec.headers(module(CustomAuth.PARAM), "abc").isEmpty())
+        assertTrue(CustomModuleSpec.headers(module(CustomAuth.JSON_BODY), "abc").isEmpty())
         assertTrue(CustomModuleSpec.headers(module(CustomAuth.NONE), "").isEmpty())
     }
 

@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
@@ -30,7 +31,8 @@ object Net {
         url: String,
         headers: Map<String, String> = emptyMap(),
         attempts: Int = 3,
-        method: String = "GET"
+        method: String = "GET",
+        body: String? = null
     ): Response = withContext(Dispatchers.IO) {
         require(url.startsWith("https://")) { "Разрешён только HTTPS" }
         var lastError: Exception? = null
@@ -42,7 +44,10 @@ object Net {
                     .header("User-Agent", "JB-OSINT/1.0 (Android)")
                 headers.forEach { (k, v) -> builder.header(k, v) }
                 if (method.equals("POST", ignoreCase = true)) {
-                    builder.post(ByteArray(0).toRequestBody(null))
+                    builder.post(
+                        (body ?: "")
+                            .toRequestBody("application/json; charset=utf-8".toMediaType())
+                    )
                 } else {
                     builder.get()
                 }

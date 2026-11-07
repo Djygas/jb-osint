@@ -146,6 +146,41 @@ class ReportExportTest {
     }
 
     @Test
+    fun `report renders summary leak and telegram sections`() {
+        val extra = data.copy(
+            facts = data.facts + listOf(
+                ru.jbosint.osint.core.model.Fact(
+                    category = FactCategory.OTHER,
+                    kind = "Утечка",
+                    value = "Collection #1",
+                    subject = "Иван Петров",
+                    attributes = mapOf(
+                        "Дата" to "2019-01-07",
+                        "Домен" to "example.ru",
+                        "Записей" to "773000000",
+                        "Данные" to "Emails, Passwords"
+                    ),
+                    sourceIds = setOf("s1", "s2"),
+                    observations = 2
+                ),
+                ru.jbosint.osint.core.model.Fact(
+                    category = FactCategory.OTHER,
+                    kind = "Telegram-канал",
+                    value = "OSINT канал",
+                    subject = "Иван Петров",
+                    attributes = mapOf("Ссылка" to "t.me/osint_channel", "Подписчиков" to "12500"),
+                    sourceIds = setOf("s3"),
+                    observations = 1
+                )
+            )
+        )
+        val bytes = PdfReport(meta, extra, ReportFonts.fromClasspath()).build()
+        File(outputDir, "sample-report-extended.pdf").writeBytes(bytes)
+        assertTrue("PDF слишком мал: ${bytes.size}", bytes.size > 20_000)
+        assertEquals("%PDF-1.7", String(bytes, 0, 8))
+    }
+
+    @Test
     fun `xlsx report is a valid zip with all sheets`() {
         val bytes = XlsxReport(meta, data).build()
         File(outputDir, "sample-report.xlsx").writeBytes(bytes)
