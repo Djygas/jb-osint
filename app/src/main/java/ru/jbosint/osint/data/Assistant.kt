@@ -144,13 +144,17 @@ object AssistantCatalog {
 
     /** Нормализует базовый адрес: только https, без хвостового слэша и без /chat/completions. */
     fun normaliseBase(raw: String): String? {
-        val clean = raw.trim().trimEnd('/')
+        var clean = raw.trim().substringBefore('?').substringBefore('#').trimEnd('/')
         if (clean.isBlank()) return null
-        val url = if (clean.startsWith("http", ignoreCase = true)) clean else "https://$clean"
-        if (!url.startsWith("https://", ignoreCase = true)) return null
-        val host = url.removePrefix("https://").substringBefore('/')
+        if (!clean.startsWith("http", ignoreCase = true)) clean = "https://$clean"
+        if (!clean.startsWith("https://", ignoreCase = true)) return null
+        while (clean.endsWith("/chat/completions")) {
+            clean = clean.removeSuffix("/chat/completions").trimEnd('/')
+        }
+        clean = clean.trimEnd('/')
+        val host = clean.removePrefix("https://").substringBefore('/')
         if (host.isBlank() || !host.contains('.')) return null
-        return url.removeSuffix("/chat/completions")
+        return clean
     }
 
     /** Угадывает поставщика по вставленному адресу. */
@@ -573,12 +577,20 @@ class AssistantStore(context: Context) {
 
     fun saveKey(value: String, providerId: String = provider) {
         secure.put(keyName(providerId), value.trim())
-        prefs.edit().remove("state").remove("checked").apply()
+        prefs.edit()
+            .remove(stateKey(providerId))
+            .remove(checkedKey(providerId))
+            .apply()
+        if (providerId == "hf") prefs.edit().remove("state").remove("checked").apply()
     }
 
     fun clearKey(providerId: String = provider) {
         secure.remove(keyName(providerId))
-        prefs.edit().remove("state").remove("checked").apply()
+        prefs.edit()
+            .remove(stateKey(providerId))
+            .remove(checkedKey(providerId))
+            .apply()
+        if (providerId == "hf") prefs.edit().remove("state").remove("checked").apply()
     }
 
     var model: String
@@ -609,14 +621,28 @@ class AssistantStore(context: Context) {
         set(value) = prefs.edit().putBoolean("auto_research", value).apply()
 
     fun state(): KeyState = runCatching {
-        KeyState.valueOf(prefs.getString("state", null) ?: KeyState.UNCHECKED.name)
+        // Состояние своё у каждого поставщика: иначе «ключ принят» одного
+        // сервиса показывался бы на карточке другого.
+        val raw = prefs.getString(stateKey(), null)
+            ?: if (provider == "hf") prefs.getString("state", null) else null
+        KeyState.valueOf(raw ?: KeyState.UNCHECKED.name)
     }.getOrDefault(KeyState.UNCHECKED)
 
     fun setState(value: KeyState) {
-        prefs.edit().putString("state", value.name).putLong("checked", System.currentTimeMillis()).apply()
+        prefs.edit()
+            .putString(stateKey(), value.name)
+            .putLong(checkedKey(), System.currentTimeMillis())
+            .apply()
     }
 
-    fun checkedAt(): Long = prefs.getLong("checked", 0L)
+    fun checkedAt(): Long = prefs.getLong(
+        checkedKey(),
+        if (provider == "hf") prefs.getLong("checked", 0L) else 0L
+    )
+
+    private fun stateKey(providerId: String = provider): String = "state_$providerId"
+
+    private fun checkedKey(providerId: String = provider): String = "checked_$providerId"
 
     fun configured(): Boolean = key().isNotBlank()
 

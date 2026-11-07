@@ -346,7 +346,7 @@ private fun AssistantSection(state: UiState, vm: AppViewModel) {
                     ProviderChip(
                         title = item.title,
                         selected = state.assistantProvider == item.id,
-                        hasKey = state.assistantProvider == item.id && state.assistantConfigured,
+                        hasKey = item.id in state.assistantKeyed,
                         modifier = Modifier.weight(1f),
                         onClick = { vm.setAssistantProvider(item.id) }
                     )

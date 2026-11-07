@@ -157,6 +157,8 @@ data class UiState(
     val assistantConfigured: Boolean = false,
     val assistantProvider: String = AssistantCatalog.DEFAULT_PROVIDER,
     val assistantBaseUrl: String = "",
+    /** Поставщики, у которых уже сохранён ключ (точки на переключателе). */
+    val assistantKeyed: Set<String> = emptySet(),
     val assistantModel: String = AssistantCatalog.DEFAULT_MODEL,
     val assistantState: KeyState = KeyState.UNCHECKED,
     val assistantCheckedAt: Long = 0L,
@@ -222,6 +224,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             assistantConfigured = assistantStore.configured(),
             assistantProvider = assistantStore.provider,
             assistantBaseUrl = assistantStore.customBaseUrl,
+            assistantKeyed = keyedProviders(),
             assistantModel = assistantStore.model,
             assistantState = assistantStore.state(),
             assistantCheckedAt = assistantStore.checkedAt(),
@@ -743,6 +746,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun closeConnection() = _state.update { it.copy(connection = null) }
 
+    /** Поставщики с сохранённым ключом — для индикаторов на переключателе. */
+    private fun keyedProviders(): Set<String> =
+        AssistantCatalog.providers.filter { assistantStore.hasKey(it.id) }.map { it.id }.toSet()
+
     private fun appendStep(text: String) {
         _state.update { s -> s.copy(connection = s.connection?.step(text)) }
     }
@@ -783,8 +790,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         appendStep("Это ключ ИИ-ассистента (${spec.title}) — подключаю его в настройках ассистента")
         assistantStore.provider = spec.id
         assistantStore.saveKey(key, spec.id)
-        if (spec.defaultModel.isNotBlank() && !AssistantCatalog.isKnown(assistantStore.model)) {
-            assistantStore.model = spec.defaultModel
+        // Если сохранённая модель не из набора этого поставщика — берём его умолчание.
+        if (spec.defaultModel.isNotBlank()) {
+            val saved = assistantStore.model
+            if (spec.models.isNotEmpty() && spec.models.none { it.id == saved }) {
+                assistantStore.model = spec.defaultModel
+            }
         }
         val check = runCatching { assistantService.probe() }
             .getOrElse { KeyCheck(KeyState.INVALID, it.message ?: "ошибка проверки") }
@@ -792,6 +803,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 assistantProvider = assistantStore.provider,
                 assistantBaseUrl = assistantStore.customBaseUrl,
+                assistantKeyed = keyedProviders(),
                 assistantModel = assistantStore.model,
                 assistantConfigured = assistantStore.configured(),
                 assistantState = assistantStore.state(),
@@ -1315,6 +1327,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(
                 assistantConfigured = assistantStore.configured(),
+                assistantKeyed = keyedProviders(),
                 assistantState = if (assistantStore.configured()) KeyState.UNCHECKED else KeyState.EMPTY,
                 assistantError = null
             )
@@ -1326,6 +1339,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(
                 assistantConfigured = false,
+                assistantKeyed = keyedProviders(),
                 assistantState = KeyState.EMPTY,
                 assistantError = null,
                 classifications = emptyMap()
@@ -1346,6 +1360,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 assistantBaseUrl = assistantStore.customBaseUrl,
                 assistantModel = assistantStore.model,
                 assistantConfigured = assistantStore.configured(),
+                assistantKeyed = keyedProviders(),
                 assistantState = if (assistantStore.configured()) KeyState.UNCHECKED else KeyState.EMPTY,
                 assistantCheckedAt = 0L,
                 assistantError = null

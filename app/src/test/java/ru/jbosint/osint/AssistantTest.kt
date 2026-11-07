@@ -341,3 +341,63 @@ class WebResearchTest {
         assertTrue(digest.contains("2. Второй"))
     }
 }
+
+/** Каталог поставщиков: адреса, модели, определение по ссылке и ключу. */
+class AssistantCatalogTest {
+
+    @Test
+    fun everyProviderIsComplete() {
+        assertTrue(AssistantCatalog.providers.size >= 6)
+        val ids = AssistantCatalog.providers.map { it.id }
+        assertEquals(ids.size, ids.toSet().size)
+        assertTrue(ids.contains("hf"))
+        AssistantCatalog.providers.forEach { provider ->
+            assertTrue(provider.title.isNotBlank())
+            assertTrue(provider.keyHint.isNotBlank())
+            assertTrue(provider.docsUrl.startsWith("https://"))
+            if (provider.custom) {
+                assertTrue(provider.baseUrl.isBlank())
+                assertTrue(provider.models.isEmpty())
+            } else {
+                assertTrue(provider.baseUrl.startsWith("https://"))
+                assertTrue(provider.defaultModel.isNotBlank())
+                assertTrue(provider.models.any { it.id == provider.defaultModel })
+            }
+        }
+    }
+
+    @Test
+    fun normalisesBaseAddress() {
+        assertEquals("https://api.openai.com/v1", AssistantCatalog.normaliseBase("https://api.openai.com/v1/"))
+        assertEquals("https://api.openai.com/v1", AssistantCatalog.normaliseBase("https://api.openai.com/v1/chat/completions"))
+        assertEquals("https://api.openai.com/v1", AssistantCatalog.normaliseBase("api.openai.com/v1"))
+        assertEquals("https://api.openai.com/v1", AssistantCatalog.normaliseBase("https://api.openai.com/v1?x=1"))
+        assertNull(AssistantCatalog.normaliseBase("http://api.openai.com/v1"))
+        assertNull(AssistantCatalog.normaliseBase("ftp://api.openai.com/v1"))
+        assertNull(AssistantCatalog.normaliseBase("   "))
+    }
+
+    @Test
+    fun guessesProviderByAddress() {
+        assertEquals("hf", AssistantCatalog.byBaseUrl("https://router.huggingface.co/v1")?.id)
+        assertEquals("openai", AssistantCatalog.byBaseUrl("https://api.openai.com/v1/chat/completions")?.id)
+        assertEquals("groq", AssistantCatalog.byBaseUrl("https://api.groq.com/openai/v1")?.id)
+        assertNull(AssistantCatalog.byBaseUrl("https://api.example.org/v1"))
+    }
+
+    @Test
+    fun guessesProviderByKeyPrefix() {
+        assertEquals("hf", AssistantCatalog.byKey("hf_abc")?.id)
+        assertEquals("openrouter", AssistantCatalog.byKey("sk-or-v1-abc")?.id)
+        assertEquals("groq", AssistantCatalog.byKey("gsk_abc")?.id)
+        assertEquals("openai", AssistantCatalog.byKey("sk-abc")?.id)
+        assertNull(AssistantCatalog.byKey("ghp_abc"))
+    }
+
+    @Test
+    fun defaultProviderIsHuggingFace() {
+        assertEquals("hf", AssistantCatalog.DEFAULT_PROVIDER)
+        assertEquals("Hugging Face", AssistantCatalog.provider(AssistantCatalog.DEFAULT_PROVIDER).title)
+        assertEquals("hf", AssistantCatalog.provider("unknown").id)
+    }
+}
