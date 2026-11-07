@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -68,7 +69,7 @@ object Connectors {
     val all: List<Connector> = listOf(
         GithubConnector, HibpConnector, VirusTotalConnector, ShodanConnector,
         NumverifyConnector, HunterConnector, IpinfoConnector, TgstatConnector,
-        VkConnector, OpenCorporatesConnector, GoogleConnector, YandexConnector,
+        VkConnector, DyxlessConnector, OpenCorporatesConnector, GoogleConnector, YandexConnector,
         BraveConnector, SerpApiConnector, DdgConnector, WikipediaConnector,
         UrlscanConnector, SecurityTrailsConnector, AbuseIpdbConnector, GitlabConnector
     )
@@ -382,6 +383,203 @@ private object VkConnector : Connector {
         return facts
     }
 }
+
+/**
+ * Dyxless API v3 — платный поиск по записям. Устроен не как остальные:
+ * поиск асинхронный (создать → дождаться state → забрать результаты),
+ * поэтому модуль работает в три шага и тратит деньги владельца ключа.
+ *
+ * Защита от лишних трат: без второго поля «Максимум ₽ на запрос» модуль
+ * молчит, а сам запрос строится только по точным идентификаторам
+ * (email, телефон, IP, полное ФИО, Telegram-ник) — на произвольный текст
+ * и домены Dyxless не ищет, и деньги за такой запрос не списываются.
+ */
+private object DyxlessConnector : Connector {
+    override val id = "dyxless"
+    private const val BASE = "https://api.dyxless.im"
+    private const val MAX_POLLS = 8
+    private const val POLL_DELAY_MS = 1500L
+
+    override suspend fun collect(query: String, key: KeyRepository): List<RawFact> {
+        val token = key.key(id)
+        if (token.isBlank()) return emptyList()
+        val cap = key.secondField(id).replace(',', '.').trim().toDoubleOrNull()
+            ?.takeIf { it > 0 } ?: return emptyList()
+        val body = DyxlessApi.request(query.trim(), cap) ?: return emptyList()
+        val headers = mapOf(
+            "Authorization" to "Bearer $token",
+            "Idempotency-Key" to "jb-" + java.util.UUID.randomUUID().toString(),
+            "Prefer" to "wait=5"
+        )
+
+        val created = Net.fetch(
+            "$BASE/v3/searches", headers, attempts = 1, method = "POST", body = body.toString()
+        )
+        if (created.code !in 200..299) return emptyList()
+        val meta = runCatching { JSONObject(created.body) }.getOrNull() ?: return emptyList()
+        val operationId = meta.optString("operationId").ifBlank { meta.optString("requestId") }
+        if (operationId.isBlank()) return emptyList()
+
+        var state = meta.optString("state")
+        var resultUrl = meta.optString("resultUrl")
+        var polls = 0
+        while (state !in DyxlessApi.TERMINAL_OK && polls < MAX_POLLS) {
+            if (state in DyxlessApi.TERMINAL_FAIL) return emptyList()
+            delay(POLL_DELAY_MS)
+            polls++
+            val status = Net.json("$BASE/v3/searches/$operationId", headers).getOrNull() ?: continue
+            state = status.optString("state")
+            if (resultUrl.isBlank()) resultUrl = status.optString("resultUrl")
+        }
+        if (state !in DyxlessApi.TERMINAL_OK) return emptyList()
+
+        val page = Net.json(
+            if (resultUrl.isNotBlank()) DyxlessApi.absolute(resultUrl)
+            else "$BASE/v3/searches/$operationId/results",
+            headers
+        ).getOrNull() ?: return emptyList()
+        val data = page.optJSONArray("data") ?: return emptyList()
+        return DyxlessApi.parse(data, query)
+    }
+}
+
+/** Тело запроса и разбор ответа Dyxless: чистые функции, их удобно проверять тестами. */
+internal object DyxlessApi {
+
+    const val BASE = "https://api.dyxless.im"
+    val TERMINAL_OK = setOf("succeeded", "partially_succeeded")
+    val TERMINAL_FAIL = setOf("failed", "cancelled", "expired")
+    private const val MAX_FACTS = 30
+
+    private val titles = mapOf(
+        "email" to "Почта",
+        "phone" to "Телефон",
+        "last_name" to "Фамилия",
+        "first_name" to "Имя",
+        "sur_name" to "Отчество",
+        "birthday" to "Дата рождения",
+        "inn" to "ИНН",
+        "snils" to "СНИЛС",
+        "passport" to "Паспорт",
+        "vin" to "VIN",
+        "car_number" to "Госномер",
+        "ip" to "IP-адрес",
+        "address" to "Адрес",
+        "region" to "Регион",
+        "city" to "Город",
+        "table_name" to "База",
+        "username" to "Никнейм",
+        "telegram_id" to "Telegram ID"
+    )
+
+    fun absolute(path: String): String =
+        if (path.startsWith("https://")) path
+        else if (path.startsWith("/")) BASE + path
+        else "$BASE/$path"
+
+    /** Тело запроса: тип поиска, условие и жёсткий лимит расхода. Null — искать нечего. */
+    fun request(query: String, cap: Double): JSONObject? {
+        val kind = QueryDetector.detect(query)
+        var product = "records.search"
+        val condition: JSONObject = when (kind) {
+            QueryKind.EMAIL -> cond("email", query)
+            QueryKind.PHONE -> cond("phone", phoneDigits(query))
+            QueryKind.IP -> cond("ip", query)
+            QueryKind.USERNAME -> {
+                product = "telegram.search"
+                cond("username", query.trim().trimStart('@'))
+            }
+            QueryKind.NAME -> {
+                val parts = query.split(Regex("\\s+")).filter { it.isNotBlank() }
+                // Dyxless не ищет по частичному имени: нужны три поля ФИО.
+                if (parts.size < 3) return null
+                JSONObject().put(
+                    "all",
+                    JSONArray().apply {
+                        put(cond("last_name", parts[0]))
+                        put(cond("first_name", parts[1]))
+                        put(cond("sur_name", parts[2]))
+                    }
+                )
+            }
+            else -> return null
+        }
+        val select = if (product == "records.search") {
+            JSONArray().put("all")
+        } else {
+            JSONArray().put("baseName").put("fields")
+        }
+        val amount = String.format(java.util.Locale.US, "%.6f", cap.coerceIn(0.01, 10_000.0))
+        return JSONObject()
+            .put("product", product)
+            .put("query", condition)
+            .put("select", select)
+            .put("result", JSONObject().put("maxRecords", 50).put("pageSize", 50))
+            .put("billing", JSONObject().put("maxAmount", amount).put("currency", "RUB"))
+    }
+
+    private fun cond(field: String, value: String) =
+        JSONObject().put("field", field).put("op", "eq").put("value", value)
+
+    fun phoneDigits(raw: String): String {
+        val digits = raw.filter { it.isDigit() }
+        return if (raw.trim().startsWith("+")) "+$digits" else digits
+    }
+
+    fun parse(data: JSONArray, query: String): List<RawFact> {
+        val out = ArrayList<RawFact>()
+        for (i in 0 until minOf(data.length(), MAX_FACTS)) {
+            val record = data.optJSONObject(i) ?: continue
+            val attrs = LinkedHashMap<String, String>()
+            val fields = record.optJSONObject("fields")
+            if (fields != null) {
+                fields.keys().forEach { name ->
+                    val value = fields.opt(name)?.toString().orEmpty()
+                    if (value.isNotBlank() && value != "null") attrs[title(name)] = value
+                }
+            } else {
+                record.keys().forEach { name ->
+                    val value = record.opt(name)?.toString().orEmpty()
+                    val flat = value.isNotBlank() && value != "null" &&
+                        !value.startsWith("{") && !value.startsWith("[")
+                    if (flat) attrs[title(name)] = value
+                }
+            }
+            if (attrs.isEmpty()) continue
+            val baseName = record.optString("baseName")
+            val email = attrs["Почта"].orEmpty()
+            val phone = attrs["Телефон"].orEmpty()
+            val fio = listOf(attrs["Фамилия"], attrs["Имя"], attrs["Отчество"])
+                .filterNotNull().filter { it.isNotBlank() }.joinToString(" ")
+            val value = when {
+                email.isNotBlank() -> email
+                phone.isNotBlank() -> phone
+                fio.isNotBlank() -> fio
+                baseName.isNotBlank() -> baseName
+                else -> query
+            }
+            val category = when {
+                email.isNotBlank() || phone.isNotBlank() -> FactCategory.CONTACT
+                fio.isNotBlank() -> FactCategory.PERSON
+                else -> FactCategory.OTHER
+            }
+            val kind = if (baseName.isNotBlank()) baseName.take(60) else "Запись"
+            out += RawFact(
+                category = category,
+                kind = kind,
+                value = value,
+                subject = fio.ifBlank { value },
+                attributes = attrs.entries.take(10).associate { it.key to it.value.take(120) },
+                sourceId = "dyxless"
+            )
+        }
+        return out
+    }
+
+    fun title(name: String): String =
+        titles[name.lowercase()] ?: name.replace('_', ' ').replaceFirstChar { it.uppercase() }
+}
+
 
 private object OpenCorporatesConnector : Connector {
     override val id = "opencorporates"

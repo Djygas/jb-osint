@@ -33,6 +33,7 @@ import ru.jbosint.osint.data.CustomResponseParser
 import ru.jbosint.osint.data.DiagBlock
 import ru.jbosint.osint.data.DiagMask
 import ru.jbosint.osint.data.DiagReport
+import ru.jbosint.osint.data.DiagSamples
 import ru.jbosint.osint.data.JsonShape
 import ru.jbosint.osint.data.Net
 import ru.jbosint.osint.core.model.RawFact
@@ -483,6 +484,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 it.copy(
                     autoSetup = it.autoSetup?.copy(
                         running = false, failed = true, skip = outcome.attempts,
+                        stage = outcome.detail,
                         suggested = suggested, exhausted = outcome.exhausted
                     )
                 )
@@ -517,9 +519,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     runCatching { validator.check(spec.id) }
                         .getOrElse { KeyCheck(KeyState.INVALID, "ошибка проверки: ${it.message ?: it.javaClass.simpleName}") }
                 }
+                // Каждому API — свой тип данных: общий запрос «osint» для половины
+                // модулей заведомо пуст и выглядит как поломка.
+                val probeQuery = DiagSamples.forProvider(spec.id) ?: query
                 val t0 = System.currentTimeMillis()
                 val facts = if (check.state == KeyState.VALID) {
-                    runCatching { Connectors.byId(spec.id)?.collect(query, keys) ?: emptyList() }
+                    runCatching { Connectors.byId(spec.id)?.collect(probeQuery, keys) ?: emptyList() }
                         .getOrElse { emptyList() }
                 } else emptyList()
                 val elapsed = System.currentTimeMillis() - t0
@@ -533,9 +538,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                 }.orEmpty()
+                val accepted = DiagSamples.acceptedFor(spec.id)
                 val advice = when {
                     check.state == KeyState.VALID && facts.isNotEmpty() -> "работает"
-                    check.state == KeyState.VALID -> "ключ принят, но фактов 0: по запросу «$query» сервис ничего не вернул"
+                    check.state == KeyState.VALID && accepted != null ->
+                        "ключ принят, фактов 0: по запросу «$probeQuery» ничего не найдено; модуль принимает $accepted"
+                    check.state == KeyState.VALID ->
+                        "ключ принят, но фактов 0: по запросу «$probeQuery» сервис ничего не вернул"
                     check.state == KeyState.OFFLINE -> "нет связи с сервисом (сеть или блокировка)"
                     check.state == KeyState.EMPTY -> "ключ не задан"
                     else -> "не работает: ${check.detail}"
@@ -556,7 +565,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     fields = first?.attributes?.keys?.joinToString(", ").orEmpty(),
                     sample = sample,
                     error = if (check.state == KeyState.VALID) null else check.detail,
-                    advice = advice
+                    advice = advice,
+                    testQuery = probeQuery.takeIf { it != query }
                 )
             }
 

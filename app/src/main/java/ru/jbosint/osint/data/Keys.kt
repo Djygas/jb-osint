@@ -68,6 +68,11 @@ object ProviderCatalog {
             "access_token", "https://dev.vk.com/", ProviderGroup.SOCIAL
         ),
         ProviderSpec(
+            "dyxless", "Dyxless", "Записи по email, телефону, IP и ФИО",
+            "Ключ проекта (Bearer-токен)", "https://api.dyxless.im/docs/", ProviderGroup.LEAKS,
+            requiresSecondField = "Максимум ₽ на запрос"
+        ),
+        ProviderSpec(
             "opencorporates", "OpenCorporates", "Юридические лица",
             "api_token", "https://opencorporates.com/api_accounts/new", ProviderGroup.REGISTRY
         ),
@@ -240,13 +245,8 @@ class KeyValidator(private val repo: KeyRepository) {
             "tgstat" -> {
                 { probeBodyAware("https://api.tgstat.ru/channels/search?token=${Net.urlEncode(key)}&q=osint") }
             }
-            "vk" -> {
-                {
-                    probeBodyAware(
-                        "https://api.vk.com/method/users.get?access_token=${Net.urlEncode(key)}&v=5.199"
-                    )
-                }
-            }
+            "vk" -> { { probeVk(key) } }
+            "dyxless" -> { { probeDyxless(key) } }
             "opencorporates" -> {
                 {
                     probeHttp(
@@ -341,6 +341,66 @@ class KeyValidator(private val repo: KeyRepository) {
             return KeyCheck(KeyState.VALID, "Ключ принят сервисом")
         }
         return probeHttp(url)
+    }
+
+    /**
+     * VK отвечает 200 и кладёт ошибку в `error`, поэтому коды надо разбирать
+     * по смыслу: неверный токен (5/15/18/27) — это «ключ неверный»,
+     * лимиты и недоступный для типа токена метод — не повод объявлять ключ битым.
+     */
+    private suspend fun probeVk(key: String): KeyCheck {
+        val url = "https://api.vk.com/method/users.get?user_ids=1&fields=city" +
+            "&access_token=${Net.urlEncode(key)}&v=5.199"
+        val response = Net.fetch(url, attempts = 1)
+        response.crossHostRedirect?.let {
+            return KeyCheck(KeyState.INVALID, "Сервис перенаправляет на $it — ключ не отправлен")
+        }
+        val json = runCatching { org.json.JSONObject(response.body) }.getOrNull()
+            ?: return when (response.code) {
+                401, 403 -> KeyCheck(KeyState.INVALID, "Сервис отклонил ключ (${response.code})")
+                429 -> KeyCheck(KeyState.VALID, "Ключ активен, превышен лимит запросов")
+                else -> KeyCheck(KeyState.INVALID, "Ответ сервиса ${response.code}")
+            }
+        val error = json.optJSONObject("error")
+        if (error == null) {
+            return if (json.has("response")) KeyCheck(KeyState.VALID, "Ключ принят сервисом")
+            else probeHttp(url)
+        }
+        val code = error.optInt("error_code", 0)
+        return when (code) {
+            5 -> KeyCheck(KeyState.INVALID, "VK отклонил ключ (код 5): токен недействителен или не тот тип токена")
+            15, 18, 27 -> KeyCheck(KeyState.INVALID, "VK отклонил ключ (код $code): нет доступа к методу")
+            29 -> KeyCheck(KeyState.VALID, "Ключ активен, превышен лимит метода VK (код 29)")
+            6, 9, 10 -> KeyCheck(KeyState.VALID, "Ключ активен, превышен лимит запросов (код $code)")
+            100, 113 -> KeyCheck(KeyState.VALID, "Ключ принят; служебный запрос не поддержан (код $code)")
+            else -> KeyCheck(KeyState.VALID, "Ключ принят; VK вернул код $code на служебный запрос")
+        }
+    }
+
+    /**
+     * Dyxless — платный API записей: служебная ручка `/v3/capabilities` отвечает
+     * 200 только с валидным Bearer-токеном. Второе поле — лимит расхода в рублях.
+     */
+    private suspend fun probeDyxless(key: String): KeyCheck {
+        val cap = repo.secondField("dyxless").replace(',', '.').trim().toDoubleOrNull()
+        if (cap == null || cap <= 0) {
+            return KeyCheck(KeyState.INVALID, "Укажите лимит расхода в рублях, например 10")
+        }
+        val response = Net.fetch(
+            "https://api.dyxless.im/v3/capabilities",
+            mapOf("Authorization" to "Bearer $key"),
+            attempts = 1
+        )
+        response.crossHostRedirect?.let {
+            return KeyCheck(KeyState.INVALID, "Сервис перенаправляет на $it — ключ не отправлен")
+        }
+        return when {
+            response.code in 200..299 -> KeyCheck(KeyState.VALID, "Ключ принят сервисом")
+            response.code == 401 || response.code == 403 ->
+                KeyCheck(KeyState.INVALID, "Сервис отклонил ключ (${response.code})")
+            response.code == 429 -> KeyCheck(KeyState.VALID, "Ключ активен, превышен лимит запросов")
+            else -> KeyCheck(KeyState.INVALID, "Ответ сервиса ${response.code}")
+        }
     }
 
     private suspend fun probeHttp(

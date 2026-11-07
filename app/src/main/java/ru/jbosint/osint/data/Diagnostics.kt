@@ -24,8 +24,65 @@ data class DiagBlock(
     val fields: String,
     val sample: String,
     val error: String?,
-    val advice: String
+    val advice: String,
+    /** Запрос, которым реально проверялся модуль (если отличается от общего). */
+    val testQuery: String? = null
 )
+
+/**
+ * Диагностика по одному общему запросу врёт: большинство API принимает
+ * только свой тип данных. Для проверки каждому модулю подставляется
+ * подходящий пример, а в отчёте видно, чем именно проверяли.
+ */
+object DiagSamples {
+
+    private val samples = mapOf(
+        "github" to "torvalds",
+        "gitlab" to "root",
+        "hibp" to "test@example.com",
+        "hunter" to "example.com",
+        "numverify" to "+14158586273",
+        "ipinfo" to "8.8.8.8",
+        "abuseipdb" to "8.8.8.8",
+        "shodan" to "8.8.8.8",
+        "virustotal" to "example.com",
+        "urlscan" to "example.com",
+        "securitytrails" to "example.com",
+        "dyxless" to "test@example.com",
+        "opencorporates" to "tesla",
+        "tgstat" to "osint",
+        "vk" to "Иван Иванов",
+        "yandex" to "osint",
+        "google" to "osint",
+        "brave" to "osint",
+        "serpapi" to "osint",
+        "ddg" to "osint",
+        "wikipedia" to "osint"
+    )
+
+    fun forProvider(id: String): String? = samples[id]
+
+    /** Что модуль реально принимает — показывается, если фактов ноль. */
+    val accepted: Map<String, String> = mapOf(
+        "hibp" to "только email",
+        "hunter" to "только домен",
+        "ipinfo" to "только IP или домен",
+        "abuseipdb" to "только IP",
+        "shodan" to "IP, домен или название организации",
+        "virustotal" to "домен, IP или хеш файла",
+        "urlscan" to "только домен",
+        "securitytrails" to "только домен",
+        "numverify" to "только телефон",
+        "vk" to "имя, фамилия или ник",
+        "opencorporates" to "название компании",
+        "tgstat" to "слово, канал или ссылка",
+        "github" to "ник или имя",
+        "gitlab" to "ник",
+        "dyxless" to "email, телефон, IP, полное ФИО (3 слова) или Telegram-ник"
+    )
+
+    fun acceptedFor(id: String): String? = accepted[id]
+}
 
 object DiagMask {
 
@@ -163,6 +220,9 @@ object DiagReport {
             val size = if (b.bytes > 0) " · ${b.bytes} байт" else ""
             sb.appendLine("Ответ: ${if (b.code == 0) "нет данных" else "код ${b.code}"} · ${b.elapsedMs} мс$size")
             if (b.checkDetail.isNotBlank()) sb.appendLine("Проверка: ${b.checkDetail}")
+            if (b.testQuery != null && b.testQuery != query) {
+                sb.appendLine("Тестовый запрос модуля: ${b.testQuery}")
+            }
             if (b.structure.isNotBlank()) {
                 sb.appendLine("Структура:")
                 b.structure.lineSequence().forEach { sb.appendLine("  $it") }
@@ -180,7 +240,8 @@ object DiagReport {
         val working = blocks.count { it.advice.startsWith("работает") }
         val empty = blocks.count { it.facts == 0 }
         sb.appendLine("Итого: модулей ${blocks.size}, рабочих $working, без фактов $empty")
-        sb.appendLine("Подсказка: если у модуля «0 фактов», добавьте правила разбора «JSON-путь → поле» в карточке модуля.")
+        sb.appendLine("Подсказка: «0 фактов» чаще всего значит, что запрос не того типа — многие API принимают только email, IP или домен (см. «Оценка»).")
+        sb.appendLine("Для пользовательских модулей добавьте правила разбора «JSON-путь → поле» в карточке модуля.")
         return sb.toString().trimEnd()
     }
 }

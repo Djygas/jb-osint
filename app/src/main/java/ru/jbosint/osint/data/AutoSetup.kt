@@ -76,6 +76,18 @@ object AutoSetup {
         "whatsapp.com", "bit.ly", "t.co", "github.com", "githubusercontent.com"
     )
 
+    /**
+     * Сервисы, для которых модуль уже встроен: гонять по ним автоподбор
+     * бессмысленно — он найдёт путь, но не асинхронный протокол, и получится
+     * модуль, который отвечает 404 на каждый запрос.
+     */
+    private val knownServices = mapOf(
+        "dyxless.im" to "Dyxless — встроенный модуль (API v3, асинхронный: email, телефон, IP, ФИО, Telegram)"
+    )
+
+    fun knownService(host: String): String? = knownServices.entries
+        .firstOrNull { host == it.key || host.endsWith("." + it.key) }?.value
+
     data class Variant(val method: String, val auth: CustomAuth, val headerName: String, val paramName: String)
 
     data class Outcome(
@@ -252,6 +264,15 @@ object AutoSetup {
         hints: DocHints = DocHints(),
         skip: Int = 0
     ): Outcome = withContext(Dispatchers.IO) {
+        if (link.kind == SourceLink.Kind.SITE) {
+            knownService(link.host)?.let { name ->
+                return@withContext Outcome(
+                    fixed = false, strict = false, setup = null, urlTemplate = null,
+                    attempts = 0, code = 0, exhausted = true,
+                    detail = "$name. Включите его в списке ключей: автоподбор для такого API не нужен."
+                )
+            }
+        }
         val templates = if (link.kind == SourceLink.Kind.SITE) templates(link.host, hints) else hints.templates
         val combos = plan(templates, hints.prefer)
         val limited = combos.take(MAX_ATTEMPTS)
@@ -268,6 +289,8 @@ object AutoSetup {
         var htmlPage = false
         var redirectHost: String? = null
         var rateLimited = false
+        // 400/405/422 — адрес существует, но формат запроса другой: это не «мёртвый сервис».
+        var aliveCode = 0
 
         for ((template, variant) in limited.drop(skip)) {
             attemptNo++
@@ -307,6 +330,7 @@ object AutoSetup {
                     detail = "Модуль настроен: ${variant.method}, ${authTitle(variant)}"
                 )
             }
+            if (response.code in setOf(400, 405, 422)) aliveCode = response.code
             if ((response.code == 401 || response.code == 403) && rejected == null) {
                 rejected = Triple(template, variant, response.code)
             }
@@ -324,6 +348,7 @@ object AutoSetup {
             redirectHost != null -> "Сервис перенаправляет на $redirectHost — укажите конечный адрес API вручную"
             rateLimited -> "Сервис ограничивает частоту запросов (429) — повторите через минуту"
             htmlPage && lastCode in 200..299 -> "Адрес отвечает веб-страницей, а не данными API"
+            aliveCode != 0 -> "Адрес API существует (код $aliveCode), но формат запроса другой — задайте адрес и тело вручную"
             lastCode == 0 -> "Нет соединения"
             else -> "Сервис не принял ни один вариант (последний код $lastCode)"
         }

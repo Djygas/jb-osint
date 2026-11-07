@@ -3,12 +3,14 @@ package ru.jbosint.osint
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.jbosint.osint.data.CustomResponseParser
 import ru.jbosint.osint.data.DiagBlock
 import ru.jbosint.osint.data.DiagMask
 import ru.jbosint.osint.data.DiagReport
+import ru.jbosint.osint.data.DiagSamples
 import ru.jbosint.osint.data.JsonShape
 
 class DiagnosticsTest {
@@ -84,5 +86,15 @@ class DiagnosticsTest {
         assertTrue(text.contains("Секреты скрыты"))
         assertTrue(text.contains("Итого: модулей 2"))
         assertTrue(text.contains("JSON-путь → поле"))
+    }
+
+    @Test
+    fun diagnosticsUsesProviderSpecificSampleQuery() {
+        // Общий «osint» для HIBP/IPinfo/urlscan заведомо пуст — проверять надо своим типом данных.
+        assertEquals("test@example.com", DiagSamples.forProvider("hibp"))
+        assertEquals("8.8.8.8", DiagSamples.forProvider("ipinfo"))
+        assertEquals("example.com", DiagSamples.forProvider("urlscan"))
+        assertTrue(DiagSamples.acceptedFor("hibp")!!.contains("email"))
+        assertNull(DiagSamples.forProvider("unknown-provider"))
     }
 }
