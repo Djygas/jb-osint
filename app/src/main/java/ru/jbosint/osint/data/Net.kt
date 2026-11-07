@@ -32,7 +32,13 @@ object Net {
      * @param crossHostRedirect хост, на который сервис пытался перенаправить запрос.
      * Запрос по нему НЕ выполняется: адрес API должен указать пользователь вручную.
      */
-    data class Response(val code: Int, val body: String, val crossHostRedirect: String? = null) {
+    data class Response(
+        val code: Int,
+        val body: String,
+        val crossHostRedirect: String? = null,
+        /** Заголовок Retry-After в секундах, если сервис его прислал. */
+        val retryAfter: Int? = null
+    ) {
         val ok: Boolean get() = code in 200..299 && body.isNotBlank()
         fun json(): JSONObject = JSONObject(body)
     }
@@ -107,7 +113,11 @@ object Net {
                     target = next.toString()
                     return@use
                 }
-                return Response(response.code, response.body?.string().orEmpty())
+                return Response(
+                    response.code,
+                    response.body?.string().orEmpty(),
+                    retryAfter = response.header("Retry-After")?.toIntOrNull()
+                )
             }
         }
     }

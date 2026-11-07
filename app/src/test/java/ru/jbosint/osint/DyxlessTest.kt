@@ -58,6 +58,17 @@ class DyxlessTest {
     }
 
     @Test
+    fun telegramIdNeedsExplicitPrefix() {
+        // 9–11 цифр без префикса — телефон; Telegram по ID только явно.
+        val body = request("id:123456789")
+        assertEquals("telegram.search", body.getString("product"))
+        val condition = body.getJSONObject("query")
+        assertEquals("id", condition.getString("field"))
+        assertEquals("123456789", condition.getString("value"))
+        assertNull(DyxlessApi.request("id:not-a-number", 10.0))
+    }
+
+    @Test
     fun fullNameBuildsThreeConditions() {
         val all = request("Иванов Иван Иванович").getJSONObject("query").getJSONArray("all")
         assertEquals(3, all.length())

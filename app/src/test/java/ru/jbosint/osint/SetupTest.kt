@@ -73,6 +73,11 @@ class ProviderGuessTest {
         assertEquals("github", ProviderGuess.byKeyPrefix("ghp_1234567890"))
         assertEquals("gitlab", ProviderGuess.byKeyPrefix("glpat-1234567890"))
         assertEquals("google", ProviderGuess.byKeyPrefix("AIzaSyA1234567890"))
+        // Ключ проекта Dyxless v3: dyx3_<uuid>.<секрет>
+        assertEquals(
+            "dyxless",
+            ProviderGuess.byKeyPrefix("dyx3_a5f4441d-f354-4260-9991-8a71fb06ac32.secretpart")
+        )
         assertNull(ProviderGuess.byKeyPrefix("plainkey123456"))
     }
 

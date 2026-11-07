@@ -70,9 +70,9 @@ object ProviderCatalog {
             "access_token", "https://dev.vk.com/", ProviderGroup.SOCIAL
         ),
         ProviderSpec(
-            "dyxless", "Dyxless", "Записи по email, телефону, IP и ФИО",
+            "dyxless", "Dyxless", "Записи по email, телефону, IP, ФИО и Telegram",
             "Ключ проекта (Bearer-токен)", "https://api.dyxless.im/docs/", ProviderGroup.LEAKS,
-            requiresSecondField = "Максимум ₽ на запрос"
+            requiresSecondField = "Максимум ₽ на запрос (Telegram-поиск — от 10)"
         ),
         ProviderSpec(
             "opencorporates", "OpenCorporates", "Юридические лица",

@@ -764,6 +764,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             ?: return ConnectionUi(done = true, ok = false, title = "Нет такого модуля", detail = why)
         appendStep("Сервис: ${spec.title} — $why")
         keys.saveKey(id, key)
+        // Платному модулю нужен лимит расхода: без него проверка не пройдёт и поиск молчит.
+        if (spec.requiresSecondField != null && keys.secondField(id).isBlank() && id == "dyxless") {
+            keys.saveSecondField(id, "10")
+            appendStep("Лимит расхода: 10 ₽ на запрос — меняется в настройках модуля.")
+        }
         keys.setEnabled(id, true)
         refreshProviders()
         appendStep("Ключ сохранён, модуль включён. Проверяем…")

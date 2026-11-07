@@ -131,7 +131,9 @@ object ProviderGuess {
     private val byPrefix: List<Pair<(String) -> Boolean, String>> = listOf(
         { k: String -> k.startsWith("ghp_") || k.startsWith("gho_") || k.startsWith("ghs_") || k.startsWith("github_pat_") } to "github",
         { k: String -> k.startsWith("glpat-") } to "gitlab",
-        { k: String -> k.startsWith("AIza") } to "google"
+        { k: String -> k.startsWith("AIza") } to "google",
+        // Ключ проекта Dyxless v3: dyx3_<uuid>.<секрет>
+        { k: String -> k.startsWith("dyx3_") || k.startsWith("dyx_") } to "dyxless"
     )
 
     fun hostOf(url: String?): String? = url?.let { SourceLink.parse(it)?.host }

@@ -404,8 +404,11 @@ private object VkConnector : Connector {
 private object DyxlessConnector : Connector {
     override val id = "dyxless"
     private const val BASE = "https://api.dyxless.im"
-    private const val MAX_POLLS = 8
-    private const val POLL_DELAY_MS = 1500L
+
+    /** Сколько всего ждём результат. Telegram-поиск бывает медленнее обычного. */
+    private const val DEADLINE_MS = 60_000L
+    private const val MIN_DELAY_MS = 1_200L
+    private const val MAX_DELAY_MS = 8_000L
 
     override suspend fun collect(query: String, key: KeyRepository): List<RawFact> {
         val token = key.key(id)
@@ -422,6 +425,7 @@ private object DyxlessConnector : Connector {
         val created = Net.fetch(
             "$BASE/v3/searches", headers, attempts = 1, method = "POST", body = body.toString()
         )
+        // 401/402/403 — ключ, баланс или права: повторять и опрашивать нечего.
         if (created.code !in 200..299) return emptyList()
         val meta = runCatching { JSONObject(created.body) }.getOrNull() ?: return emptyList()
         val operationId = meta.optString("operationId").ifBlank { meta.optString("requestId") }
@@ -429,23 +433,29 @@ private object DyxlessConnector : Connector {
 
         var state = meta.optString("state")
         var resultUrl = meta.optString("resultUrl")
-        var polls = 0
-        while (state !in DyxlessApi.TERMINAL_OK && polls < MAX_POLLS) {
+        var wait = created.retryAfter?.times(1000L) ?: MIN_DELAY_MS
+        val until = System.currentTimeMillis() + DEADLINE_MS
+        while (state !in DyxlessApi.TERMINAL_OK) {
             if (state in DyxlessApi.TERMINAL_FAIL) return emptyList()
-            delay(POLL_DELAY_MS)
-            polls++
-            val status = Net.json("$BASE/v3/searches/$operationId", headers).getOrNull() ?: continue
-            state = status.optString("state")
-            if (resultUrl.isBlank()) resultUrl = status.optString("resultUrl")
+            if (System.currentTimeMillis() >= until) return emptyList()
+            delay(wait.coerceIn(MIN_DELAY_MS, MAX_DELAY_MS))
+            val status = Net.fetch("$BASE/v3/searches/$operationId", headers, attempts = 1)
+            if (status.code !in 200..299) continue
+            val json = runCatching { JSONObject(status.body) }.getOrNull() ?: continue
+            state = json.optString("state")
+            if (resultUrl.isBlank()) resultUrl = json.optString("resultUrl")
+            wait = (status.retryAfter?.times(1000L) ?: (wait + 800L))
         }
-        if (state !in DyxlessApi.TERMINAL_OK) return emptyList()
 
-        val page = Net.json(
+        val page = Net.fetch(
             if (resultUrl.isNotBlank()) DyxlessApi.absolute(resultUrl)
             else "$BASE/v3/searches/$operationId/results",
-            headers
-        ).getOrNull() ?: return emptyList()
-        val data = page.optJSONArray("data") ?: return emptyList()
+            headers,
+            attempts = 1
+        )
+        if (page.code !in 200..299) return emptyList()
+        val json = runCatching { JSONObject(page.body) }.getOrNull() ?: return emptyList()
+        val data = json.optJSONArray("data") ?: return emptyList()
         return DyxlessApi.parse(data, query)
     }
 }
@@ -486,18 +496,31 @@ internal object DyxlessApi {
 
     /** Тело запроса: тип поиска, условие и жёсткий лимит расхода. Null — искать нечего. */
     fun request(query: String, cap: Double): JSONObject? {
-        val kind = QueryDetector.detect(query)
+        val raw = query.trim()
+        // Явные подсказки: `id:123456789` — Telegram по ID, `tg:@ник` — по нику.
+        // Без них номер из 9–11 цифр не отличить от телефона.
+        val forcedId = when {
+            raw.startsWith("id:", ignoreCase = true) -> raw.substring(3).trim()
+            raw.startsWith("tgid:", ignoreCase = true) -> raw.substring(5).trim()
+            else -> null
+        }
+        val kind = if (forcedId != null) QueryKind.USERNAME else QueryDetector.detect(raw)
         var product = "records.search"
-        val condition: JSONObject = when (kind) {
-            QueryKind.EMAIL -> cond("email", query)
-            QueryKind.PHONE -> cond("phone", phoneDigits(query))
-            QueryKind.IP -> cond("ip", query)
-            QueryKind.USERNAME -> {
+        val condition: JSONObject = when {
+            forcedId != null -> {
+                if (forcedId.isEmpty() || !forcedId.all { it.isDigit() }) return null
                 product = "telegram.search"
-                cond("username", query.trim().trimStart('@'))
+                cond("id", forcedId)
             }
-            QueryKind.NAME -> {
-                val parts = query.split(Regex("\\s+")).filter { it.isNotBlank() }
+            kind == QueryKind.EMAIL -> cond("email", raw)
+            kind == QueryKind.PHONE -> cond("phone", phoneDigits(raw))
+            kind == QueryKind.IP -> cond("ip", raw)
+            kind == QueryKind.USERNAME -> {
+                product = "telegram.search"
+                cond("username", raw.trimStart('@'))
+            }
+            kind == QueryKind.NAME -> {
+                val parts = raw.split(Regex("\\s+")).filter { it.isNotBlank() }
                 // Dyxless не ищет по частичному имени: нужны три поля ФИО.
                 if (parts.size < 3) return null
                 JSONObject().put(
