@@ -9,8 +9,8 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Машиночитаемое представление отчёта (JSON) для дальнейшей программной обработки.
- * Не содержит названий источников — только число подтверждений.
+ * Машиночитаемое представление досье (JSON) для дальнейшей программной обработки.
+ * Каждый факт сопровождается источником, ссылкой-доказательством, датой и статусом.
  */
 class JsonReport(
     private val meta: ReportMeta,
@@ -19,13 +19,15 @@ class JsonReport(
     fun build(): String {
         val sb = StringBuilder(16384)
         sb.append("{\n")
-        sb.append("  \"schema\": \"jb-osint/report/1.0\",\n")
+        sb.append("  \"schema\": \"jb-osint/report/2.0\",\n")
         sb.append("  \"generator\": \"JB OSINT ${meta.appVersion}\",\n")
         sb.append("  \"report_id\": ${str(meta.reportId)},\n")
         sb.append("  \"generated_at\": ${str(isoDate(meta.createdAt))},\n")
         sb.append("  \"classification\": ${str(meta.classification)},\n")
         sb.append("  \"analyst\": ${str(meta.analyst.ifBlank { "Не указан" })},\n")
         sb.append("  \"query\": ${str(data.query)},\n")
+        sb.append("  \"query_type\": ${str(meta.queryType)},\n")
+        if (meta.photoNote.isNotBlank()) sb.append("  \"photo_note\": ${str(meta.photoNote)},\n")
 
         sb.append("  \"methodology\": {\n")
         sb.append("    \"techniques\": [\"сбор и нормализация\", \"триангуляция данных\", \"перекрёстная проверка\", \"анализ метаданных\"],\n")
@@ -44,6 +46,27 @@ class JsonReport(
         sb.append("    \"duration_ms\": ${data.stats.durationMs}\n")
         sb.append("  },\n")
 
+        sb.append("  \"sections\": {\n")
+        sb.append("    \"telegram\": ${ReportSections.telegramFacts(data).size},\n")
+        sb.append("    \"social\": ${ReportSections.socialFacts(data).size},\n")
+        sb.append("    \"emails\": ${ReportSections.emailFacts(data).size},\n")
+        sb.append("    \"leaks\": ${ReportSections.leakFacts(data).size},\n")
+        sb.append("    \"documents\": ${ReportSections.documentFacts(data).size},\n")
+        sb.append("    \"media\": ${ReportSections.mediaFacts(data).size}\n")
+        sb.append("  },\n")
+
+        sb.append("  \"sources\": [")
+        val refs = data.sources.ifEmpty { SourceCatalog.forFacts(data.facts) }
+        refs.forEachIndexed { index, src ->
+            if (index > 0) sb.append(',')
+            sb.append("\n    {\"id\": ").append(str(src.id))
+                .append(", \"name\": ").append(str(src.name))
+                .append(", \"url\": ").append(str(src.url))
+                .append(", \"facts\": ").append(data.facts.count { src.id in it.sourceIds })
+                .append("}")
+        }
+        sb.append("\n  ],\n")
+
         sb.append("  \"confidence_summary\": {")
         val levels = Confidence.entries.reversed()
         levels.forEachIndexed { index, level ->
@@ -58,7 +81,13 @@ class JsonReport(
             sb.append("  \"ai_analysis\": {\n")
             sb.append("    \"model\": \"external\",\n")
             sb.append("    \"analysis\": ").append(str(aiAnalysis)).append(",\n")
-            sb.append("    \"narrative\": ").append(str(aiNarrative)).append("\n")
+            sb.append("    \"narrative\": ").append(str(aiNarrative)).append(",\n")
+            sb.append("    \"notes\": {")
+            meta.aiNotes.entries.forEachIndexed { noteIndex, entry ->
+                if (noteIndex > 0) sb.append(", ")
+                sb.append(str(entry.key)).append(": ").append(str(entry.value))
+            }
+            sb.append("}\n")
             sb.append("  },\n")
         }
 
@@ -74,6 +103,23 @@ class JsonReport(
             sb.append("\"source_count\": ").append(fact.sourceCount).append(", ")
             sb.append("\"observations\": ").append(fact.observations).append(", ")
             sb.append("\"confidence\": ").append(str(fact.confidence.title)).append(", ")
+            sb.append("\"first_seen\": ").append(str(ReportSections.dateText(fact.firstSeen))).append(", ")
+            sb.append("\"source_names\": ").append(str(ReportSections.sourceNames(fact))).append(", ")
+            sb.append("\"evidence_url\": ").append(str(ReportSections.evidenceUrl(fact))).append(", ")
+            sb.append("\"status\": ").append(str(ReportSections.statusLine(fact, data))).append(", ")
+            sb.append("\"note\": ").append(str(ReportSections.noteFor(fact, meta))).append(", ")
+            sb.append("\"sources\": [")
+            fact.sourceIds.forEachIndexed { srcIndex, id ->
+                if (srcIndex > 0) sb.append(", ")
+                sb.append(str(id))
+            }
+            sb.append("], ")
+            sb.append("\"urls\": [")
+            fact.urls.forEachIndexed { urlIndex, url ->
+                if (urlIndex > 0) sb.append(", ")
+                sb.append(str(url))
+            }
+            sb.append("], ")
             sb.append("\"attributes\": {")
             fact.attributes.entries.forEachIndexed { attrIndex, entry ->
                 if (attrIndex > 0) sb.append(", ")

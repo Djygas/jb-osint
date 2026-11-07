@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.DataObject
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.TableChart
@@ -152,6 +153,48 @@ fun ResultsScreen(state: UiState, vm: AppViewModel) {
         }
 
         item { HeroCard(data, reportId, state.analyst, state.resultEntry?.createdAt ?: System.currentTimeMillis()) }
+
+        val photo = state.photo
+        if (photo != null || !state.resultEntry?.photoNote.isNullOrBlank()) {
+            item {
+                Column(
+                    modifier = Modifier.fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(JbSurface)
+                        .border(1.dp, JbBorder, RoundedCornerShape(16.dp))
+                        .padding(14.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Filled.PhotoCamera, contentDescription = null,
+                            tint = JbAccent2, modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Исследование по фотографии",
+                            style = MaterialTheme.typography.labelMedium, color = JbAccent2
+                        )
+                        Spacer(Modifier.weight(1f))
+                        if (photo != null && photo.hits > 0) Pill("совпадений: ${photo.hits}", JbGreen)
+                    }
+                    if (photo != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(photo.fileName, style = MaterialTheme.typography.titleSmall, color = JbText)
+                        Text(photo.summary, style = MaterialTheme.typography.bodySmall, color = JbMuted)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "SHA-256: ${photo.sha256.take(32)}…",
+                            style = MaterialTheme.typography.labelSmall, color = JbFaint
+                        )
+                    }
+                    val note = state.resultEntry?.photoNote.orEmpty()
+                    if (note.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(note, style = MaterialTheme.typography.bodySmall, color = JbMuted)
+                    }
+                }
+            }
+        }
 
         item {
             Column {

@@ -64,7 +64,7 @@ class ProviderCatalogTest {
 
     @Test
     fun everyProviderHasConnector() {
-        ProviderCatalog.all.forEach { spec ->
+        ProviderCatalog.all.filter { !it.photoOnly }.forEach { spec ->
             assertNotNull("нет коннектора для ${spec.id}", Connectors.byId(spec.id))
         }
     }
@@ -84,10 +84,47 @@ class ProviderCatalogTest {
 
     @Test
     fun everyProviderHasUsableMetadata() {
-        ProviderCatalog.all.forEach { spec ->
+        ProviderCatalog.all.filter { !it.photoOnly }.forEach { spec ->
             assertTrue("${spec.id}: пустой title", spec.title.isNotBlank())
             assertTrue("${spec.id}: пустой hint", spec.hint.isNotBlank())
             assertTrue("${spec.id}: docsUrl не https", spec.docsUrl.startsWith("https://"))
         }
+    }
+}
+
+class PhotoSearchTest {
+
+    @org.junit.Test
+    fun handlesExtractedFromSourceLinks() {
+        val handles = ru.jbosint.osint.data.PhotoAnalyzer.handlesFrom(
+            listOf(
+                "https://x.com/ivan_petrov/status/12345",
+                "https://vk.com/id777888",
+                "https://github.com/ivan-petrov/repo",
+                "https://example.org/status/1",
+                "https://t.me/ivan_channel"
+            )
+        )
+        org.junit.Assert.assertEquals(listOf("ivan_petrov", "id777888", "ivan-petrov", "ivan_channel"), handles)
+    }
+
+    @org.junit.Test
+    fun photoFactsCarryHashAndFaces() {
+        val photo = ru.jbosint.osint.data.PhotoAnalysis(
+            fileName = "scan.jpg",
+            mime = "image/jpeg",
+            sha256 = "a".repeat(64),
+            pHash = "0123456789abcdef",
+            width = 1200,
+            height = 800,
+            faces = 2,
+            exif = mapOf("Модель" to "Pixel 7", "Координаты" to "55.75, 37.61"),
+            bytes = ByteArray(4)
+        )
+        val facts = ru.jbosint.osint.data.PhotoAnalyzer.facts(photo)
+        org.junit.Assert.assertTrue(facts.any { it.kind == "Файл" && it.value == "scan.jpg" })
+        org.junit.Assert.assertTrue(facts.any { it.kind == "Лица на снимке" && it.value == "2" })
+        org.junit.Assert.assertTrue(facts.any { it.kind == "Координаты" })
+        org.junit.Assert.assertTrue(facts.all { it.sourceId == "photo" })
     }
 }

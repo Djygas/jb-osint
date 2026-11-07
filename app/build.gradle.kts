@@ -12,8 +12,8 @@ android {
         applicationId = "ru.jbosint.osint"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "1.7.0"
+        versionCode = 12
+        versionName = "1.8.0"
         resourceConfigurations += listOf("ru", "en")
     }
 
@@ -87,6 +87,9 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
+    implementation("com.google.mlkit:face-detection:16.1.7")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

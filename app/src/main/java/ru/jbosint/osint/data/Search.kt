@@ -15,7 +15,14 @@ import ru.jbosint.osint.core.model.RawFact
 import ru.jbosint.osint.core.model.SearchStats
 import kotlin.math.absoluteValue
 
-enum class QueryKind { EMAIL, PHONE, DOMAIN, IP, USERNAME, NAME }
+enum class QueryKind(val title: String) {
+    EMAIL("Адрес электронной почты"),
+    PHONE("Номер телефона"),
+    DOMAIN("Домен"),
+    IP("IP-адрес"),
+    USERNAME("Никнейм"),
+    NAME("Имя или название")
+}
 
 object QueryDetector {
     private val email = Regex("^[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}$")
@@ -1021,6 +1028,7 @@ class SearchEngine(
         }
         val demo = settings.demoMode
         if (demo) modules += DemoConnector
+        val sourceNames = customModules.associate { "custom_" + it.first.id.take(8) to it.first.title }
 
         onStage("Запуск модулей", 0)
         var responded = 0
@@ -1034,7 +1042,10 @@ class SearchEngine(
                         kotlinx.coroutines.withTimeout(25_000) { module.collect(cleanQuery, keys) }
                     }
                     if (result.isSuccess) {
-                        rawFacts += result.getOrThrow()
+                        rawFacts += result.getOrThrow().map { item ->
+                            if (item.sourceUrl.isNotBlank()) item
+                            else item.copy(sourceUrl = EvidenceLinks.url(module.id, cleanQuery, item.value))
+                        }
                         synchronized(this@SearchEngine) { responded++ }
                     } else {
                         synchronized(this@SearchEngine) { failed++ }
@@ -1051,6 +1062,13 @@ class SearchEngine(
             durationMs = System.currentTimeMillis() - started
         )
         onStage("Агрегация и проверка", 100)
-        Aggregator.aggregate(cleanQuery, rawFacts.toList(), stats)
+        val sources = modules.map { module ->
+            ru.jbosint.osint.core.model.SourceRef(
+                id = module.id,
+                name = sourceNames[module.id] ?: ru.jbosint.osint.core.report.SourceCatalog.ref(module.id).name,
+                url = ru.jbosint.osint.core.report.SourceCatalog.ref(module.id).url
+            )
+        }.distinctBy { it.id }
+        Aggregator.aggregate(cleanQuery, rawFacts.toList(), stats).copy(sources = sources)
     }
 }

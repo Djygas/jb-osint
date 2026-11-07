@@ -19,6 +19,7 @@ import org.json.JSONObject
 import ru.jbosint.osint.BuildConfig
 import ru.jbosint.osint.core.model.AggregatedData
 import ru.jbosint.osint.core.model.Fact
+import ru.jbosint.osint.core.model.FactCategory
 import ru.jbosint.osint.data.AssistantCatalog
 import ru.jbosint.osint.data.AssistantClassification
 import ru.jbosint.osint.data.AssistantParser
@@ -44,6 +45,11 @@ import ru.jbosint.osint.data.DiagMask
 import ru.jbosint.osint.data.DiagReport
 import ru.jbosint.osint.data.DiagSamples
 import ru.jbosint.osint.data.JsonShape
+import ru.jbosint.osint.data.DataMerge
+import ru.jbosint.osint.data.PhotoAnalysis
+import ru.jbosint.osint.data.PhotoAnalyzer
+import ru.jbosint.osint.data.QueryDetector
+import ru.jbosint.osint.data.ReverseImage
 import ru.jbosint.osint.data.Net
 import ru.jbosint.osint.core.model.RawFact
 import ru.jbosint.osint.data.FieldRule
@@ -87,6 +93,15 @@ data class ProviderUi(
 
 data class ShareRequest(val uri: Uri, val mime: String, val fileName: String)
 
+/** Краткая карточка снимка, по которому выполняется или выполнен поиск. */
+data class PhotoCard(
+    val fileName: String,
+    val summary: String,
+    val faces: Int,
+    val sha256: String,
+    val hits: Int = 0
+)
+
 /** Предварительная выборка: факты без сохранения истории и без отчёта. */
 data class PreviewState(
     val running: Boolean = false,
@@ -110,6 +125,7 @@ data class UiState(
     val searchError: String? = null,
     val result: AggregatedData? = null,
     val resultEntry: HistoryEntry? = null,
+    val photo: PhotoCard? = null,
     val history: List<HistoryEntry> = emptyList(),
     val providers: List<ProviderUi> = emptyList(),
     val customModules: List<CustomModule> = emptyList(),
@@ -334,7 +350,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     createdAt = System.currentTimeMillis(),
                     analyst = settings.analyst,
                     data = data,
-                    demo = settings.demoMode
+                    demo = settings.demoMode,
+                    queryType = QueryDetector.detect(effective).title
                 )
                 val entries = withContext(Dispatchers.IO) {
                     historyStore.save(entry)
@@ -363,6 +380,124 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+    }
+
+    /** «Поиск по фото»: разбор снимка, обратный поиск и уточнение найденных профилей. */
+    fun startPhotoSearch(uri: Uri) {
+        val current = _state.value
+        if (current.searching || current.preview?.running == true) return
+        _state.update {
+            it.copy(
+                searching = true, stage = "Анализ фотографии", progress = 3,
+                searchError = null, result = null, resultEntry = null, photo = null,
+                research = "", researchError = null, classifications = emptyMap()
+            )
+        }
+        viewModelScope.launch {
+            val started = System.currentTimeMillis()
+            val outcome = runCatching {
+                val app = getApplication<Application>()
+                val photo = PhotoAnalyzer.analyze(app, uri)
+                _state.update {
+                    it.copy(
+                        stage = "Обратный поиск по изображению", progress = 30,
+                        photo = PhotoCard(photo.fileName, photo.summary(), photo.faces, photo.sha256, 0)
+                    )
+                }
+                val photoFacts = PhotoAnalyzer.facts(photo).toMutableList()
+                val key = keys.key("saucenao")
+                val hits = if (key.isNotBlank()) {
+                    runCatching { ReverseImage.sauceNao(key, photo) }.getOrElse { emptyList() }
+                } else emptyList()
+
+                hits.forEach { hit ->
+                    photoFacts += RawFact(
+                        category = FactCategory.DOCUMENT,
+                        kind = "Совпадение изображения",
+                        value = hit.url,
+                        subject = photo.fileName,
+                        attributes = mapOf(
+                            "совпадение" to "${hit.similarity}%",
+                            "ресурс" to hit.provider,
+                            "название" to hit.title
+                        ),
+                        sourceId = "photo",
+                        sourceUrl = hit.url
+                    )
+                }
+                val handles = PhotoAnalyzer.handlesFrom(hits.map { it.url }).take(3)
+                val parts = mutableListOf<AggregatedData>()
+                handles.forEachIndexed { index, handle ->
+                    _state.update {
+                        it.copy(stage = "Уточнение по найденному профилю: $handle", progress = 40 + index * 15)
+                    }
+                    runCatching { engine.search(handle, { _, _ -> }, customStore.activeModules()) }
+                        .getOrNull()?.let { parts += it }
+                }
+                val merged = DataMerge.merge(
+                    query = "Фото ${photo.fileName}",
+                    parts = parts,
+                    extra = photoFacts,
+                    durationMs = System.currentTimeMillis() - started
+                )
+                val note = buildPhotoNote(photo, hits.size, handles, key.isNotBlank())
+                _state.update { s ->
+                    s.copy(photo = s.photo?.copy(hits = hits.size) ?: PhotoCard(photo.fileName, photo.summary(), photo.faces, photo.sha256, hits.size))
+                }
+                merged to note
+            }
+            outcome.onSuccess { (data, note) ->
+                val entry = HistoryEntry(
+                    id = historyStore.newId(),
+                    query = data.query,
+                    createdAt = System.currentTimeMillis(),
+                    analyst = settings.analyst,
+                    data = data,
+                    demo = settings.demoMode,
+                    queryType = "Фотография",
+                    photoNote = note
+                )
+                val entries = withContext(Dispatchers.IO) {
+                    historyStore.save(entry)
+                    historyStore.list()
+                }
+                _state.update {
+                    it.copy(
+                        searching = false, progress = 100, stage = "Готово",
+                        result = data, resultEntry = entry, screen = Screen.RESULTS, history = entries
+                    )
+                }
+                autoEnrich(entry)
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        searching = false, progress = 0, stage = "", photo = null,
+                        searchError = "Поиск по фото прерван: ${error.message ?: "неизвестная ошибка"}"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun buildPhotoNote(
+        photo: PhotoAnalysis,
+        hits: Int,
+        handles: List<String>,
+        providerReady: Boolean
+    ): String {
+        val parts = mutableListOf<String>()
+        parts += "Снимок: ${photo.summary()}."
+        if (photo.exif["Координаты"] != null) parts += "В файле сохранена геометка — она включена в отчёт."
+        parts += when {
+            !providerReady -> "Обратный поиск по изображению не выполнялся: не добавлен ключ модуля SauceNAO."
+            hits == 0 -> "Обратный поиск выполнен, совпадений выше порога не найдено."
+            else -> "Обратный поиск: $hits совпадений, ссылки добавлены в доказательную базу."
+        }
+        if (handles.isNotEmpty()) {
+            parts += "По найденным ссылкам дополнительно проверены профили: ${handles.joinToString(", ")}."
+        }
+        parts += "Выводы по личности на снимке не делаются автоматически: совпадение изображения не подтверждает тождество."
+        return parts.joinToString(" ")
     }
 
     // ------------------------------------------------------------------ история
@@ -1118,7 +1253,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             var current = entry
             if (assistantStore.autoClassify) {
                 val map = doClassification(current)
-                if (map.isNotEmpty()) _state.update { it.copy(classifications = it.classifications + map) }
+                if (map.isNotEmpty()) {
+                    _state.update { it.copy(classifications = it.classifications + map) }
+                    current = current.copy(
+                        aiNotes = current.aiNotes + map.mapValues { (_, v) -> "${v.typeLabel} · значимость ${v.relevanceLabel}" }
+                    )
+                    persistEntry(current)
+                }
             }
             if (assistantStore.autoAnalyze) {
                 doAnalysis(current).onSuccess { text ->

@@ -39,11 +39,13 @@ object Aggregator {
                     subject = subject,
                     attributes = item.attributes.filterValues { it.isNotBlank() }.toMutableMap(),
                     sourceIds = mutableSetOf(item.sourceId),
-                    observations = item.weight.coerceAtLeast(1)
+                    observations = item.weight.coerceAtLeast(1),
+                    urls = collectUrls(item, attributes = item.attributes).toMutableSet()
                 )
             } else {
                 existing.sourceIds += item.sourceId
                 existing.observations += item.weight.coerceAtLeast(1)
+                existing.urls += collectUrls(item, attributes = item.attributes)
                 for ((k, v) in item.attributes) {
                     if (v.isBlank()) continue
                     val prev = existing.attributes[k]
@@ -137,6 +139,22 @@ object Aggregator {
             .take(MAX_LINKS)
     }
 
+    private val urlRegex = Regex("https?://[^\\s;,)»\"']+", RegexOption.IGNORE_CASE)
+
+    /**
+     * Ссылки-доказательства: явная ссылка наблюдения, значение-URL и адреса из атрибутов.
+     * Нужны для строки «Источник: модуль (ссылка)» в отчёте.
+     */
+    private fun collectUrls(item: RawFact, attributes: Map<String, String>): Set<String> {
+        val found = LinkedHashSet<String>()
+        if (item.sourceUrl.startsWith("http")) found += item.sourceUrl
+        if (item.value.startsWith("http")) found += item.value
+        attributes.values.forEach { text ->
+            urlRegex.findAll(text).take(3).forEach { found += it.value.trimEnd('.', ',', ')') }
+        }
+        return found.map { it.take(500) }.toSet()
+    }
+
     private fun mergeAttribute(a: String, b: String): String {
         val parts = (a.split("; ") + b.split("; ")).map { it.trim() }.filter { it.isNotBlank() }
         return parts.distinctBy { it.lowercase() }.take(4).joinToString("; ")
@@ -200,7 +218,8 @@ object Aggregator {
         val subject: String,
         val attributes: MutableMap<String, String>,
         val sourceIds: MutableSet<String>,
-        var observations: Int
+        var observations: Int,
+        val urls: MutableSet<String> = LinkedHashSet()
     ) {
         fun toFact() = Fact(
             category = category,
@@ -209,7 +228,8 @@ object Aggregator {
             subject = subject,
             attributes = attributes.toMap(),
             sourceIds = sourceIds.toSet(),
-            observations = observations
+            observations = observations,
+            urls = urls.toSet()
         )
     }
 }

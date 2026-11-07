@@ -26,7 +26,9 @@ data class ProviderSpec(
     val group: ProviderGroup,
     val requiresSecondField: String? = null,
     /** Публичный API: ключ не требуется, модуль включается тумблером. */
-    val keyless: Boolean = false
+    val keyless: Boolean = false,
+    /** Ключ используется отдельным сценарием (например, поиск по фото), а не текстовым поиском. */
+    val photoOnly: Boolean = false
 )
 
 object ProviderCatalog {
@@ -112,6 +114,10 @@ object ProviderCatalog {
         ProviderSpec(
             "gitlab", "GitLab", "Профили и публичные проекты",
             "Ключ не требуется", "https://docs.gitlab.com/ee/api/users.html", ProviderGroup.SOCIAL, keyless = true
+        ),
+        ProviderSpec(
+            "saucenao", "SauceNAO (поиск по фото)", "Обратный поиск по изображению: источник, автор, похожие файлы",
+            "api_key", "https://saucenao.com/user.php?page=search-api", ProviderGroup.SEARCH, photoOnly = true
         ),
         ProviderSpec(
             "google", "Google Custom Search", "Веб-индекс",

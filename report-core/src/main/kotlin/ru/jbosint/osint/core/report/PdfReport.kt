@@ -97,14 +97,19 @@ class PdfReport(
 
     fun build(): ByteArray {
         titlePage()
+        introSection()
         methodology()
         summarySection()
-        linksSection()
-        leaksSection()
         telegramSection()
-        factsSection()
-        confidenceSection()
+        socialSection()
+        emailSection()
+        leaksSection()
+        linksSection()
+        dossierSection()
+        documentsSection()
+        mediaSection()
         aiSection()
+        confidenceSection()
         limitationsSection()
         appendix()
         paginate()
@@ -215,43 +220,100 @@ class PdfReport(
         p.polygon(points, strokeColor = color, strokeWidth = width)
     }
 
+    // ---------------------------------------------------------------- введение
+
+    private fun introSection() {
+        contentPage("Введение")
+        h1("0. Введение")
+        p("Настоящий документ представляет собой полное досье, подготовленное по результатам " +
+            "автоматизированного сбора и верификации сведений из открытых источников (OSINT). " +
+            "Досье объединяет цифровые следы объекта, документальные данные, медиаматериалы и " +
+            "аналитические выводы, а каждое сведение сопровождается указанием источника и ссылки " +
+            "на страницу, где оно было обнаружено.")
+
+        label("ОБЪЕКТ ИССЛЕДОВАНИЯ")
+        callout("Запрос: «${data.query}». Категория запроса: ${meta.queryType.ifBlank { "не определена" }}. " +
+            "Классификация документа: ${meta.classification}.")
+
+        label("ОСНОВАНИЕ И ЦЕЛИ")
+        bullet("Собрать и нормализовать сведения об объекте из открытых источников.")
+        bullet("Установить и визуализировать связи между идентификаторами объекта.")
+        bullet("Оценить достоверность каждого сведения по числу независимых подтверждений.")
+        bullet("Сформировать доказательную базу: для каждого факта — источник, ссылка, дата и статус.")
+        bullet("Подготовить аналитическое заключение и рекомендации по дальнейшей проверке.")
+
+        label("ИСПОЛЬЗОВАННЫЕ ИСТОЧНИКИ (${sources().size})")
+        gap(4f)
+        val used = sources()
+        if (used.isEmpty()) {
+            p("Модули сбора не зафиксировали источник — сведения получены встроенным поиском JB OSINT.", color = Palette.muted)
+        } else {
+            table(
+                columns = listOf(
+                    Column("№", 20f),
+                    Column("Модуль", 150f),
+                    Column("Ресурс", contentW - 20f - 150f - 52f),
+                    Column("Сведений", 52f, Align.RIGHT)
+                ),
+                rows = used.mapIndexed { i, src ->
+                    val count = data.facts.count { src.id in it.sourceIds }
+                    listOf((i + 1).toString(), src.name, src.url.ifBlank { "—" }, count.toString())
+                }
+            )
+        }
+
+        gap(14f)
+        label("СТРУКТУРА ДОКУМЕНТА")
+        bullet("Раздел 0 — введение и методология сбора данных.")
+        bullet("Раздел 1 — сводные данные о субъекте.")
+        bullet("Раздел 2 — цифровые следы: Telegram, социальные сети, электронная почта, утечки, связи и доказательная база.")
+        bullet("Раздел 3 — документы и персональные данные.")
+        bullet("Раздел 4 — медиа и изображения.")
+        bullet("Раздел 5 — аналитика и выводы: заключение, достоверность, ограничения.")
+        bullet("Приложения A–C — словарь терминов, полный список источников со ссылками, сведения о документе.")
+    }
+
+    /** Модули, давшие наблюдения: явный список либо выведенный из фактов. */
+    private fun sources(): List<ru.jbosint.osint.core.model.SourceRef> =
+        data.sources.ifEmpty { SourceCatalog.forFacts(data.facts) }
+
     // ------------------------------------------------------------ методология
 
     private fun methodology() {
-        contentPage("Методология исследования")
-        h1("1. Методология исследования")
+        contentPage("Методология сбора")
+        h1("0.1. Методология сбора данных")
         p("Настоящий отчёт подготовлен по результатам автоматизированного сбора сведений из открытых " +
             "источников (OSINT) и последующей каскадной верификации полученных данных. Обработка выполнена " +
             "в четыре этапа, каждый из которых зафиксирован в структуре документа.")
 
-        h2("1.1. Сбор и нормализация")
+        h2("0.1.1. Сбор и нормализация")
         p("Запрос «${data.query}» был распределён между всеми активными модулями сбора. Каждый модуль вернул " +
             "структурированный набор наблюдений; значения приведены к единому виду: унифицированы регистр, " +
             "пробельные символы, форматы телефонных номеров, URL, доменных имён и почтовых адресов. " +
             "Служебные, пустые и дублирующиеся в пределах одного модуля поля отброшены. " +
             "Всего обработано ${data.stats.rawFacts} наблюдений от ${data.stats.sourcesResponded} модулей.")
 
-        h2("1.2. Триангуляция данных")
+        h2("0.1.2. Триангуляция данных")
         p("Каждое сведение сопоставлено с наблюдениями остальных модулей по нормализованному значению. " +
             "Совпадение в трёх и более независимых источниках трактуется как подтверждённое (триангуляция), " +
             "в двух — как вероятное, в одном — как требующее дополнительной проверки. Такой подход снижает " +
             "риск ошибки отдельного источника и исключает зависимость вывода от единственного канала получения данных.")
 
-        h2("1.3. Перекрёстная проверка (cross-referencing)")
+        h2("0.1.3. Перекрёстная проверка (cross-referencing)")
         p("Проведено сопоставление атрибутов между объектами исследования. Выявлены пересечения, при которых " +
             "один и тот же идентификатор — адрес электронной почты, номер, домен, никнейм или иное значение — " +
             "встречается у нескольких субъектов. Такие пересечения формируют связи, визуализированные и " +
             "перечисленные в разделе 3. Пересечение, обнаруженное в двух и более источниках, рассматривается " +
             "как устойчивая связь.")
 
-        h2("1.4. Анализ метаданных")
+        h2("0.1.4. Анализ метаданных")
         p("Для технических артефактов проанализированы метаданные: регистрационные сведения доменов, " +
             "DNS-записи, сетевая принадлежность IP-адресов, а также встроенные метаданные изображений " +
             "(модель устройства, временные метки, координаты съёмки). Метаданные использованы как " +
             "вспомогательный признак: они указывают направление проверки, но не рассматриваются как " +
             "самостоятельное доказательство.")
 
-        h2("1.5. Статистика сессии")
+        h2("0.1.5. Статистика сессии")
         statTable()
         gap(14f)
         categoryChart()
@@ -302,11 +364,16 @@ class PdfReport(
     // ------------------------------------------------------- сводная информация
 
     private fun summarySection() {
-        newContentPage("Сводная информация")
-        h1("2. Сводная информация")
-        p("Раздел содержит краткий профиль объекта исследования: ключевые атрибуты, распределение объектов " +
-            "и общую картину подтверждённости сведений. Он предназначен для быстрого ознакомления; " +
-            "подробные данные приведены в реестре (раздел 6).")
+        newContentPage("Сводные данные")
+        h1("1. Сводные данные о субъекте")
+        p("Раздел содержит профиль объекта исследования: ключевые атрибуты с указанием источника " +
+            "подтверждения, распределение объектов и общую картину подтверждённости сведений. " +
+            "Он предназначен для быстрого ознакомления; полная доказательная база с ссылками на каждый " +
+            "факт приведена в разделе 2.6 и приложении B.")
+        if (meta.photoNote.isNotBlank()) {
+            gap(4f)
+            callout(meta.photoNote)
+        }
 
         if (data.facts.isEmpty()) {
             callout("Сводка недоступна: по запросу «${data.query}» не получено сведений. Проверьте активность " +
@@ -324,13 +391,18 @@ class PdfReport(
         gap(4f)
         table(
             columns = listOf(
-                Column("Атрибут", 92f),
-                Column("Значение", 190f),
-                Column("Субъект", contentW - 92f - 190f - 76f),
-                Column("Достоверность", 76f)
+                Column("Атрибут", 84f),
+                Column("Значение", 150f),
+                Column("Источник подтверждения", contentW - 84f - 150f - 68f),
+                Column("Достоверность", 68f)
             ),
             rows = keyFacts.map {
-                listOf(it.kind, it.value, it.subject.ifBlank { "—" }, "● ${it.confidence.title}")
+                listOf(
+                    it.kind,
+                    it.value,
+                    ReportSections.sourceNames(it).ifBlank { "Поиск JB OSINT" },
+                    "● ${it.confidence.title}"
+                )
             },
             cellColors = { row, col -> if (col == 3) Palette.forConfidence(keyFacts[row].confidence) else null }
         )
@@ -338,7 +410,7 @@ class PdfReport(
         gap(14f)
         val confirmed = data.facts.count { it.confidence == Confidence.CONFIRMED }
         val unverified = data.facts.count { it.confidence == Confidence.UNVERIFIED }
-        h2("2.1. Общая картина")
+        h2("1.1. Общая картина")
         table(
             columns = listOf(
                 Column("Показатель", contentW - 90f),
@@ -355,11 +427,119 @@ class PdfReport(
 
         if (data.subjects.isNotEmpty()) {
             gap(12f)
-            h2("2.2. Объекты исследования")
+            h2("1.2. Объекты исследования")
             data.subjects.take(8).forEach { subject ->
                 val count = data.facts.count { it.subject == subject }
                 bullet("${subject.take(70)} — ${count} сведений")
             }
+        }
+    }
+
+    // ------------------------------------------------- социальные сети и почта
+
+    private fun socialSection() {
+        newContentPage("Социальные сети")
+        h1("2.2. Социальные сети и публичные профили")
+        p("Раздел объединяет найденные профили в социальных сетях и на публичных платформах. " +
+            "Для каждой записи указан модуль, обнаруживший ссылку, и адрес страницы; " +
+            "совпадение ссылки в нескольких модулях повышает достоверность.")
+
+        val social = ReportSections.socialFacts(data)
+        if (social.isEmpty()) {
+            gap(4f)
+            callout("Публичные профили в социальных сетях по запросу не обнаружены. Покрытие зависит от " +
+                "активных модулей сбора.")
+            return
+        }
+
+        label("НАЙДЕННЫЕ ПРОФИЛИ (${social.size})")
+        gap(4f)
+        table(
+            columns = listOf(
+                Column("№", 20f),
+                Column("Платформа", 72f),
+                Column("Профиль / ссылка", contentW - 20f - 72f - 104f - 58f),
+                Column("Источник", 104f),
+                Column("Статус", 58f)
+            ),
+            rows = social.take(60).mapIndexed { i, f ->
+                listOf(
+                    (i + 1).toString(),
+                    platformOf(f.value),
+                    f.value.take(88),
+                    ReportSections.sourceNames(f).ifBlank { "—" },
+                    "● ${f.confidence.title}"
+                )
+            },
+            cellColors = { row, col ->
+                if (col == 4) Palette.forConfidence(social[row].confidence) else null
+            }
+        )
+
+        gap(12f)
+        h2("2.2.1. Наблюдения")
+        bullet("Профилей в выборке: ${social.size}; платформ: ${social.map { platformOf(it.value) }.distinct().size}.")
+        bullet("Ссылки приведены в том виде, в котором их вернули модули сбора; доступность страниц " +
+            "на момент чтения отчёта не гарантируется.")
+        bullet("Для профилей с одним подтверждением рекомендуется ручная проверка: никнейм мог быть " +
+            "переиспользован другим лицом.")
+    }
+
+    private fun platformOf(value: String): String {
+        val v = value.lowercase()
+        return when {
+            "vk.com" in v || "vk.ru" in v -> "VK"
+            "ok.ru" in v -> "OK"
+            "instagram.com" in v -> "Instagram"
+            "facebook.com" in v -> "Facebook"
+            "twitter.com" in v || "//x.com" in v -> "X"
+            "tiktok.com" in v -> "TikTok"
+            "youtube.com" in v -> "YouTube"
+            "github.com" in v -> "GitHub"
+            "gitlab.com" in v -> "GitLab"
+            "linkedin.com" in v -> "LinkedIn"
+            "habr.com" in v -> "Habr"
+            "t.me" in v || "telegram" in v -> "Telegram"
+            else -> "Профиль"
+        }
+    }
+
+    private fun emailSection() {
+        newContentPage("Электронная почта")
+        h1("2.3. Адреса электронной почты")
+        p("Раздел содержит адреса электронной почты, связанные с объектом, и сведения об их участии " +
+            "в публичных утечках. Для каждого адреса указан источник и ссылка на страницу проверки.")
+
+        val emails = ReportSections.emailFacts(data)
+        if (emails.isEmpty()) {
+            gap(4f)
+            callout("Адреса электронной почты по запросу не обнаружены. Если запрос уже является адресом, " +
+                "проверьте, что модули поиска утечек активны.")
+            return
+        }
+
+        label("НАЙДЕННЫЕ АДРЕСА (${emails.size})")
+        gap(4f)
+        table(
+            columns = listOf(
+                Column("№", 20f),
+                Column("Адрес", contentW - 20f - 118f - 104f - 58f),
+                Column("Источник", 104f),
+                Column("Утечки", 58f, Align.RIGHT)
+            ),
+            rows = emails.take(60).mapIndexed { i, f ->
+                val leakCount = f.attributes["Записей"]?.takeIf { it.isNotBlank() }
+                    ?: if (ReportSections.leakFacts(data).any { it.value == f.value }) "есть" else "—"
+                listOf((i + 1).toString(), f.value, ReportSections.sourceNames(f).ifBlank { "—" }, leakCount)
+            }
+        )
+
+        gap(12f)
+        h2("2.3.1. Ссылки на проверку")
+        emails.take(30).forEach { f ->
+            val url = ReportSections.evidenceUrl(f)
+            bullet("${f.value} — ${ReportSections.sourceNames(f).ifBlank { "Поиск JB OSINT" }}" +
+                if (url.isBlank()) "" else " · $url")
         }
     }
 
@@ -372,8 +552,8 @@ class PdfReport(
     }
 
     private fun leaksSection() {
-        newContentPage("Анализ утечек")
-        h1("4. Анализ утечек и компрометации")
+        newContentPage("Утечки данных")
+        h1("2.4. Утечки данных и компрометация")
         p("Раздел обобщает сведения о попадании объекта в публичные базы утечек. Отсутствие записей не " +
             "гарантирует отсутствие компрометации: учитываются только те базы, к которым был доступ у " +
             "подключённых модулей сбора.")
@@ -417,7 +597,7 @@ class PdfReport(
         )
 
         gap(14f)
-        h2("4.1. Оценка риска")
+        h2("2.4.1. Оценка риска")
         val level = when {
             confirmed >= 2 || leaks.size >= 3 -> "ВЫСОКИЙ"
             confirmed == 1 || leaks.size == 2 -> "СРЕДНИЙ"
@@ -433,7 +613,7 @@ class PdfReport(
             "упоминание следует перепроверить по первичному источнику.")
 
         gap(8f)
-        h2("4.2. Рекомендации по снижению риска")
+        h2("2.4.2. Рекомендации по снижению риска")
         bullet("Сменить пароли всех учётных записей, связанных с найденными адресами, и включить " +
             "двухфакторную аутентификацию.")
         bullet("Проверить активные сессии и подключённые приложения в почтовых и облачных сервисах.")
@@ -453,8 +633,8 @@ class PdfReport(
     }
 
     private fun telegramSection() {
-        newContentPage("Telegram-аналитика")
-        h1("5. Telegram-аналитика")
+        newContentPage("Telegram")
+        h1("2.1. Telegram-профили и каналы")
         p("Раздел объединяет сведения о присутствии объекта в Telegram: каналы, боты и публичные профили, " +
             "а также связанные с ними метрики. Данные приведены в том виде, в котором их вернули модули сбора.")
 
@@ -494,7 +674,7 @@ class PdfReport(
         )
 
         gap(14f)
-        h2("5.1. Наблюдения")
+        h2("2.1.1. Наблюдения")
         bullet("Объектов Telegram в выборке: ${tg.size}; публичных ссылок: ${usernames.size}.")
         if (audience > 0) {
             bullet("Суммарная заявленная аудитория: $audience подписчиков (по данным модулей сбора).")
@@ -509,8 +689,8 @@ class PdfReport(
     // ------------------------------------------------------- профиль связей
 
     private fun linksSection() {
-        newContentPage("Цифровые следы")
-        h1("3. Цифровые следы и связи")
+        newContentPage("Связи")
+        h1("2.5. Связи и пересечения")
         p("Раздел отражает структуру отношений между установленными объектами. Узел схемы — объект " +
             "(субъект или значение), ребро — подтверждённое совпадение либо принадлежность атрибута. " +
             "Толщина ребра соответствует числу наблюдений, насыщенность цвета — числу независимых источников, " +
@@ -524,7 +704,7 @@ class PdfReport(
             gap(4f)
             graphPanel()
             gap(12f)
-            h2("3.1. Ключевые связи")
+            h2("2.5.1. Ключевые связи")
             val topLinks = data.links.take(14)
             table(
                 columns = listOf(
@@ -641,7 +821,7 @@ class PdfReport(
         val subjects = data.subjects.take(6)
         if (subjects.size < 2) return
         ensure(60f + subjects.size * 18f)
-        h2("3.2. Матрица пересечений")
+        h2("2.5.2. Матрица пересечений")
         p("Ячейка матрицы показывает число связей между объектами. Заполненные ячейки — подтверждённые " +
             "пересечения, пустые — отсутствие связи в текущей выборке.", leading = 12.4f)
 
@@ -681,75 +861,210 @@ class PdfReport(
         gap(6f)
     }
 
-    // ------------------------------------------------------------ реестр фактов
+    // ------------------------------------------------------ доказательная база
 
-    private fun factsSection() {
-        newContentPage("Реестр установленных фактов")
-        h1("6. Реестр установленных фактов")
-        p("Сведения сгруппированы по категориям. Для каждого факта указано число независимых источников, " +
-            "подтвердивших значение, и производный уровень достоверности. Дубликаты устранены на этапе " +
-            "нормализации; слияние выполнялось по нормализованному значению и субъекту.")
+    private fun dossierSection() {
+        newContentPage("Доказательная база")
+        h1("2.6. Доказательная база")
+        p("Раздел содержит все установленные сведения, сгруппированные по категориям. Каждый факт " +
+            "оформлен блоком досье: значение, обнаруженный источник со ссылкой на страницу, дата " +
+            "обнаружения, статус достоверности и примечание. Дубликаты устранены на этапе нормализации; " +
+            "слияние выполнялось по нормализованному значению и субъекту.")
 
         val ordered = FactCategory.entries.filter { (data.categoryCounts[it] ?: 0) > 0 }
         if (ordered.isEmpty()) {
             gap(4f)
-            callout("Реестр пуст: по запросу не получено пригодных сведений. Проверьте активность модулей сбора " +
-                "или измените формулировку запроса.")
+            callout("Доказательная база пуста: по запросу не получено пригодных сведений. Проверьте " +
+                "активность модулей сбора или измените формулировку запроса.")
             return
         }
 
+        var budget = 160
         ordered.forEachIndexed { index, category ->
             val facts = data.factsOf(category)
             gap(10f)
-            h2("6.${index + 1}. ${category.title} · ${facts.size}")
-            factTable(facts)
-            factDetails(facts)
+            h2("2.6.${index + 1}. ${category.title} · ${facts.size}")
+            dossierBlocks(facts, budget)
+            budget = (budget - facts.size).coerceAtLeast(0)
+            if (budget == 0) {
+                bullet("Дальнейшие блоки досье сокращены: полный перечень сведений приведён в " +
+                    "XLSX-выгрузке отчёта.")
+                return
+            }
         }
+        factsTable(ordered)
     }
 
-    private fun factTable(facts: List<Fact>) {
-        val columns = listOf(
-            Column("№", 20f),
-            Column("Сведение", 86f),
-            Column("Значение", 168f),
-            Column("Субъект", 96f),
-            Column("Ист.", 24f, Align.RIGHT),
-            Column("Достоверность", contentW - 20f - 86f - 168f - 96f - 24f)
+    /** Компактная таблица-указатель для быстрой навигации по разделам 2.6.N. */
+    private fun factsTable(ordered: List<FactCategory>) {
+        gap(14f)
+        h2("2.6.${ordered.size + 1}. Сводная таблица сведений")
+        val rows = ArrayList<List<String>>()
+        val colors = ArrayList<Rgb>()
+        var n = 0
+        ordered.forEach { category ->
+            data.factsOf(category).take(220).forEach { f ->
+                n += 1
+                rows += listOf(
+                    n.toString(), category.short, f.kind, f.value.take(48),
+                    f.sourceCount.toString(), "● ${f.confidence.title}"
+                )
+                colors += Palette.forConfidence(f.confidence)
+            }
+        }
+        table(
+            columns = listOf(
+                Column("№", 20f),
+                Column("Категория", 58f),
+                Column("Сведение", 78f),
+                Column("Значение", contentW - 20f - 58f - 78f - 26f - 74f),
+                Column("Ист.", 26f, Align.RIGHT),
+                Column("Достоверность", 74f)
+            ),
+            rows = rows,
+            cellColors = { row, col -> if (col == 5) colors[row] else null }
         )
-        val rows = facts.take(220).mapIndexed { i, f ->
-            listOf(
-                (i + 1).toString(),
-                f.kind,
-                f.value,
-                f.subject.ifBlank { "—" },
-                f.sourceCount.toString(),
-                "● ${f.confidence.title}"
-            )
-        }
-        val colors = facts.take(220).map { Palette.forConfidence(it.confidence) }
-        table(columns, rows, cellColors = { row, col -> if (col == 5) colors[row] else null })
     }
 
-    /** Детали фактов: поля исходного ответа сервиса, чтобы не терять контекст. */
-    private fun factDetails(facts: List<Fact>) {
-        val withDetails = facts.take(220).withIndex().filter { it.value.attributes.isNotEmpty() }
-        if (withDetails.isEmpty()) return
-        y += 2f
-        label("ДЕТАЛИ ИСХОДНОГО ОТВЕТА (${withDetails.size})")
-        withDetails.take(90).forEach { (index, fact) ->
-            val attrs = fact.attributes.entries
-                .filter { it.value.isNotBlank() }
-                .take(6)
-                .joinToString("; ") { "${it.key}: ${it.value}" }
-            bullet("№${index + 1} ${fact.kind} — ${fact.value.take(60)} · $attrs")
+    /** Блок досье: значение, источник со ссылкой, дата, статус, примечание. */
+    private fun dossierBlocks(facts: List<Fact>, budget: Int) {
+        val size = 8.7f
+        val leading = 12.6f
+        facts.take(budget).forEach { fact ->
+            val source = "Источник: " + ReportSections.sourceLine(fact)
+            val status = "Дата обнаружения: ${ReportSections.dateText(fact.firstSeen)} · Статус: " +
+                ReportSections.statusLine(fact, data)
+            val note = ReportSections.noteFor(fact, meta).let { if (it.isBlank()) "" else "Примечание: $it" }
+            val lines = wrap(source, fReg, 8.1f, contentW - 26f).size +
+                wrap(status, fReg, 8.1f, contentW - 26f).size +
+                (if (note.isBlank()) 0 else wrap(note, fReg, 8.1f, contentW - 26f).size)
+            val blockH = 20f + lines * leading + 8f
+            ensure(blockH + 6f)
+            val top = y
+            page.roundRect(marginL, pageH - top - blockH, contentW, blockH, 4f, fill = Palette.zebra)
+            page.rect(marginL, pageH - top - blockH, 2.2f, blockH, Palette.forConfidence(fact.confidence))
+            page.text(marginL + 10f, pageH - top - 12f, size, fSemi, fact.kind, Palette.muted, 0.4f)
+            val kindW = fSemi.width(fact.kind, size)
+            page.text(marginL + 20f + kindW, pageH - top - 12.4f, size + 0.6f, fBold, fact.value.take(150), Palette.ink)
+            var ty = top + 24f
+            page.text(marginL + 10f, pageH - ty - fReg.font.ascentPx(8.1f), 8.1f, fReg, source.take(240), Palette.body)
+            ty += leading * wrap(source, fReg, 8.1f, contentW - 26f).size
+            page.text(marginL + 10f, pageH - ty - fReg.font.ascentPx(8.1f), 8.1f, fReg, status.take(240), Palette.body)
+            ty += leading * wrap(status, fReg, 8.1f, contentW - 26f).size
+            if (note.isNotBlank()) {
+                page.text(marginL + 10f, pageH - ty - fReg.font.ascentPx(8.1f), 8.1f, fReg, note.take(240), Palette.muted)
+            }
+            y = top + blockH + 7f
         }
+    }
+
+    // ------------------------------------------------------------- документы
+
+    private fun documentsSection() {
+        newContentPage("Документы")
+        h1("3. Документы и персональные данные")
+        p("Раздел объединяет сведения документального характера: записи о регистрации, доменные и " +
+            "регистрационные данные, упоминания в документах и персональные атрибуты, не отнесённые к " +
+            "цифровым следам. Каждая строка сопровождается источником и ссылкой на страницу.")
+
+        val docs = ReportSections.documentFacts(data)
+        if (docs.isEmpty()) {
+            gap(4f)
+            callout("Документальные сведения по запросу не обнаружены. Отсутствие записей не означает их " +
+                "отсутствия в реестрах: часть источников могла быть недоступна.")
+            return
+        }
+
+        label("ДОКУМЕНТАЛЬНЫЕ СВЕДЕНИЯ (${docs.size})")
+        gap(4f)
+        table(
+            columns = listOf(
+                Column("№", 20f),
+                Column("Документ", 96f),
+                Column("Значение", contentW - 20f - 96f - 112f - 64f),
+                Column("Источник", 112f),
+                Column("Статус", 64f)
+            ),
+            rows = docs.take(80).mapIndexed { i, f ->
+                listOf(
+                    (i + 1).toString(), f.kind, f.value.take(70),
+                    ReportSections.sourceNames(f).ifBlank { "—" }, "● ${f.confidence.title}"
+                )
+            },
+            cellColors = { row, col -> if (col == 4) Palette.forConfidence(docs[row].confidence) else null }
+        )
+
+        gap(12f)
+        h2("3.1. Ссылки на документы")
+        docs.take(40).forEach { f ->
+            val url = ReportSections.evidenceUrl(f)
+            bullet("${f.kind}: ${f.value.take(70)}" + if (url.isBlank()) "" else " · $url")
+        }
+
+        gap(8f)
+        callout("Персональные данные в отчёте приведены в объёме, доступном в открытых источниках. " +
+            "Обработка таких данных должна соответствовать применимому законодательству.")
+    }
+
+    // ------------------------------------------------------------------ медиа
+
+    private fun mediaSection() {
+        newContentPage("Медиа")
+        h1("4. Медиа и изображения")
+        p("Раздел содержит найденные изображения и медиафайлы, связанные с объектом: аватары профилей, " +
+            "публикации и вложения. Для каждого элемента указан источник и адрес, а также отметка о том, " +
+            "сопровождался ли он метаданными.")
+
+        if (meta.photoNote.isNotBlank()) {
+            gap(4f)
+            callout(meta.photoNote)
+            gap(6f)
+        }
+
+        val media = ReportSections.mediaFacts(data)
+        if (media.isEmpty()) {
+            gap(4f)
+            callout("Медиаматериалы в результатах сбора не зафиксированы. Поиск по изображениям выполняется " +
+                "отдельным сценарием: загрузите фотографию в приложении, чтобы получить досье по лицу.")
+            return
+        }
+
+        label("НАЙДЕННЫЕ МЕДИА (${media.size})")
+        gap(4f)
+        table(
+            columns = listOf(
+                Column("№", 20f),
+                Column("Тип", 66f),
+                Column("Адрес", contentW - 20f - 66f - 108f - 52f),
+                Column("Источник", 108f),
+                Column("Статус", 52f)
+            ),
+            rows = media.take(60).mapIndexed { i, f ->
+                listOf(
+                    (i + 1).toString(),
+                    f.kind.take(20),
+                    f.value.take(90),
+                    ReportSections.sourceNames(f).ifBlank { "—" },
+                    "● ${f.confidence.title}"
+                )
+            },
+            cellColors = { row, col -> if (col == 4) Palette.forConfidence(media[row].confidence) else null }
+        )
+
+        gap(12f)
+        h2("4.1. Метаданные и проверка")
+        bullet("Для изображений рекомендуется проверить EXIF-данные: модель устройства, дату съёмки и " +
+            "геокоординаты, если они не были удалены при публикации.")
+        bullet("Совпадение изображения в нескольких профилях указывает на использование одного аватара " +
+            "либо на копирование контента; это не тождественно принадлежности одному лицу.")
+        bullet("Ссылки на медиа приведены без встраивания файлов: отчёт не содержит бинарных вложений.")
     }
 
     // ------------------------------------------------------------- достоверность
 
     private fun confidenceSection() {
-        newContentPage("Оценка достоверности")
-        h1("7. Оценка достоверности (Confidence Level)")
+        newContentPage("Достоверность")
+        h1("5.2. Оценка достоверности (Confidence Level)")
         p("Достоверность каждого факта определяется числом независимых источников, в которых значение " +
             "встретилось после нормализации. Шкала трёхуровневая и применяется единообразно ко всем " +
             "категориям сведений; интерпретация приведена в таблице.")
@@ -779,7 +1094,7 @@ class PdfReport(
         )
 
         gap(16f)
-        h2("7.1. Распределение достоверности")
+        h2("5.2.1. Распределение достоверности")
         gap(4f)
         for (level in Confidence.entries.reversed()) {
             val count = counts[level] ?: 0
@@ -797,7 +1112,7 @@ class PdfReport(
         }
 
         gap(14f)
-        h2("7.2. Правила интерпретации")
+        h2("5.2.2. Правила интерпретации")
         bullet("Подтверждено — сведение воспроизведено в трёх и более независимых наблюдениях, " +
             "расхождений в значении не выявлено; может использоваться как опорный факт.")
         bullet("Вероятно — совпадение в двух наблюдениях; допустимо к использованию с оговоркой " +
@@ -820,19 +1135,19 @@ class PdfReport(
         val narrative = meta.aiNarrative.trim()
         if (analysis.isBlank() && narrative.isBlank()) return
         newContentPage("Аналитическое заключение")
-        h1("8. Аналитическое заключение")
+        h1("5.1. Аналитическое заключение")
         p("Раздел подготовлен интеллектуальным ассистентом на основе установленных сведений и связей " +
             "из настоящего отчёта. Выводы носят аналитический характер: новых фактов они не добавляют " +
             "и подлежат проверке по первоисточникам.")
 
         if (analysis.isNotBlank()) {
             gap(10f)
-            h2("8.1. Выводы по цифровым следам")
+            h2("5.1.1. Выводы по цифровым следам")
             renderAssistantText(analysis)
         }
         if (narrative.isNotBlank()) {
             gap(10f)
-            h2("8.2. Оформленное резюме исследования")
+            h2("5.1.2. Оформленное резюме исследования")
             renderAssistantText(narrative)
         }
     }
@@ -875,9 +1190,9 @@ class PdfReport(
     // --------------------------------------------------------- ограничения
 
     private fun limitationsSection() {
-        newContentPage("Ограничения и рекомендации")
-        h1("9. Ограничения и рекомендации")
-        h2("9.1. Ограничения исследования")
+        newContentPage("Ограничения")
+        h1("5.3. Ограничения и рекомендации")
+        h2("5.3.1. Ограничения исследования")
         bullet("Отчёт отражает состояние открытых источников на момент сбора данных; сведения могут " +
             "измениться без уведомления.")
         bullet("Отсутствие сведений в реестре не является доказательством их отсутствия: часть модулей " +
@@ -887,7 +1202,7 @@ class PdfReport(
         bullet("Метаданные технических артефактов подвержены искажению и не рассматриваются как " +
             "самостоятельное доказательство.")
 
-        h2("9.2. Рекомендации аналитику")
+        h2("5.3.2. Рекомендации аналитику")
         bullet("Проверить вручную сведения со статусом «Требует проверки», начиная с объектов с " +
             "наибольшим числом связей.")
         bullet("Для устойчивых пересечений (два и более подтверждения) запросить подтверждающий " +
@@ -920,7 +1235,38 @@ class PdfReport(
         )
 
         gap(16f)
-        h1("Приложение B. Сведения о документе")
+        newContentPage("Приложение B")
+        h1("Приложение B. Источники и ссылки")
+        p("Перечень модулей сбора и адресов, использованных при подготовке досье. Для каждого сведения " +
+            "в разделе 2.6 указан конкретный источник; здесь приведены базовые адреса ресурсов и " +
+            "собранные ссылки-доказательства.", color = Palette.muted, size = 8.4f)
+
+        gap(4f)
+        val refs = sources()
+        table(
+            columns = listOf(Column("№", 20f), Column("Модуль", 150f), Column("Ресурс", contentW - 170f)),
+            rows = refs.mapIndexed { i, src -> listOf((i + 1).toString(), src.name, src.url.ifBlank { "—" }) }
+        )
+
+        val links = data.facts.flatMap { fact ->
+            fact.urls.map { url -> fact.kind to url }
+        }.distinct().take(300)
+        if (links.isNotEmpty()) {
+            gap(14f)
+            h2("Собранные ссылки-доказательства (${links.size})")
+            table(
+                columns = listOf(
+                    Column("№", 20f),
+                    Column("Сведение", 86f),
+                    Column("Ссылка", contentW - 106f)
+                ),
+                rows = links.mapIndexed { i, (kind, url) -> listOf((i + 1).toString(), kind, url) }
+            )
+        }
+
+        gap(16f)
+        newContentPage("Приложение C")
+        h1("Приложение C. Сведения о документе")
         val info = listOf(
             listOf("Идентификатор отчёта", meta.reportId),
             listOf("Контрольная сумма данных", dataHash()),

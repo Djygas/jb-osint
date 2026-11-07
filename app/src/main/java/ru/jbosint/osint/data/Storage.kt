@@ -48,7 +48,13 @@ data class HistoryEntry(
     /** Оформленное ИИ-резюме исследования (для отчёта). */
     val aiNarrative: String = "",
     /** Выжимка интернет-исследования (DuckDuckGo + ИИ). */
-    val aiResearch: String = ""
+    val aiResearch: String = "",
+    /** Заметки ассистента по значениям: значение → комментарий. */
+    val aiNotes: Map<String, String> = emptyMap(),
+    /** Тип запроса, определённый при поиске (почта, телефон, ФИО…). */
+    val queryType: String = "",
+    /** Примечание о поиске по фотографии. */
+    val photoNote: String = ""
 ) {
     val facts: Int get() = data.facts.size
     val links: Int get() = data.links.size
@@ -113,6 +119,9 @@ object Serialization {
         if (entry.aiAnalysis.isNotBlank()) root.put("aiAnalysis", entry.aiAnalysis)
         if (entry.aiNarrative.isNotBlank()) root.put("aiNarrative", entry.aiNarrative)
         if (entry.aiResearch.isNotBlank()) root.put("aiResearch", entry.aiResearch)
+        if (entry.aiNotes.isNotEmpty()) root.put("aiNotes", JSONObject(entry.aiNotes as Map<*, *>))
+        if (entry.queryType.isNotBlank()) root.put("queryType", entry.queryType)
+        if (entry.photoNote.isNotBlank()) root.put("photoNote", entry.photoNote)
         return root.toString()
     }
 
@@ -129,10 +138,20 @@ object Serialization {
                     .put("subject", fact.subject)
                     .put("observations", fact.observations)
                     .put("sources", fact.sourceIds.size)
+                    .put("sourceIds", JSONArray(fact.sourceIds.toList()))
+                    .put("urls", JSONArray(fact.urls.toList()))
+                    .put("firstSeen", fact.firstSeen)
                     .put("attrs", JSONObject(fact.attributes as Map<*, *>))
             )
         }
         root.put("facts", facts)
+        if (data.sources.isNotEmpty()) {
+            root.put("sources", JSONArray().apply {
+                data.sources.forEach { src ->
+                    put(JSONObject().put("id", src.id).put("name", src.name).put("url", src.url))
+                }
+            })
+        }
         val links = JSONArray()
         data.links.forEach { link ->
             links.put(
@@ -169,7 +188,12 @@ object Serialization {
             data = decodeData(root.getJSONObject("data")),
             aiAnalysis = root.optString("aiAnalysis", ""),
             aiNarrative = root.optString("aiNarrative", ""),
-            aiResearch = root.optString("aiResearch", "")
+            aiResearch = root.optString("aiResearch", ""),
+            aiNotes = root.optJSONObject("aiNotes")?.let { obj ->
+                LinkedHashMap<String, String>().apply { obj.keys().forEach { key -> put(key, obj.optString(key)) } }
+            } ?: emptyMap(),
+            queryType = root.optString("queryType", ""),
+            photoNote = root.optString("photoNote", "")
         )
     }.getOrNull()
 
@@ -179,6 +203,12 @@ object Serialization {
         for (i in 0 until factsArray.length()) {
             val obj = factsArray.getJSONObject(i)
             val sources = obj.optInt("sources", 1)
+            val sourceIds = obj.optJSONArray("sourceIds")?.let { arr ->
+                (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() }.toSet()
+            } ?: (1..sources).map { "s$it" }.toSet()
+            val urls = obj.optJSONArray("urls")?.let { arr ->
+                (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() }.toSet()
+            } ?: emptySet()
             val attrs = LinkedHashMap<String, String>()
             obj.optJSONObject("attrs")?.let { map ->
                 map.keys().forEach { key -> attrs[key] = map.optString(key) }
@@ -191,8 +221,10 @@ object Serialization {
                     value = obj.optString("value"),
                     subject = obj.optString("subject"),
                     attributes = attrs,
-                    sourceIds = (1..sources).map { "s$it" }.toSet(),
-                    observations = obj.optInt("observations", 1)
+                    sourceIds = sourceIds,
+                    observations = obj.optInt("observations", 1),
+                    firstSeen = obj.optLong("firstSeen", 0L),
+                    urls = urls
                 )
             )
         }
@@ -222,7 +254,17 @@ object Serialization {
                 rawFacts = statsObj.optInt("raw"),
                 duplicatesRemoved = statsObj.optInt("dupes"),
                 durationMs = statsObj.optLong("duration")
-            )
+            ),
+            sources = root.optJSONArray("sources")?.let { arr ->
+                (0 until arr.length()).mapNotNull { index ->
+                    val obj = arr.optJSONObject(index) ?: return@mapNotNull null
+                    ru.jbosint.osint.core.model.SourceRef(
+                        id = obj.optString("id"),
+                        name = obj.optString("name"),
+                        url = obj.optString("url")
+                    )
+                }
+            } ?: emptyList()
         )
     }
 }

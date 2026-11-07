@@ -1,5 +1,7 @@
 package ru.jbosint.osint.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -24,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Tune
@@ -34,6 +37,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -153,6 +157,31 @@ fun HomeScreen(state: UiState, vm: AppViewModel) {
                         Text("Начать поиск", style = MaterialTheme.typography.titleMedium)
                     }
                 }
+
+                Spacer(Modifier.height(8.dp))
+                val photoPicker = rememberLauncherForActivityResult(
+                    ActivityResultContracts.GetContent()
+                ) { uri -> if (uri != null) vm.startPhotoSearch(uri) }
+                OutlinedButton(
+                    onClick = { if (!state.searching) photoPicker.launch("image/*") },
+                    enabled = !state.searching,
+                    modifier = Modifier.fillMaxWidth().height(46.dp),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.PhotoCamera, contentDescription = null,
+                        tint = JbAccent2, modifier = Modifier.size(17.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Поиск по фотографии", style = MaterialTheme.typography.labelLarge)
+                }
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "Разбор EXIF, лиц и обратный поиск по изображению",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = JbFaint,
+                    modifier = Modifier.padding(start = 4.dp)
+                )
 
                 Spacer(Modifier.height(6.dp))
                 TextButton(

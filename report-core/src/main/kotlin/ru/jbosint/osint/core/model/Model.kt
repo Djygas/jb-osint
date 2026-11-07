@@ -35,7 +35,9 @@ data class RawFact(
     val subject: String = "",
     val attributes: Map<String, String> = emptyMap(),
     val sourceId: String = "internal",
-    val weight: Int = 1
+    val weight: Int = 1,
+    /** Прямая ссылка на страницу, где встретилось значение (профиль, запись, карточка утечки). */
+    val sourceUrl: String = ""
 )
 
 /** Агрегированный факт после дедупликации и слияния наблюдений. */
@@ -47,7 +49,9 @@ data class Fact(
     val attributes: Map<String, String>,
     val sourceIds: Set<String>,
     val observations: Int,
-    val firstSeen: Long = 0L
+    val firstSeen: Long = 0L,
+    /** Ссылки-доказательства: страницы источников, где встретилось значение. */
+    val urls: Set<String> = emptySet()
 ) {
     val sourceCount: Int get() = sourceIds.size
     val confidence: Confidence
@@ -84,7 +88,9 @@ data class AggregatedData(
     val query: String,
     val facts: List<Fact> = emptyList(),
     val links: List<Link> = emptyList(),
-    val stats: SearchStats = SearchStats()
+    val stats: SearchStats = SearchStats(),
+    /** Модули, участвовавшие в сборе: имя и адрес ресурса для раздела «Источники». */
+    val sources: List<SourceRef> = emptyList()
 ) {
     val categoryCounts: Map<FactCategory, Int>
         get() = facts.groupingBy { it.category }.eachCount()
@@ -107,8 +113,21 @@ data class ReportMeta(
     val createdAt: Long,
     val appVersion: String = "1.0.0",
     val classification: String = "КОНФИДЕНЦИАЛЬНО · ДЛЯ ВНУТРЕННЕГО ИСПОЛЬЗОВАНИЯ",
+    /** Определённый тип запроса: почта, телефон, домен, ФИО и т. п. */
+    val queryType: String = "",
     /** Аналитический вывод интеллектуального ассистента (может быть пустым). */
     val aiAnalysis: String = "",
     /** Оформленное ИИ-резюме исследования для отчёта (может быть пустым). */
-    val aiNarrative: String = ""
+    val aiNarrative: String = "",
+    /** Заметки ассистента по конкретным значениям: значение → комментарий (тип, релевантность). */
+    val aiNotes: Map<String, String> = emptyMap(),
+    /** Примечание о загруженном пользователем фото (если исследование начато с изображения). */
+    val photoNote: String = ""
+)
+
+/** Ссылка на модуль сбора: человекочитаемое название и адрес ресурса. */
+data class SourceRef(
+    val id: String,
+    val name: String,
+    val url: String
 )

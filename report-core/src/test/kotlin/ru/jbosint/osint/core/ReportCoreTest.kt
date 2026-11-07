@@ -14,6 +14,8 @@ import ru.jbosint.osint.core.report.JsonReport
 import ru.jbosint.osint.core.report.PdfReport
 import ru.jbosint.osint.core.report.ReportFonts
 import ru.jbosint.osint.core.report.ReportNaming
+import ru.jbosint.osint.core.report.ReportSections
+import ru.jbosint.osint.core.report.SourceCatalog
 import ru.jbosint.osint.core.report.XlsxReport
 import java.io.File
 import java.util.zip.ZipInputStream
@@ -123,7 +125,13 @@ class ReportExportTest {
     private val meta = ReportMeta(
         analyst = "А. Соколов",
         reportId = ReportNaming.reportId("Иван Петров", 1_760_000_000_000L),
-        createdAt = 1_760_000_000_000L
+        createdAt = 1_760_000_000_000L,
+        appVersion = "1.8.0",
+        queryType = "Имя или название",
+        photoNote = "Снимок: portrait.jpg, 1200×1600; лиц на снимке: 1; Pixel 7; 12.03.2025 14:20. " +
+            "Обратный поиск: 3 совпадений, ссылки добавлены в доказательную базу. " +
+            "Выводы по личности на снимке не делаются автоматически.",
+        aiNotes = mapOf("ivan_petrov" to "Никнейм · значимость высокая")
     )
 
     private val data = Aggregator.aggregate(
@@ -194,7 +202,9 @@ class ReportExportTest {
         }
         assertTrue(entries.contains("[Content_Types].xml"))
         assertTrue(entries.any { it == "xl/workbook.xml" })
-        assertTrue(entries.count { it.startsWith("xl/worksheets/") } >= 5)
+        assertTrue(entries.count { it.startsWith("xl/worksheets/") } >= 8)
+        val workbook = String(bytes, Charsets.ISO_8859_1)
+        assertTrue("Нет листа доказательств", workbook.isNotEmpty())
         println("XLSX листы: ${entries.filter { it.startsWith("xl/worksheets/") }}")
     }
 
@@ -203,9 +213,12 @@ class ReportExportTest {
         val json = JsonReport(meta, data).build()
         File(outputDir, "sample-report.json").writeText(json)
         assertTrue(json.trimEnd().endsWith("}"))
-        assertTrue(json.contains("\"schema\": \"jb-osint/report/1.0\""))
+        assertTrue(json.contains("\"schema\": \"jb-osint/report/2.0\""))
         assertTrue(json.contains("\"facts\": ["))
-        assertFalse("В отчёте не должно быть названий источников", json.contains("source_id"))
+        assertTrue(json.contains("\"sources\": ["))
+        assertTrue(json.contains("\"evidence_url\""))
+        assertTrue(json.contains("\"sections\": {"))
+        assertFalse("В отчёте не должно быть технических ключей источника", json.contains("source_id"))
     }
 
     @Test
@@ -217,6 +230,73 @@ class ReportExportTest {
     }
 }
 
+
+class DossierSectionsTest {
+
+    private fun raw(
+        kind: String,
+        value: String,
+        category: FactCategory = FactCategory.CONTACT,
+        source: String = "s1",
+        url: String = ""
+    ) = RawFact(category, kind, value, "Иван Петров", emptyMap(), source, 1, url)
+
+    @Test
+    fun `aggregator keeps evidence links`() {
+        val data = Aggregator.aggregate(
+            "Иван Петров",
+            listOf(
+                raw("Почта", "ivan@example.ru", url = "https://example.ru/u/ivan"),
+                raw("Почта", "ivan@example.ru", source = "s2", url = "https://leak.example/b/1")
+            ),
+            SearchStats(2, 2)
+        )
+        val fact = data.facts.first { it.value == "ivan@example.ru" }
+        assertEquals(2, fact.sourceCount)
+        assertTrue(fact.urls.contains("https://example.ru/u/ivan"))
+        assertTrue(fact.urls.contains("https://leak.example/b/1"))
+    }
+
+    @Test
+    fun `sections split facts by evidence type`() {
+        val data = Aggregator.aggregate(
+            "Иван Петров",
+            listOf(
+                raw("Почта", "ivan@example.ru"),
+                raw("Профиль", "https://vk.com/ivan_p", FactCategory.PERSON),
+                raw("Telegram-канал", "@ivan_channel", FactCategory.OTHER, url = "https://t.me/ivan_channel"),
+                raw("Утечка", "Collection #1", FactCategory.OTHER),
+                raw("Изображение", "https://example.ru/a.jpg", FactCategory.DOCUMENT),
+                raw("Паспорт", "45 06 123456", FactCategory.DOCUMENT)
+            ),
+            SearchStats(3, 3)
+        )
+        assertEquals(1, ReportSections.emailFacts(data).size)
+        assertEquals(1, ReportSections.socialFacts(data).size)
+        assertEquals(1, ReportSections.telegramFacts(data).size)
+        assertEquals(1, ReportSections.leakFacts(data).size)
+        assertEquals(1, ReportSections.mediaFacts(data).size)
+        assertEquals(1, ReportSections.documentFacts(data).size)
+    }
+
+    @Test
+    fun `source line contains module name and link`() {
+        val data = Aggregator.aggregate(
+            "Иван Петров",
+            listOf(raw("Почта", "ivan@example.ru", source = "hibp", url = "https://haveibeenpwned.com/x")),
+            SearchStats(1, 1)
+        )
+        val line = ReportSections.sourceLine(data.facts.first())
+        assertTrue(line.contains("Have I Been Pwned"))
+        assertTrue(line.contains("https://haveibeenpwned.com/x"))
+    }
+
+    @Test
+    fun `source catalog resolves known and custom modules`() {
+        assertEquals("GitHub API", SourceCatalog.ref("github").name)
+        assertTrue(SourceCatalog.ref("my_module").name.contains("my_module"))
+    }
+}
 
 class CrossSourceConfirmationTest {
 

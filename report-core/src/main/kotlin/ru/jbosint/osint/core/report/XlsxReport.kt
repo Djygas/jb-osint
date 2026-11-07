@@ -34,14 +34,18 @@ class XlsxReport(
 
     fun build(): ByteArray = buildSheets(listOf(
         summarySheet(),
+        evidenceSheet(),
         registrySheet(),
         categorySheet(FactCategory.PERSON, "Люди"),
         categorySheet(FactCategory.CONTACT, "Контакты"),
         categorySheet(FactCategory.TECHNICAL, "Технические"),
+        genericSheet("Документы", ReportSections.documentFacts(data)),
+        genericSheet("Медиа", ReportSections.mediaFacts(data)),
+        sourcesSheet(),
         linksSheet(),
         aiSheet(),
         methodologySheet()
-    ).filter { it.rows.isNotEmpty() || it.name == "Сводка" })
+    ))
 
     // ------------------------------------------------------------------ листы
 
@@ -55,6 +59,8 @@ class XlsxReport(
         rows += listOf(Cell("Аналитик", 4), Cell(meta.analyst.ifBlank { "Не указан" }))
         rows += listOf(Cell("Дата формирования", 4), Cell(dateText(meta.createdAt)))
         rows += listOf(Cell("Объект запроса", 4), Cell(data.query))
+        if (meta.queryType.isNotBlank()) rows += listOf(Cell("Тип запроса", 4), Cell(meta.queryType))
+        if (meta.photoNote.isNotBlank()) rows += listOf(Cell("Поиск по фото", 4), Cell(meta.photoNote.take(1000)))
         rows += listOf(Cell("Версия системы", 4), Cell("JB OSINT ${meta.appVersion}"))
         rows += emptyRow(2)
         rows += listOf(Cell("ПОКАЗАТЕЛИ СЕССИИ", 2))
@@ -107,6 +113,8 @@ class XlsxReport(
                 Cell(fact.value),
                 Cell(fact.subject.ifBlank { "—" }),
                 Cell(fact.attributes.entries.joinToString("; ") { "${it.key}: ${it.value}" }),
+                Cell(ReportSections.sourceNames(fact).ifBlank { "Поиск JB OSINT" }),
+                Cell(ReportSections.evidenceUrl(fact)),
                 Cell(fact.sourceCount.toString(), numeric = true),
                 Cell(fact.observations.toString(), numeric = true),
                 Cell(fact.confidence.title, styleForConfidence(fact.confidence))
@@ -121,6 +129,8 @@ class XlsxReport(
                 Column("Значение", 38f),
                 Column("Субъект", 26f),
                 Column("Атрибуты", 40f),
+                Column("Источник", 22f),
+                Column("Ссылка", 46f),
                 Column("Источников", 11f),
                 Column("Наблюдений", 11f),
                 Column("Достоверность", 18f)
@@ -152,6 +162,100 @@ class XlsxReport(
                 Column("Достоверность", 18f)
             ),
             rows = rows
+        )
+    }
+
+    /** Лист «Доказательства»: строка на каждое сведение — источник, ссылка, дата, статус, примечание. */
+    private fun evidenceSheet(): Sheet {
+        val rows = data.facts.mapIndexed { index, fact ->
+            listOf(
+                Cell((index + 1).toString(), numeric = true),
+                Cell(fact.category.title),
+                Cell(fact.kind),
+                Cell(fact.value),
+                Cell(ReportSections.sourceNames(fact).ifBlank { "Поиск JB OSINT" }),
+                Cell(ReportSections.evidenceUrl(fact)),
+                Cell(ReportSections.dateText(fact.firstSeen)),
+                Cell(fact.confidence.title, styleForConfidence(fact.confidence)),
+                Cell(ReportSections.statusLine(fact, data)),
+                Cell(ReportSections.noteFor(fact, meta))
+            )
+        }
+        return Sheet(
+            name = "Доказательства",
+            columns = listOf(
+                Column("№", 6f),
+                Column("Категория", 18f),
+                Column("Сведение", 20f),
+                Column("Значение", 34f),
+                Column("Источник", 20f),
+                Column("Ссылка", 46f),
+                Column("Дата", 12f),
+                Column("Статус", 14f),
+                Column("Комментарий статуса", 34f),
+                Column("Примечание", 44f)
+            ),
+            rows = rows
+        )
+    }
+
+    /** Универсальный лист для документов и медиа. */
+    private fun genericSheet(sheetName: String, facts: List<ru.jbosint.osint.core.model.Fact>): Sheet {
+        val rows = facts.mapIndexed { index, fact ->
+            listOf(
+                Cell((index + 1).toString(), numeric = true),
+                Cell(fact.kind),
+                Cell(fact.value),
+                Cell(ReportSections.sourceNames(fact).ifBlank { "Поиск JB OSINT" }),
+                Cell(ReportSections.evidenceUrl(fact)),
+                Cell(ReportSections.dateText(fact.firstSeen)),
+                Cell(fact.confidence.title, styleForConfidence(fact.confidence))
+            )
+        }
+        return Sheet(
+            name = sheetName,
+            columns = listOf(
+                Column("№", 6f),
+                Column("Тип", 20f),
+                Column("Значение / адрес", 52f),
+                Column("Источник", 22f),
+                Column("Ссылка", 46f),
+                Column("Дата", 12f),
+                Column("Статус", 16f)
+            ),
+            rows = rows
+        )
+    }
+
+    /** Лист «Источники»: модули сбора и собранные ссылки-доказательства. */
+    private fun sourcesSheet(): Sheet {
+        val rows = ArrayList<List<Cell>>()
+        val refs = data.sources.ifEmpty { SourceCatalog.forFacts(data.facts) }
+        rows += listOf(Cell("МОДУЛИ СБОРА", 2), Cell(""), Cell(""))
+        rows += listOf(Cell("№", 1), Cell("Модуль", 1), Cell("Сведений", 1), Cell("Ресурс", 1))
+        refs.forEachIndexed { i, src ->
+            rows += listOf(
+                Cell((i + 1).toString(), numeric = true),
+                Cell(src.name),
+                Cell(data.facts.count { src.id in it.sourceIds }.toString(), numeric = true),
+                Cell(src.url)
+            )
+        }
+        val links = data.facts.flatMap { f -> f.urls.map { url -> f.kind to url } }.distinct()
+        if (links.isNotEmpty()) {
+            rows += emptyRow(2)
+            rows += listOf(Cell("ССЫЛКИ-ДОКАЗАТЕЛЬСТВА", 2), Cell(""), Cell(""))
+            rows += listOf(Cell("№", 1), Cell("Сведение", 1), Cell("Ссылка", 1))
+            links.take(1000).forEachIndexed { i, (kind, url) ->
+                rows += listOf(Cell((i + 1).toString(), numeric = true), Cell(kind), Cell(url))
+            }
+        }
+        return Sheet(
+            name = "Источники",
+            columns = listOf(Column("№", 6f), Column("Источник", 30f), Column("Сведений", 12f), Column("Адрес", 70f)),
+            rows = rows,
+            freeze = true,
+            autoFilter = false
         )
     }
 
@@ -210,11 +314,11 @@ class XlsxReport(
     private fun methodologySheet(): Sheet {
         val paragraphs = listOf(
             "МЕТОДОЛОГИЯ ИССЛЕДОВАНИЯ",
-            "1. Сбор и нормализация. Запрос распределён между активными модулями сбора; значения приведены к единому виду, дубликаты отброшены.",
-            "2. Триангуляция данных. Совпадение значения в трёх и более независимых источниках — «Подтверждено»; в двух — «Вероятно»; в одном — «Требует проверки».",
-            "3. Перекрёстная проверка (cross-referencing). Выявлены пересечения идентификаторов между объектами, образующие связи (лист «Связи»).",
-            "4. Анализ метаданных. Для технических артефактов использованы регистрационные данные доменов, DNS, сетевая принадлежность IP и метаданные изображений.",
-            "Ограничения: сведения отражают состояние открытых источников на момент сбора; документ не является юридическим заключением.",
+            "0.1.1. Сбор и нормализация. Запрос распределён между активными модулями сбора; значения приведены к единому виду, дубликаты отброшены.",
+            "0.1.2. Триангуляция данных. Совпадение значения в трёх и более независимых источниках — «Подтверждено»; в двух — «Вероятно»; в одном — «Требует проверки».",
+            "0.1.3. Перекрёстная проверка (cross-referencing). Выявлены пересечения идентификаторов между объектами, образующие связи (лист «Связи»).",
+            "0.1.4. Анализ метаданных. Для технических артефактов использованы регистрационные данные доменов, DNS, сетевая принадлежность IP и метаданные изображений.",
+            "5.3.1. Ограничения: сведения отражают состояние открытых источников на момент сбора; документ не является юридическим заключением.",
             "Сформировано в JB OSINT · ${meta.reportId} · ${dateText(meta.createdAt)}"
         )
         val rows = paragraphs.map { listOf(Cell(it, if (it == paragraphs.first()) 3 else 2)) }
