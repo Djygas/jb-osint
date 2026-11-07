@@ -5,6 +5,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -28,7 +29,8 @@ object Net {
     suspend fun fetch(
         url: String,
         headers: Map<String, String> = emptyMap(),
-        attempts: Int = 3
+        attempts: Int = 3,
+        method: String = "GET"
     ): Response = withContext(Dispatchers.IO) {
         require(url.startsWith("https://")) { "Разрешён только HTTPS" }
         var lastError: Exception? = null
@@ -36,10 +38,14 @@ object Net {
             try {
                 val builder = Request.Builder()
                     .url(url)
-                    .get()
                     .header("Accept", "application/json")
                     .header("User-Agent", "JB-OSINT/1.0 (Android)")
                 headers.forEach { (k, v) -> builder.header(k, v) }
+                if (method.equals("POST", ignoreCase = true)) {
+                    builder.post(ByteArray(0).toRequestBody(null))
+                } else {
+                    builder.get()
+                }
                 client.newCall(builder.build()).execute().use { response ->
                     val body = response.body?.string().orEmpty()
                     // 429/5xx — имеет смысл повторить, 4xx — нет.

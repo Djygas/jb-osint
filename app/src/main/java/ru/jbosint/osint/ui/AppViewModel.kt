@@ -15,6 +15,7 @@ import kotlinx.coroutines.withContext
 import ru.jbosint.osint.core.model.AggregatedData
 import ru.jbosint.osint.core.model.Fact
 import ru.jbosint.osint.data.CustomAuth
+import ru.jbosint.osint.data.CustomConnectionProbe
 import ru.jbosint.osint.data.CustomModule
 import ru.jbosint.osint.data.CustomModuleChecker
 import ru.jbosint.osint.data.CustomModuleSpec
@@ -348,7 +349,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         headerName: String,
         paramName: String,
         key: String?,
-        fields: List<FieldRule> = emptyList()
+        fields: List<FieldRule> = emptyList(),
+        method: String = "GET"
     ) {
         val error = CustomModuleSpec.validate(title, urlTemplate)
             ?: CustomModuleSpec.validateRules(fields)
@@ -362,6 +364,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             title = title.trim(),
             urlTemplate = urlTemplate.trim(),
             auth = auth,
+            method = method.ifBlank { "GET" },
             headerName = headerName.trim(),
             paramName = paramName.trim(),
             enabled = existing?.enabled ?: true,
@@ -370,8 +373,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         )
         customStore.save(module, key)
         refreshCustom()
-        _state.update { it.copy(toast = if (existing == null) "Модуль добавлен" else "Модуль обновлён") }
+        _state.update {
+            it.copy(
+                toast = when {
+                    auth == CustomAuth.AUTO -> "Проверяется…"
+                    existing == null -> "Модуль добавлен"
+                    else -> "Модуль обновлён"
+                }
+            )
+        }
         // ТЗ: при добавлении модуля сразу проверяем связь; при ошибке модуль отключается.
+        // Если способ подключения не выбран — сначала автоподбор метода и передачи ключа.
         checkCustomModule(module.id)
     }
 
@@ -389,9 +401,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun checkCustomModule(id: String) {
         val module = customStore.get(id) ?: return
         if (_state.value.customChecking.contains(id)) return
-        _state.update { it.copy(customChecking = it.customChecking + id) }
+        _state.update { it.copy(customChecking = it.customChecking + id, toast = "Проверяется…") }
         viewModelScope.launch {
-            val result = customChecker.check(module)
+            val pair: Pair<KeyCheck, CustomConnectionProbe.Setup?> = if (module.auth == CustomAuth.AUTO) {
+                autoConfigure(module)
+            } else {
+                customChecker.check(module) to null
+            }
+            val (result, resolved) = pair
             val failed = result.state == KeyState.INVALID || result.state == KeyState.OFFLINE ||
                 result.state == KeyState.EMPTY
             if (failed && module.enabled) customStore.setEnabled(id, false)
@@ -400,10 +417,41 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     customChecking = it.customChecking - id,
                     customChecks = it.customChecks + (id to result),
                     customModules = customStore.list(),
-                    toast = if (failed) result.detail + " — модуль отключён" else result.detail
+                    toast = when {
+                        failed -> result.detail + " — модуль отключён"
+                        resolved != null -> "Модуль настроен успешно: ${resolved.method}, ${resolved.auth.title.lowercase()}"
+                        else -> result.detail
+                    }
                 )
             }
         }
+    }
+
+    /**
+     * Автоподбор параметров подключения: метод GET/POST и способ передачи ключа.
+     * Найденная комбинация сохраняется в модуль, чтобы поиск шёл уже без перебора.
+     */
+    private suspend fun autoConfigure(module: CustomModule): Pair<KeyCheck, CustomConnectionProbe.Setup?> {
+        val probe = CustomConnectionProbe().detect(module, customStore.key(module.id))
+        val setup = probe.setup
+        if (setup != null) {
+            customStore.save(
+                module.copy(
+                    auth = setup.auth,
+                    method = setup.method,
+                    headerName = setup.headerName,
+                    paramName = setup.paramName
+                ),
+                null
+            )
+        }
+        val state = when {
+            probe.ok -> KeyState.VALID
+            probe.detail == "Нет соединения" -> KeyState.OFFLINE
+            probe.setup == null -> KeyState.INVALID
+            else -> KeyState.INVALID
+        }
+        return KeyCheck(state, probe.detail) to setup
     }
 
     // -------------------------------------------------------------- настройки

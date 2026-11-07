@@ -6,6 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.jbosint.osint.data.CustomAuth
+import ru.jbosint.osint.data.CustomConnectionProbe
 import ru.jbosint.osint.data.CustomModule
 import ru.jbosint.osint.data.CustomModuleSpec
 import ru.jbosint.osint.data.FactField
@@ -96,5 +97,39 @@ class CustomModuleSpecTest {
         assertEquals("ivan_p", Normalizer.canonical(FactField.USERNAME, "@Ivan_P"))
         assertEquals("example.org", Normalizer.canonical(FactField.DOMAIN, "https://www.Example.org/path"))
         assertEquals("Иван Петров", Normalizer.canonical(FactField.FULLNAME, "  Иван   Петров "))
+    }
+}
+
+class ConnectionProbeTest {
+
+    @Test
+    fun describeMapsHttpCodesToHumanText() {
+        val probe = CustomConnectionProbe()
+        assertTrue(probe.describe(403).contains("403"))
+        assertTrue(probe.describe(403).contains("доступ запрещён"))
+        assertTrue(probe.describe(401).contains("ключ отклонён"))
+        assertTrue(probe.describe(404).contains("адрес не найден"))
+        assertTrue(probe.describe(200).contains("Модуль отвечает"))
+        assertTrue(probe.describe(503).contains("сервер недоступен"))
+    }
+
+    @Test
+    fun autoAuthDoesNotLeakKeyIntoUrlOrHeaders() {
+        val module = CustomModule(
+            id = "auto1",
+            title = "Мой сервис",
+            urlTemplate = "https://api.example.com/search?q={query}",
+            auth = CustomAuth.AUTO
+        )
+        val url = CustomModuleSpec.buildUrl(module, "SECRET", "test")
+        assertEquals("https://api.example.com/search?q=test", url)
+        assertTrue(CustomModuleSpec.headers(module, "SECRET").isEmpty())
+    }
+
+    @Test
+    fun templateRequiresQueryMarkerAndHttps() {
+        assertNull(CustomModuleSpec.validate("M", "https://api.example.com/s?q={query}"))
+        assertNotNull(CustomModuleSpec.validate("M", "http://api.example.com/s?q={query}"))
+        assertNotNull(CustomModuleSpec.validate("M", "https://api.example.com/s"))
     }
 }

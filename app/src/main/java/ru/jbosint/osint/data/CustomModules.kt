@@ -52,6 +52,7 @@ data class CustomModule(
     val title: String,
     val urlTemplate: String,
     val auth: CustomAuth,
+    val method: String = "GET",
     val headerName: String = "X-API-Key",
     val paramName: String = "api_key",
     val enabled: Boolean = true,
@@ -61,6 +62,7 @@ data class CustomModule(
 )
 
 enum class CustomAuth(val title: String, val hint: String) {
+    AUTO("Определить автоматически", "подбор GET/POST и способа передачи ключа при проверке"),
     BEARER("Bearer-заголовок", "Authorization: Bearer <ключ>"),
     HEADER("Свой заголовок", "например, X-API-Key: <ключ>"),
     PARAM("Параметр адреса", "ключ добавляется в URL, например ?api_key=<ключ>"),
@@ -114,7 +116,7 @@ object CustomModuleSpec {
         CustomAuth.HEADER ->
             if (key.isBlank()) emptyMap()
             else mapOf(module.headerName.trim().ifBlank { "X-API-Key" } to key)
-        CustomAuth.PARAM, CustomAuth.NONE -> emptyMap()
+        CustomAuth.PARAM, CustomAuth.NONE, CustomAuth.AUTO -> emptyMap()
     }
 
     /** Хост для карточки модуля — название сервиса аналитик видит только у себя. */
@@ -392,10 +394,104 @@ class CustomConnector(
         if (CustomModuleSpec.validate(module.title, module.urlTemplate) != null) return emptyList()
         if (module.auth != CustomAuth.NONE && key.isBlank()) return emptyList()
         val url = CustomModuleSpec.buildUrl(module, key, query)
-        val response = Net.fetch(url, CustomModuleSpec.headers(module, key))
+        val response = Net.fetch(url, CustomModuleSpec.headers(module, key), method = module.method)
         if (!response.ok) return emptyList()
         val json = runCatching { JSONObject(response.body) }.getOrNull() ?: return emptyList()
         return CustomResponseParser.parse(json, query, sourceKey, module.fields)
+    }
+}
+
+
+/**
+ * Автоподбор параметров подключения нового модуля:
+ * метод (GET или POST без тела) и способ передачи ключа
+ * (Bearer, X-Api-Key, параметр адреса). Останов — на первом 2xx;
+ * 401/403 считается признаком рабочего адреса (метод выбран, ключ не принят).
+ */
+class CustomConnectionProbe {
+
+    data class Setup(
+        val method: String,
+        val auth: CustomAuth,
+        val headerName: String,
+        val paramName: String,
+        val code: Int
+    )
+
+    data class Result(
+        val ok: Boolean,
+        val setup: Setup?,
+        val detail: String
+    )
+
+    private data class Attempt(val method: String, val auth: CustomAuth, val code: Int, val reachable: Boolean)
+
+    private val transports: List<CustomAuth> = listOf(
+        CustomAuth.BEARER,
+        CustomAuth.HEADER,
+        CustomAuth.PARAM
+    )
+
+    suspend fun detect(module: CustomModule, key: String): Result = withContext(Dispatchers.IO) {
+        val candidates = if (key.isBlank()) listOf(CustomAuth.NONE) else transports
+        val attempts = ArrayList<Attempt>()
+        var networkError = false
+
+        for (method in listOf("GET", "POST")) {
+            var rejected: Attempt? = null
+            for (auth in candidates) {
+                if (networkError) break
+                val variant = module.copy(auth = auth, method = method)
+                val url = CustomModuleSpec.buildUrl(variant, key, "osint")
+                val outcome = runCatching {
+                    Net.fetch(url, CustomModuleSpec.headers(variant, key), attempts = 1, method = method)
+                }
+                val response = outcome.getOrNull()
+                if (response == null) {
+                    networkError = true
+                    break
+                }
+                val reachable = response.code in 200..299 || response.code == 401 || response.code == 403
+                val attempt = Attempt(method, auth, response.code, reachable)
+                attempts += attempt
+                if (response.code in 200..299) {
+                    return@withContext Result(
+                        ok = true,
+                        setup = Setup(method, auth, variant.headerName, variant.paramName, response.code),
+                        detail = "Модуль настроен успешно"
+                    )
+                }
+                if (reachable && rejected == null) rejected = attempt
+            }
+            // Адрес ответил отказом авторизации — метод рабочий, второй не проверяем.
+            if (rejected != null) {
+                return@withContext Result(
+                    ok = false,
+                    setup = Setup(
+                        rejected.method, rejected.auth,
+                        module.headerName, module.paramName, rejected.code
+                    ),
+                    detail = describe(rejected.code)
+                )
+            }
+        }
+
+        if (networkError) return@withContext Result(false, null, "Нет соединения")
+        val last = attempts.lastOrNull()
+        Result(false, last?.let {
+            Setup(it.method, it.auth, module.headerName, module.paramName, it.code)
+        }, last?.let { describe(it.code) } ?: "Нет соединения")
+    }
+
+    fun describe(code: Int): String = when (code) {
+        401 -> "Ошибка 401: Unauthorized — ключ отклонён"
+        403 -> "Ошибка 403: Forbidden — доступ запрещён"
+        404 -> "Ошибка 404: Not Found — адрес не найден"
+        400 -> "Ошибка 400: Bad Request — проверьте шаблон адреса"
+        429 -> "Модуль отвечает (429: превышен лимит запросов)"
+        in 200..299 -> "Модуль отвечает"
+        in 500..599 -> "Ошибка $code: сервер недоступен"
+        else -> "Ответ сервера: код $code"
     }
 }
 
@@ -411,7 +507,7 @@ class CustomModuleChecker(private val store: CustomModuleStore) {
         }
         runCatching {
             val url = CustomModuleSpec.buildUrl(module, key, "osint")
-            val response = Net.fetch(url, CustomModuleSpec.headers(module, key), attempts = 1)
+            val response = Net.fetch(url, CustomModuleSpec.headers(module, key), attempts = 1, method = module.method)
             val code = response.code
             when {
                 code in 200..299 -> KeyCheck(KeyState.VALID, "Модуль отвечает")
@@ -496,6 +592,7 @@ class CustomModuleStore(context: Context) {
         .put("title", module.title)
         .put("url", module.urlTemplate)
         .put("auth", module.auth.name)
+        .put("method", module.method)
         .put("header", module.headerName)
         .put("param", module.paramName)
         .put("enabled", module.enabled)
@@ -518,6 +615,7 @@ class CustomModuleStore(context: Context) {
             title = root.optString("title"),
             urlTemplate = root.optString("url"),
             auth = runCatching { CustomAuth.valueOf(root.optString("auth")) }.getOrDefault(CustomAuth.HEADER),
+            method = root.optString("method", "GET").ifBlank { "GET" },
             headerName = root.optString("header", "X-API-Key"),
             paramName = root.optString("param", "api_key"),
             enabled = root.optBoolean("enabled", true),

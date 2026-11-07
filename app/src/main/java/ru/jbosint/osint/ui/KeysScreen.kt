@@ -213,7 +213,7 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
         CustomModuleDialog(
             initial = editing,
             onDismiss = { editorOpen = false },
-            onSave = { title, url, auth, header, param, key, rules ->
+            onSave = { title, url, auth, header, param, key, rules, method ->
                 vm.saveCustomModule(
                     id = editing?.id.orEmpty(),
                     title = title,
@@ -222,7 +222,8 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                     headerName = header,
                     paramName = param,
                     key = key,
-                    fields = rules
+                    fields = rules,
+                    method = method
                 )
                 editorOpen = false
             }
@@ -435,6 +436,10 @@ private fun CustomModuleCard(
                 Pill("ключ не задан", JbAmber)
             }
             Spacer(Modifier.width(8.dp))
+            if (module.auth != CustomAuth.AUTO) {
+                Pill(module.method, JbSlate)
+                Spacer(Modifier.width(6.dp))
+            }
             Text(
                 module.auth.title,
                 style = MaterialTheme.typography.labelSmall,
@@ -444,6 +449,8 @@ private fun CustomModuleCard(
             Spacer(Modifier.weight(1f))
             if (checking) {
                 CircularProgressIndicator(modifier = Modifier.size(14.dp), color = JbAccent, strokeWidth = 1.6.dp)
+                Spacer(Modifier.width(6.dp))
+                Text("Проверяется…", style = MaterialTheme.typography.labelSmall, color = JbAccent)
             }
         }
 
@@ -491,11 +498,11 @@ private fun CustomModuleCard(
 private fun CustomModuleDialog(
     initial: CustomModule?,
     onDismiss: () -> Unit,
-    onSave: (String, String, CustomAuth, String, String, String?, List<FieldRule>) -> Unit
+    onSave: (String, String, CustomAuth, String, String, String?, List<FieldRule>, String) -> Unit
 ) {
     var title by remember { mutableStateOf(initial?.title.orEmpty()) }
     var url by remember { mutableStateOf(initial?.urlTemplate.orEmpty()) }
-    var auth by remember { mutableStateOf(initial?.auth ?: CustomAuth.BEARER) }
+    var auth by remember { mutableStateOf(initial?.auth ?: CustomAuth.AUTO) }
     var header by remember { mutableStateOf(initial?.headerName ?: "X-API-Key") }
     var param by remember { mutableStateOf(initial?.paramName ?: "api_key") }
     var key by remember { mutableStateOf("") }
@@ -527,7 +534,7 @@ private fun CustomModuleDialog(
                     onValueChange = { title = it.take(CustomModuleSpec.MAX_TITLE) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("Название сервиса", color = JbFaint) },
+                    label = { Text("Название модуля", color = JbFaint) },
                     shape = RoundedCornerShape(12.dp),
                     colors = fieldColors(),
                     textStyle = MaterialTheme.typography.bodyMedium
@@ -726,7 +733,10 @@ private fun CustomModuleDialog(
                     auth != CustomAuth.NONE && key.isBlank() && !hasStoredKey -> error = "Укажите API-ключ"
                     else -> {
                         error = null
-                        onSave(title, url, auth, header, param, key.ifBlank { null }, rules.toList())
+                        onSave(
+                            title, url, auth, header, param, key.ifBlank { null },
+                            rules.toList(), initial?.method ?: "GET"
+                        )
                     }
                 }
             }) {
