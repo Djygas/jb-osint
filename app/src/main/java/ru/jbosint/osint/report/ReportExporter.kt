@@ -58,7 +58,9 @@ class ReportExporter(private val context: Context) {
             analyst = entry.analyst,
             reportId = ReportNaming.reportId(entry.query, entry.createdAt),
             createdAt = entry.createdAt,
-            appVersion = BuildConfig.VERSION_NAME
+            appVersion = BuildConfig.VERSION_NAME,
+            aiAnalysis = entry.aiAnalysis,
+            aiNarrative = entry.aiNarrative
         )
         val fileName = ReportNaming.fileName(meta, entry.query, format.extension)
         val bytes = when (format) {

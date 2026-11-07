@@ -52,6 +52,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ru.jbosint.osint.core.model.Confidence
+import ru.jbosint.osint.data.AssistantCatalog
 import ru.jbosint.osint.data.HistoryEntry
 import ru.jbosint.osint.data.QueryDetector
 import ru.jbosint.osint.data.QueryKind
@@ -219,6 +220,11 @@ fun HomeScreen(state: UiState, vm: AppViewModel) {
                     if (state.demoMode) Pill("Демо-режим", JbAccent2)
                 }
             }
+        }
+
+        item {
+            Spacer(Modifier.height(12.dp))
+            AssistantCard(state, vm)
         }
 
         val preview = state.preview
@@ -415,3 +421,58 @@ private fun HistoryRow(entry: HistoryEntry, onClick: () -> Unit) {
 
 fun dateText(timestamp: Long): String =
     SimpleDateFormat("dd.MM.yyyy HH:mm", Locale("ru")).format(Date(timestamp))
+
+/** Компактная карточка ассистента: статус и быстрые переключатели сценариев. */
+@Composable
+private fun AssistantCard(state: UiState, vm: AppViewModel) {
+    GlowCard(modifier = Modifier.fillMaxWidth(), padding = 16) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("ИНТЕЛЛЕКТУАЛЬНЫЙ АССИСТЕНТ", style = MaterialTheme.typography.labelSmall, color = JbFaint)
+            Spacer(Modifier.weight(1f))
+            Pill(
+                if (state.assistantConfigured) "Подключён" else "Не настроен",
+                if (state.assistantConfigured) JbGreen else JbFaint
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        if (!state.assistantConfigured) {
+            Text(
+                "Аналитические выводы, разметка типов и интернет-исследование на базе Hugging Face. " +
+                    "Ключ хранится зашифрованным на устройстве.",
+                style = MaterialTheme.typography.bodySmall,
+                color = JbMuted
+            )
+            TextButton(onClick = { vm.navigate(Screen.SETTINGS) }) {
+                Text("Настроить ассистента", color = JbAccent2, style = MaterialTheme.typography.labelMedium)
+            }
+        } else {
+            Text(
+                "Модель: ${AssistantCatalog.titleFor(state.assistantModel)}",
+                style = MaterialTheme.typography.labelMedium,
+                color = JbMuted
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                MiniToggle("Анализ", state.assistantAutoAnalyze, vm::setAssistantAutoAnalyze)
+                MiniToggle("Типы", state.assistantAutoClassify, vm::setAssistantAutoClassify)
+                MiniToggle("Веб", state.autoResearch, vm::setAutoResearch)
+                MiniToggle("Резюме", state.assistantPolish, vm::setAssistantPolish)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MiniToggle(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelMedium,
+        color = if (checked) Color(0xFFD5D9FF) else JbMuted,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(if (checked) JbAccent.copy(alpha = 0.22f) else JbSurface)
+            .border(1.dp, if (checked) JbAccent.copy(alpha = 0.55f) else JbBorder, RoundedCornerShape(50))
+            .clickable { onCheckedChange(!checked) }
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+    )
+}

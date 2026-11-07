@@ -104,6 +104,7 @@ class PdfReport(
         telegramSection()
         factsSection()
         confidenceSection()
+        aiSection()
         limitationsSection()
         appendix()
         paginate()
@@ -807,12 +808,76 @@ class PdfReport(
             "приоритет отдаётся сведению с большим числом подтверждений.")
     }
 
+    // ------------------------------------------------------- ИИ-заключение
+
+    /**
+     * Раздел с выводами интеллектуального ассистента. Заголовки модели превращаются
+     * в подзаголовки, дефисы — в маркеры списка, служебная разметка Markdown
+     * в печатный документ не попадает.
+     */
+    private fun aiSection() {
+        val analysis = meta.aiAnalysis.trim()
+        val narrative = meta.aiNarrative.trim()
+        if (analysis.isBlank() && narrative.isBlank()) return
+        newContentPage("Аналитическое заключение")
+        h1("8. Аналитическое заключение")
+        p("Раздел подготовлен интеллектуальным ассистентом на основе установленных сведений и связей " +
+            "из настоящего отчёта. Выводы носят аналитический характер: новых фактов они не добавляют " +
+            "и подлежат проверке по первоисточникам.")
+
+        if (analysis.isNotBlank()) {
+            gap(10f)
+            h2("8.1. Выводы по цифровым следам")
+            renderAssistantText(analysis)
+        }
+        if (narrative.isNotBlank()) {
+            gap(10f)
+            h2("8.2. Оформленное резюме исследования")
+            renderAssistantText(narrative)
+        }
+    }
+
+    private fun renderAssistantText(text: String) {
+        val lines = text.replace("\r\n", "\n")
+            .replace("**", "")
+            .replace("__", "")
+            .split('\n')
+        var inList = false
+        for (rawLine in lines) {
+            val line = rawLine.trim()
+            if (line.isBlank()) {
+                if (!inList) gap(4f)
+                continue
+            }
+            when {
+                line.startsWith("#") -> {
+                    if (inList) gap(4f)
+                    inList = false
+                    h2(line.trimStart('#').trim().take(90))
+                }
+                line.startsWith("- ") || line.startsWith("* ") || line.startsWith("• ") -> {
+                    inList = true
+                    bullet(line.substring(2).trim())
+                }
+                line.matches(Regex("^\\d+[.)]\\s+.*")) -> {
+                    inList = true
+                    bullet(line.replaceFirst(Regex("^\\d+[.)]\\s+"), ""))
+                }
+                else -> {
+                    if (inList) gap(4f)
+                    inList = false
+                    p(line)
+                }
+            }
+        }
+    }
+
     // --------------------------------------------------------- ограничения
 
     private fun limitationsSection() {
         newContentPage("Ограничения и рекомендации")
-        h1("8. Ограничения и рекомендации")
-        h2("8.1. Ограничения исследования")
+        h1("9. Ограничения и рекомендации")
+        h2("9.1. Ограничения исследования")
         bullet("Отчёт отражает состояние открытых источников на момент сбора данных; сведения могут " +
             "измениться без уведомления.")
         bullet("Отсутствие сведений в реестре не является доказательством их отсутствия: часть модулей " +
@@ -822,7 +887,7 @@ class PdfReport(
         bullet("Метаданные технических артефактов подвержены искажению и не рассматриваются как " +
             "самостоятельное доказательство.")
 
-        h2("8.2. Рекомендации аналитику")
+        h2("9.2. Рекомендации аналитику")
         bullet("Проверить вручную сведения со статусом «Требует проверки», начиная с объектов с " +
             "наибольшим числом связей.")
         bullet("Для устойчивых пересечений (два и более подтверждения) запросить подтверждающий " +

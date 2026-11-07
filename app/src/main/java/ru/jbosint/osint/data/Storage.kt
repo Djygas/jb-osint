@@ -42,7 +42,13 @@ data class HistoryEntry(
     val createdAt: Long,
     val analyst: String,
     val data: AggregatedData,
-    val demo: Boolean
+    val demo: Boolean,
+    /** Аналитический вывод ИИ по цифровым следам. */
+    val aiAnalysis: String = "",
+    /** Оформленное ИИ-резюме исследования (для отчёта). */
+    val aiNarrative: String = "",
+    /** Выжимка интернет-исследования (DuckDuckGo + ИИ). */
+    val aiResearch: String = ""
 ) {
     val facts: Int get() = data.facts.size
     val links: Int get() = data.links.size
@@ -104,6 +110,9 @@ object Serialization {
         root.put("analyst", entry.analyst)
         root.put("demo", entry.demo)
         root.put("data", encodeData(entry.data))
+        if (entry.aiAnalysis.isNotBlank()) root.put("aiAnalysis", entry.aiAnalysis)
+        if (entry.aiNarrative.isNotBlank()) root.put("aiNarrative", entry.aiNarrative)
+        if (entry.aiResearch.isNotBlank()) root.put("aiResearch", entry.aiResearch)
         return root.toString()
     }
 
@@ -157,7 +166,10 @@ object Serialization {
             createdAt = root.getLong("createdAt"),
             analyst = root.optString("analyst", ""),
             demo = root.optBoolean("demo", false),
-            data = decodeData(root.getJSONObject("data"))
+            data = decodeData(root.getJSONObject("data")),
+            aiAnalysis = root.optString("aiAnalysis", ""),
+            aiNarrative = root.optString("aiNarrative", ""),
+            aiResearch = root.optString("aiResearch", "")
         )
     }.getOrNull()
 

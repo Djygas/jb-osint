@@ -39,6 +39,7 @@ class XlsxReport(
         categorySheet(FactCategory.CONTACT, "Контакты"),
         categorySheet(FactCategory.TECHNICAL, "Технические"),
         linksSheet(),
+        aiSheet(),
         methodologySheet()
     ).filter { it.rows.isNotEmpty() || it.name == "Сводка" })
 
@@ -176,6 +177,33 @@ class XlsxReport(
                 Column("Подтверждений", 14f)
             ),
             rows = rows
+        )
+    }
+
+    /** Лист с выводами интеллектуального ассистента: раздел + текст по абзацам. */
+    private fun aiSheet(): Sheet {
+        val analysis = meta.aiAnalysis.trim()
+        val narrative = meta.aiNarrative.trim()
+        val rows = ArrayList<List<Cell>>()
+        if (analysis.isNotBlank()) {
+            rows += listOf(Cell("Выводы по цифровым следам", 2), Cell(""))
+            analysis.split('\n').map { it.trim() }.filter { it.isNotBlank() }.forEach { line ->
+                rows += listOf(Cell(""), Cell(line.take(3000)))
+            }
+        }
+        if (narrative.isNotBlank()) {
+            if (rows.isNotEmpty()) rows += emptyRow(2)
+            rows += listOf(Cell("Оформленное резюме исследования", 2), Cell(""))
+            narrative.split('\n').map { it.trim() }.filter { it.isNotBlank() }.forEach { line ->
+                rows += listOf(Cell(""), Cell(line.take(3000)))
+            }
+        }
+        return Sheet(
+            name = "ИИ-заключение",
+            columns = listOf(Column("Раздел", 30f), Column("Содержание", 110f)),
+            rows = rows,
+            freeze = true,
+            autoFilter = false
         )
     }
 

@@ -36,11 +36,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import ru.jbosint.osint.BuildConfig
+import ru.jbosint.osint.data.AssistantCatalog
+import ru.jbosint.osint.data.KeyState
 
 @Composable
 fun SettingsScreen(state: UiState, vm: AppViewModel) {
@@ -109,6 +114,8 @@ fun SettingsScreen(state: UiState, vm: AppViewModel) {
                 }
             }
         }
+
+        item { AssistantSection(state, vm) }
 
         item {
             SectionHeader("Защита")
@@ -308,4 +315,218 @@ private fun DayChip(text: String, selected: Boolean, onClick: () -> Unit) {
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 6.dp)
     )
+}
+
+/** Блок «Интеллектуальный ассистент»: ключ, модель и сценарии использования. */
+@Composable
+private fun AssistantSection(state: UiState, vm: AppViewModel) {
+    var keyDraft by remember { mutableStateOf("") }
+    var modelDraft by remember(state.assistantModel) { mutableStateOf(state.assistantModel) }
+    val context = LocalContext.current
+
+    SectionHeader("Интеллектуальный ассистент")
+    GlowCard(modifier = Modifier.fillMaxWidth(), padding = 16) {
+        Text("Hugging Face", style = MaterialTheme.typography.titleSmall, color = JbText)
+        Spacer(Modifier.height(3.dp))
+        Text(
+            "Ассистент формирует аналитические выводы, размечает типы данных и готовит резюме отчёта. " +
+                "Запросы уходят напрямую на router.huggingface.co по HTTPS; ключ хранится в зашифрованном виде " +
+                "на устройстве и прикладывается только к запросам к Hugging Face.",
+            style = MaterialTheme.typography.bodySmall,
+            color = JbMuted
+        )
+        Spacer(Modifier.height(10.dp))
+        OutlinedTextField(
+            value = keyDraft,
+            onValueChange = { keyDraft = it.trim() },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            placeholder = {
+                Text(
+                    if (state.assistantConfigured) "Ключ сохранён — вставьте новый, чтобы заменить" else "hf_…",
+                    color = JbFaint
+                )
+            },
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            shape = RoundedCornerShape(12.dp),
+            colors = fieldColors()
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                when {
+                    state.assistantChecking -> "Проверка ключа…"
+                    !state.assistantConfigured -> "Ключ не задан"
+                    state.assistantState == KeyState.VALID -> "Ключ активен"
+                    state.assistantState == KeyState.INVALID -> "Ключ отклонён"
+                    state.assistantState == KeyState.OFFLINE -> "Нет связи с сервисом"
+                    else -> "Ключ сохранён, не проверен"
+                },
+                style = MaterialTheme.typography.labelMedium,
+                color = when {
+                    state.assistantChecking -> JbMuted
+                    !state.assistantConfigured -> JbFaint
+                    state.assistantState == KeyState.VALID -> JbGreen
+                    state.assistantState == KeyState.INVALID -> JbRed
+                    else -> JbAmber
+                },
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(
+                onClick = {
+                    vm.saveAssistantKey(keyDraft)
+                    keyDraft = ""
+                },
+                enabled = keyDraft.length >= 8
+            ) { Text("Сохранить", color = if (keyDraft.length >= 8) JbAccent2 else JbFaint) }
+            TextButton(
+                onClick = vm::checkAssistantKey,
+                enabled = state.assistantConfigured && !state.assistantChecking
+            ) { Text("Проверить", color = JbAccent2) }
+        }
+        if (state.assistantError != null) {
+            Text(
+                state.assistantError,
+                style = MaterialTheme.typography.labelSmall,
+                color = JbAmber
+            )
+            Spacer(Modifier.height(4.dp))
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = {
+                runCatching {
+                    context.startActivity(
+                        android.content.Intent(
+                            android.content.Intent.ACTION_VIEW,
+                            android.net.Uri.parse(AssistantCatalog.TOKENS_URL)
+                        )
+                    )
+                }
+            }) { Text("Получить ключ на huggingface.co", color = JbAccent2, style = MaterialTheme.typography.labelMedium) }
+            if (state.assistantConfigured) {
+                TextButton(onClick = vm::clearAssistantKey) {
+                    Text("Удалить ключ", color = JbRed, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+        GradientDivider()
+        Spacer(Modifier.height(12.dp))
+
+        Text("Модель", style = MaterialTheme.typography.titleSmall, color = JbText)
+        Spacer(Modifier.height(3.dp))
+        Text(
+            "Список — модели, доступные на роутере Hugging Face. Можно указать любой ID вручную.",
+            style = MaterialTheme.typography.bodySmall,
+            color = JbMuted
+        )
+        Spacer(Modifier.height(8.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            AssistantCatalog.models.chunked(2).forEach { rowModels ->
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    rowModels.forEach { model ->
+                        ModelChip(
+                            title = model.title,
+                            note = model.note,
+                            selected = state.assistantModel == model.id,
+                            modifier = Modifier.weight(1f),
+                            onClick = { vm.setAssistantModel(model.id) }
+                        )
+                    }
+                    if (rowModels.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = modelDraft,
+            onValueChange = { modelDraft = it.trim() },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("ID модели", color = JbFaint) },
+            shape = RoundedCornerShape(12.dp),
+            colors = fieldColors(),
+            trailingIcon = {
+                TextButton(onClick = { vm.setAssistantModel(modelDraft) }, enabled = modelDraft.isNotBlank()) {
+                    Text("Применить", color = JbAccent2, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        )
+
+        Spacer(Modifier.height(12.dp))
+        GradientDivider()
+        Spacer(Modifier.height(12.dp))
+
+        Text("Сценарии", style = MaterialTheme.typography.titleSmall, color = JbText)
+        Spacer(Modifier.height(8.dp))
+        ToggleRow(
+            title = "Анализ цифровых следов",
+            subtitle = "После поиска ассистент делает выводы по найденным фактам и связям.",
+            checked = state.assistantAutoAnalyze,
+            onCheckedChange = vm::setAssistantAutoAnalyze
+        )
+        Spacer(Modifier.height(10.dp))
+        ToggleRow(
+            title = "Разметка типов данных",
+            subtitle = "Определяет тип и релевантность значений; исходные факты не изменяются.",
+            checked = state.assistantAutoClassify,
+            onCheckedChange = vm::setAssistantAutoClassify
+        )
+        Spacer(Modifier.height(10.dp))
+        ToggleRow(
+            title = "Генерация запросов",
+            subtitle = "Перед поиском ассистент уточняет формулировку по введённому значению.",
+            checked = state.assistantAutoQueries,
+            onCheckedChange = vm::setAssistantAutoQueries
+        )
+        Spacer(Modifier.height(10.dp))
+        ToggleRow(
+            title = "Интернет-исследование",
+            subtitle = "Поиск в открытом вебе (DuckDuckGo) по запросам ассистента и краткая выжимка.",
+            checked = state.autoResearch,
+            onCheckedChange = vm::setAutoResearch
+        )
+        Spacer(Modifier.height(10.dp))
+        ToggleRow(
+            title = "Оформление резюме отчёта",
+            subtitle = "Структурированное резюме по результатам анализа — раздел в PDF, Excel и JSON.",
+            checked = state.assistantPolish,
+            onCheckedChange = vm::setAssistantPolish
+        )
+    }
+}
+
+@Composable
+private fun ModelChip(
+    title: String,
+    note: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) JbAccent.copy(alpha = 0.18f) else JbSurface)
+            .border(
+                1.dp,
+                if (selected) JbAccent.copy(alpha = 0.55f) else JbBorder,
+                RoundedCornerShape(12.dp)
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.labelMedium,
+            color = if (selected) JbText else JbSlate
+        )
+        Text(
+            note,
+            style = MaterialTheme.typography.labelSmall,
+            color = JbFaint
+        )
+    }
 }

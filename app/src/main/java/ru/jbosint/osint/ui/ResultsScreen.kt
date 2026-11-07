@@ -7,6 +7,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -59,6 +60,7 @@ import ru.jbosint.osint.core.model.AggregatedData
 import ru.jbosint.osint.core.model.Confidence
 import ru.jbosint.osint.core.model.Fact
 import ru.jbosint.osint.core.model.FactCategory
+import ru.jbosint.osint.data.AssistantClassification
 import ru.jbosint.osint.core.report.ReportNaming
 import ru.jbosint.osint.report.ReportExporter
 
@@ -174,6 +176,8 @@ fun ResultsScreen(state: UiState, vm: AppViewModel) {
 
         item { ConfidenceCard(data) }
 
+        item { AssistantResultCard(state, vm) }
+
         item {
             Column {
                 SectionHeader("Разделы")
@@ -211,7 +215,7 @@ fun ResultsScreen(state: UiState, vm: AppViewModel) {
             }
         } else {
             items(visibleFacts, key = { "${it.category}-${it.kind}-${it.value}-${it.subject}" }) { fact ->
-                FactCard(fact)
+                FactCard(fact, state.classifications[fact.value])
             }
         }
 
@@ -334,7 +338,7 @@ private fun ConfidenceCard(data: AggregatedData) {
 }
 
 @Composable
-private fun FactCard(fact: Fact) {
+private fun FactCard(fact: Fact, classification: AssistantClassification? = null) {
     val color = categoryColor(fact.category)
     Column(
         modifier = Modifier
@@ -370,6 +374,13 @@ private fun FactCard(fact: Fact) {
         if (fact.subject.isNotBlank()) {
             Spacer(Modifier.height(3.dp))
             Text("Субъект: ${fact.subject}", style = MaterialTheme.typography.bodySmall, color = JbMuted)
+        }
+        if (classification != null) {
+            Spacer(Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Pill("ИИ: ${classification.typeLabel}", JbAccent2)
+                Pill("релевантность: ${classification.relevanceLabel}", JbSlate)
+            }
         }
         if (fact.attributes.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
@@ -510,3 +521,152 @@ private fun chipColors() = FilterChipDefaults.filterChipColors(
     selectedContainerColor = JbAccent.copy(alpha = 0.22f),
     selectedLabelColor = Color(0xFFD5D9FF)
 )
+
+/** Блок ассистента в результатах: анализ, веб-исследование и резюме для отчёта. */
+@Composable
+private fun AssistantResultCard(state: UiState, vm: AppViewModel) {
+    val entry = state.resultEntry
+    val analysis = entry?.aiAnalysis.orEmpty()
+    val narrative = entry?.aiNarrative.orEmpty()
+    val busy = state.analysisRunning || state.researchRunning
+
+    Column(modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+        SectionHeader("Интеллектуальный ассистент")
+        GlowCard(modifier = Modifier.fillMaxWidth(), padding = 16) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Анализ открытых источников",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = JbText,
+                    modifier = Modifier.weight(1f)
+                )
+                if (state.assistantBusy.isNotBlank()) {
+                    CircularProgressIndicator(modifier = Modifier.size(12.dp), color = JbAccent2, strokeWidth = 1.5.dp)
+                    Spacer(Modifier.width(6.dp))
+                    Text(state.assistantBusy, style = MaterialTheme.typography.labelSmall, color = JbAccent2)
+                } else if (state.assistantConfigured) {
+                    Pill(
+                        if (analysis.isNotBlank()) "Вывод готов" else "Готов",
+                        if (analysis.isNotBlank()) JbGreen else JbFaint
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+
+            if (!state.assistantConfigured) {
+                Text(
+                    "Подключите ключ Hugging Face, чтобы получать аналитические выводы, разметку типов " +
+                        "и краткую выжимку из открытого веба.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = JbMuted
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { vm.navigate(Screen.SETTINGS) },
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, JbAccent.copy(alpha = 0.4f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFC7CCFF))
+                ) { Text("Настроить ассистента", style = MaterialTheme.typography.labelMedium) }
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = vm::analyzeResult,
+                        enabled = !busy,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, JbAccent.copy(alpha = 0.4f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFC7CCFF))
+                    ) {
+                        Text(
+                            if (state.analysisRunning) "Анализ…" else if (analysis.isBlank()) "Проанализировать" else "Обновить анализ",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = vm::researchWeb,
+                        enabled = !busy,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, JbAccent.copy(alpha = 0.4f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFC7CCFF))
+                    ) {
+                        Text(
+                            if (state.researchRunning) "Поиск…" else "Интернет-поиск",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = vm::synthesizeReport,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, JbBorder),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = JbMuted)
+                ) {
+                    Text(
+                        if (state.analysisRunning && state.assistantBusy == "Синтезатор отчёта") "Оформление…"
+                        else if (narrative.isBlank()) "Оформить резюме для отчёта" else "Переоформить резюме",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+            }
+
+            if (state.assistantError != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(state.assistantError, style = MaterialTheme.typography.bodySmall, color = JbAmber)
+            }
+            if (state.researchError != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(state.researchError, style = MaterialTheme.typography.bodySmall, color = JbAmber)
+            }
+
+            if (analysis.isNotBlank()) {
+                Spacer(Modifier.height(12.dp))
+                GradientDivider()
+                Spacer(Modifier.height(10.dp))
+                Text("АНАЛИТИЧЕСКИЙ ВЫВОД", style = MaterialTheme.typography.labelSmall, color = JbFaint)
+                Spacer(Modifier.height(6.dp))
+                Text(analysis, style = MaterialTheme.typography.bodySmall, color = JbText)
+            }
+
+            val research = state.research.ifBlank { entry?.aiResearch.orEmpty() }
+            if (research.isNotBlank()) {
+                Spacer(Modifier.height(12.dp))
+                GradientDivider()
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("ИНТЕРНЕТ-ИССЛЕДОВАНИЕ", style = MaterialTheme.typography.labelSmall, color = JbFaint,
+                        modifier = Modifier.weight(1f))
+                    Text(
+                        "Скрыть",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = JbAccent2,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .clickable { vm.clearResearch() }
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(research, style = MaterialTheme.typography.bodySmall, color = JbText)
+            }
+
+            if (narrative.isNotBlank()) {
+                Spacer(Modifier.height(12.dp))
+                GradientDivider()
+                Spacer(Modifier.height(10.dp))
+                Text("РЕЗЮМЕ ДЛЯ ОТЧЁТА", style = MaterialTheme.typography.labelSmall, color = JbFaint)
+                Spacer(Modifier.height(6.dp))
+                Text(narrative, style = MaterialTheme.typography.bodySmall, color = JbText)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Раздел добавлен в PDF, Excel и JSON при экспорте.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = JbFaint
+                )
+            }
+        }
+    }
+}

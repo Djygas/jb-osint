@@ -19,6 +19,15 @@ import org.json.JSONObject
 import ru.jbosint.osint.BuildConfig
 import ru.jbosint.osint.core.model.AggregatedData
 import ru.jbosint.osint.core.model.Fact
+import ru.jbosint.osint.data.AssistantCatalog
+import ru.jbosint.osint.data.AssistantClassification
+import ru.jbosint.osint.data.AssistantParser
+import ru.jbosint.osint.data.AssistantPrompts
+import ru.jbosint.osint.data.AssistantRole
+import ru.jbosint.osint.data.AssistantService
+import ru.jbosint.osint.data.AssistantStore
+import ru.jbosint.osint.data.WebHit
+import ru.jbosint.osint.data.WebResearch
 import ru.jbosint.osint.data.CustomAuth
 import ru.jbosint.osint.data.CustomConnectionProbe
 import ru.jbosint.osint.data.CustomModule
@@ -117,7 +126,25 @@ data class UiState(
     val autoSetup: AutoSetupUi? = null,
     val manualDraft: CustomModule? = null,
     val manualKey: String = "",
-    val toast: String? = null
+    val toast: String? = null,
+    // ---------------------------------------------- интеллектуальный ассистент
+    val assistantConfigured: Boolean = false,
+    val assistantModel: String = AssistantCatalog.DEFAULT_MODEL,
+    val assistantState: KeyState = KeyState.UNCHECKED,
+    val assistantCheckedAt: Long = 0L,
+    val assistantChecking: Boolean = false,
+    val assistantBusy: String = "",
+    val assistantError: String? = null,
+    val assistantAutoAnalyze: Boolean = false,
+    val assistantAutoClassify: Boolean = false,
+    val assistantAutoQueries: Boolean = false,
+    val assistantPolish: Boolean = false,
+    val autoResearch: Boolean = false,
+    val analysisRunning: Boolean = false,
+    val researchRunning: Boolean = false,
+    val research: String = "",
+    val researchError: String? = null,
+    val classifications: Map<String, AssistantClassification> = emptyMap()
 ) {
     val activeModules: Int
         get() = providers.count { it.enabled && it.hasKey } + customModules.count { it.enabled && (it.hasKey || it.auth == CustomAuth.NONE) }
@@ -133,6 +160,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val customStore = CustomModuleStore(app)
     private val customChecker = CustomModuleChecker(customStore)
     private val engine = SearchEngine(keys, settings)
+    private val assistantStore = AssistantStore(app)
+    private val assistantService = AssistantService(assistantStore)
 
     private val _state = MutableStateFlow(UiState())
     val state = _state.asStateFlow()
@@ -141,11 +170,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val shareEvents = _shareEvents.asSharedFlow()
 
     init {
-        // Автоудаление старых отчётов согласно настройке.
-        val keepDays = settings.autoWipeDays
-        if (keepDays > 0) {
-            val cutoff = System.currentTimeMillis() - keepDays * 86_400_000L
-            historyStore.list().filter { it.createdAt < cutoff }.forEach { historyStore.delete(it.id) }
+        // Автоудаление старых отчётов и загрузка истории — вне главного потока.
+        viewModelScope.launch(Dispatchers.IO) {
+            val keepDays = settings.autoWipeDays
+            if (keepDays > 0) {
+                val cutoff = System.currentTimeMillis() - keepDays * 86_400_000L
+                historyStore.list().filter { it.createdAt < cutoff }.forEach { historyStore.delete(it.id) }
+            }
+            val entries = historyStore.list()
+            _state.update { it.copy(history = entries) }
         }
         _state.value = UiState(
             ready = true,
@@ -155,9 +188,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             demoMode = settings.demoMode,
             secureScreen = settings.secureScreen,
             autoWipeDays = settings.autoWipeDays,
-            history = historyStore.list(),
+            history = emptyList(),
             providers = buildProviders(),
-            customModules = customStore.list()
+            customModules = customStore.list(),
+            assistantConfigured = assistantStore.configured(),
+            assistantModel = assistantStore.model,
+            assistantState = assistantStore.state(),
+            assistantCheckedAt = assistantStore.checkedAt(),
+            assistantAutoAnalyze = assistantStore.autoAnalyze,
+            assistantAutoClassify = assistantStore.autoClassify,
+            assistantAutoQueries = assistantStore.autoQueries,
+            assistantPolish = assistantStore.polishReport,
+            autoResearch = assistantStore.autoResearch
         )
     }
 
@@ -185,7 +227,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun backHome() = _state.update { it.copy(screen = Screen.HOME) }
 
     fun openHistory(entry: HistoryEntry) = _state.update {
-        it.copy(screen = Screen.RESULTS, result = entry.data, resultEntry = entry, searchError = null)
+        it.copy(
+            screen = Screen.RESULTS,
+            result = entry.data,
+            resultEntry = entry,
+            searchError = null,
+            research = entry.aiResearch,
+            researchError = null
+        )
     }
 
     // ---------------------------------------------------------------- онбординг
@@ -263,12 +312,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(
                 searching = true, stage = "Подготовка модулей", progress = 0,
-                searchError = null, result = null, resultEntry = null
+                searchError = null, result = null, resultEntry = null,
+                research = "", researchError = null, classifications = emptyMap()
             )
         }
         viewModelScope.launch {
+            var effective = query
+            if (assistantStore.autoQueries && assistantStore.configured()) {
+                _state.update { it.copy(stage = "Ассистент: подготовка запросов") }
+                effective = refineQuery(query) ?: query
+            }
             val outcome = runCatching {
-                engine.search(query, { stage, progress ->
+                engine.search(effective, { stage, progress ->
                     _state.update { s -> s.copy(stage = stage, progress = progress.coerceIn(0, 100)) }
                 }, customStore.activeModules())
             }
@@ -281,7 +336,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     data = data,
                     demo = settings.demoMode
                 )
-                withContext(Dispatchers.IO) { historyStore.save(entry) }
+                val entries = withContext(Dispatchers.IO) {
+                    historyStore.save(entry)
+                    historyStore.list()
+                }
                 _state.update {
                     it.copy(
                         searching = false,
@@ -290,9 +348,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         result = data,
                         resultEntry = entry,
                         screen = Screen.RESULTS,
-                        history = historyStore.list()
+                        history = entries
                     )
                 }
+                autoEnrich(entry)
             }.onFailure { error ->
                 _state.update {
                     it.copy(
@@ -310,8 +369,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteHistory(id: String) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { historyStore.delete(id) }
-            _state.update { it.copy(history = historyStore.list()) }
+            val entries = withContext(Dispatchers.IO) {
+                historyStore.delete(id)
+                historyStore.list()
+            }
+            _state.update { it.copy(history = entries) }
         }
     }
 
@@ -807,6 +869,294 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     toast = "Ключи и история удалены"
                 )
             }
+        }
+    }
+
+    // ------------------------------------------------ интеллектуальный ассистент
+
+    fun saveAssistantKey(value: String) {
+        assistantStore.saveKey(value)
+        _state.update {
+            it.copy(
+                assistantConfigured = assistantStore.configured(),
+                assistantState = if (assistantStore.configured()) KeyState.UNCHECKED else KeyState.EMPTY,
+                assistantError = null
+            )
+        }
+    }
+
+    fun clearAssistantKey() {
+        assistantStore.clearKey()
+        _state.update {
+            it.copy(
+                assistantConfigured = false,
+                assistantState = KeyState.EMPTY,
+                assistantError = null,
+                classifications = emptyMap()
+            )
+        }
+    }
+
+    fun setAssistantModel(id: String) {
+        assistantStore.model = id.trim().ifBlank { AssistantCatalog.DEFAULT_MODEL }
+        _state.update { it.copy(assistantModel = assistantStore.model) }
+    }
+
+    fun checkAssistantKey() {
+        if (!assistantStore.configured()) {
+            _state.update { it.copy(assistantError = "Сначала вставьте ключ Hugging Face") }
+            return
+        }
+        if (_state.value.assistantChecking) return
+        _state.update { it.copy(assistantChecking = true, assistantError = null) }
+        viewModelScope.launch {
+            val check = assistantService.probe()
+            _state.update {
+                it.copy(
+                    assistantChecking = false,
+                    assistantState = check.state,
+                    assistantCheckedAt = assistantStore.checkedAt(),
+                    assistantError = if (check.state == KeyState.VALID) null else check.detail
+                )
+            }
+        }
+    }
+
+    fun setAssistantAutoAnalyze(value: Boolean) {
+        assistantStore.autoAnalyze = value
+        _state.update { it.copy(assistantAutoAnalyze = value) }
+    }
+
+    fun setAssistantAutoClassify(value: Boolean) {
+        assistantStore.autoClassify = value
+        _state.update { it.copy(assistantAutoClassify = value) }
+    }
+
+    fun setAssistantAutoQueries(value: Boolean) {
+        assistantStore.autoQueries = value
+        _state.update { it.copy(assistantAutoQueries = value) }
+    }
+
+    fun setAssistantPolish(value: Boolean) {
+        assistantStore.polishReport = value
+        _state.update { it.copy(assistantPolish = value) }
+    }
+
+    fun setAutoResearch(value: Boolean) {
+        assistantStore.autoResearch = value
+        _state.update { it.copy(autoResearch = value) }
+    }
+
+    /** Кнопка «Проанализировать»: вывод аналитика по цифровым следам. */
+    fun analyzeResult() {
+        val entry = _state.value.resultEntry
+        if (entry == null) {
+            _state.update { it.copy(toast = "Сначала выполните поиск") }
+            return
+        }
+        if (!requireKey() || _state.value.analysisRunning) return
+        _state.update {
+            it.copy(analysisRunning = true, assistantBusy = AssistantRole.ANALYST.title, assistantError = null)
+        }
+        viewModelScope.launch {
+            val outcome = doAnalysis(entry)
+            _state.update { it.copy(analysisRunning = false, assistantBusy = "") }
+            outcome.onSuccess { text ->
+                persistEntry(entry.copy(aiAnalysis = text))
+                _state.update { it.copy(toast = "Аналитический вывод готов") }
+            }.onFailure { error ->
+                _state.update { it.copy(assistantError = error.message ?: "Не удалось получить ответ") }
+            }
+        }
+    }
+
+    /** Кнопка «Оформить отчёт»: синтез резюме по готовому исследованию. */
+    fun synthesizeReport() {
+        val entry = _state.value.resultEntry
+        if (entry == null) {
+            _state.update { it.copy(toast = "Сначала выполните поиск") }
+            return
+        }
+        if (!requireKey() || _state.value.analysisRunning) return
+        _state.update {
+            it.copy(analysisRunning = true, assistantBusy = AssistantRole.SYNTHESIS.title, assistantError = null)
+        }
+        viewModelScope.launch {
+            val outcome = doNarrative(entry)
+            _state.update { it.copy(analysisRunning = false, assistantBusy = "") }
+            outcome.onSuccess { text ->
+                persistEntry(entry.copy(aiNarrative = text))
+                _state.update { it.copy(toast = "Резюме для отчёта готово") }
+            }.onFailure { error ->
+                _state.update { it.copy(assistantError = error.message ?: "Не удалось оформить отчёт") }
+            }
+        }
+    }
+
+    /** Кнопка «Интернет-поиск»: запросы модели → DuckDuckGo → выжимка модели. */
+    fun researchWeb() {
+        val entry = _state.value.resultEntry
+        if (entry == null) {
+            _state.update { it.copy(toast = "Сначала выполните поиск") }
+            return
+        }
+        if (!requireKey() || _state.value.researchRunning) return
+        _state.update { it.copy(researchRunning = true, researchError = null, assistantError = null) }
+        viewModelScope.launch {
+            val outcome = doResearch(entry)
+            _state.update { it.copy(researchRunning = false) }
+            outcome.onSuccess { text ->
+                persistEntry(entry.copy(aiResearch = text))
+                _state.update { it.copy(research = text, researchError = null, toast = "Интернет-исследование завершено") }
+            }.onFailure { error ->
+                _state.update { it.copy(researchError = error.message ?: "Не удалось получить выжимку") }
+            }
+        }
+    }
+
+    fun clearResearch() {
+        val entry = _state.value.resultEntry ?: return
+        _state.update { it.copy(research = "", researchError = null) }
+        viewModelScope.launch { persistEntry(entry.copy(aiResearch = "")) }
+    }
+
+    private fun requireKey(): Boolean {
+        if (assistantStore.configured()) return true
+        _state.update {
+            it.copy(
+                assistantError = "Ключ ассистента не задан",
+                toast = "Добавьте ключ Hugging Face в «Настройки → Интеллектуальный ассистент»"
+            )
+        }
+        return false
+    }
+
+    // ------------------------------------------------- пошаговые операции ассистента
+
+    private suspend fun doAnalysis(entry: HistoryEntry): Result<String> {
+        val prompt = AssistantPrompts.analyze(entry.query, entry.data.facts, entry.data.links)
+        return assistantService.chat(AssistantRole.ANALYST, prompt).mapCatching { raw ->
+            AssistantParser.analysis(raw) ?: throw IllegalStateException("Модель вернула слишком короткий ответ")
+        }
+    }
+
+    private suspend fun doNarrative(entry: HistoryEntry): Result<String> {
+        val prompt = AssistantPrompts.synthesize(entry.query, entry.data, entry.aiAnalysis)
+        return assistantService.chat(AssistantRole.SYNTHESIS, prompt).mapCatching { raw ->
+            AssistantParser.analysis(raw) ?: throw IllegalStateException("Модель вернула слишком короткий ответ")
+        }
+    }
+
+    private suspend fun doResearch(entry: HistoryEntry): Result<String> {
+        val context = entry.data.facts.take(6).joinToString("; ") { "${it.kind}: ${it.value}" }
+        val plan = assistantService.chat(
+            AssistantRole.RESEARCHER,
+            AssistantPrompts.researchQueries(entry.query, context)
+        )
+        val queries = plan.getOrNull()?.let { AssistantParser.searchStrings(it) }
+            ?.takeIf { it.isNotEmpty() } ?: listOf(entry.query)
+
+        val hits = ArrayList<WebHit>()
+        for (query in queries.take(2)) {
+            hits += WebResearch.search(query, 4)
+            if (hits.size >= 8) break
+        }
+        val unique = hits.distinctBy { it.url }.take(8)
+        if (unique.isEmpty()) {
+            return Result.failure(
+                IllegalStateException("Поиск не дал результатов: сервис недоступен или запрос слишком узкий")
+            )
+        }
+        val summary = assistantService.chat(
+            AssistantRole.RESEARCHER,
+            AssistantPrompts.researchSummary(entry.query, WebResearch.digest(unique))
+        ).getOrThrow()
+        val text = AssistantParser.analysis(summary) ?: summary.trim().take(6000)
+        val sources = unique.joinToString("\n") { "- ${it.title} — ${it.url}" }
+        return Result.success(text + "\n\nИсточники:\n" + sources)
+    }
+
+    /** Разметка типов значений моделью: подсказки в результатах, сами факты не меняются. */
+    private suspend fun doClassification(entry: HistoryEntry): Map<String, AssistantClassification> {
+        val values = entry.data.facts.map { it.value }.filter { it.isNotBlank() }.distinct().take(12)
+        if (values.isEmpty()) return emptyMap()
+        val prompt = if (values.size == 1) AssistantPrompts.classify(values.first())
+        else AssistantPrompts.classifyBatch(values)
+        val raw = assistantService.chat(AssistantRole.CLASSIFIER, prompt).getOrNull() ?: return emptyMap()
+        val parsed = AssistantParser.classifications(raw)
+        if (parsed.isEmpty()) return emptyMap()
+        val map = LinkedHashMap<String, AssistantClassification>()
+        if (values.size == 1) {
+            map[values.first()] = parsed.first()
+        } else if (parsed.size >= values.size) {
+            values.forEachIndexed { index, value -> map[value] = parsed[index] }
+        }
+        return map
+    }
+
+    /** Планировщик запросов: модель подбирает формулировку до запуска модулей. */
+    private suspend fun refineQuery(input: String): String? {
+        val modules = listOf(
+            "профили" to "социальные сети и публичные профили",
+            "контакты" to "почта, телефон, мессенджеры",
+            "домены" to "домены, IP, сертификаты",
+            "утечки" to "публичные базы компрометации"
+        )
+        val prompt = AssistantPrompts.queries(input, modules, "")
+        val raw = assistantService.chat(AssistantRole.QUERY_PLANNER, prompt).getOrNull() ?: return null
+        return AssistantParser.queries(raw).map { it.query }
+            .firstOrNull { it.length in 2..120 && !it.equals(input, ignoreCase = true) }
+    }
+
+    /** Последовательное обогащение результата по включённым сценариям. */
+    private fun autoEnrich(entry: HistoryEntry) {
+        if (!assistantStore.configured()) return
+        if (!assistantStore.autoClassify && !assistantStore.autoAnalyze &&
+            !assistantStore.autoResearch && !assistantStore.polishReport
+        ) return
+        viewModelScope.launch {
+            var current = entry
+            if (assistantStore.autoClassify) {
+                val map = doClassification(current)
+                if (map.isNotEmpty()) _state.update { it.copy(classifications = it.classifications + map) }
+            }
+            if (assistantStore.autoAnalyze) {
+                doAnalysis(current).onSuccess { text ->
+                    current = current.copy(aiAnalysis = text)
+                    persistEntry(current)
+                }
+            }
+            if (assistantStore.autoResearch) {
+                doResearch(current).onSuccess { text ->
+                    current = current.copy(aiResearch = text)
+                    persistEntry(current)
+                    _state.update { it.copy(research = text, researchError = null) }
+                }.onFailure { error ->
+                    _state.update { it.copy(researchError = error.message) }
+                }
+            }
+            if (assistantStore.polishReport && current.aiAnalysis.isNotBlank()) {
+                doNarrative(current).onSuccess { text ->
+                    current = current.copy(aiNarrative = text)
+                    persistEntry(current)
+                    _state.update { it.copy(toast = "Ассистент оформил резюме отчёта") }
+                }
+            }
+        }
+    }
+
+    private suspend fun persistEntry(entry: HistoryEntry) {
+        val entries = withContext(Dispatchers.IO) {
+            historyStore.save(entry)
+            historyStore.list()
+        }
+        _state.update { s ->
+            s.copy(
+                resultEntry = if (s.resultEntry?.id == entry.id) entry else s.resultEntry,
+                result = if (s.resultEntry?.id == entry.id) entry.data else s.result,
+                research = if (s.resultEntry?.id == entry.id) entry.aiResearch else s.research,
+                history = entries
+            )
         }
     }
 

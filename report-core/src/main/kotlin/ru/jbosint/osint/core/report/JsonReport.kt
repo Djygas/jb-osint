@@ -52,6 +52,16 @@ class JsonReport(
         }
         sb.append("},\n")
 
+        val aiAnalysis = meta.aiAnalysis.trim()
+        val aiNarrative = meta.aiNarrative.trim()
+        if (aiAnalysis.isNotEmpty() || aiNarrative.isNotEmpty()) {
+            sb.append("  \"ai_analysis\": {\n")
+            sb.append("    \"model\": \"external\",\n")
+            sb.append("    \"analysis\": ").append(str(aiAnalysis)).append(",\n")
+            sb.append("    \"narrative\": ").append(str(aiNarrative)).append("\n")
+            sb.append("  },\n")
+        }
+
         sb.append("  \"facts\": [")
         data.facts.forEachIndexed { index, fact ->
             if (index > 0) sb.append(',')

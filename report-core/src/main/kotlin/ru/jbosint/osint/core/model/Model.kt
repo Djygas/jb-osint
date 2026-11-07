@@ -106,5 +106,9 @@ data class ReportMeta(
     val reportId: String,
     val createdAt: Long,
     val appVersion: String = "1.0.0",
-    val classification: String = "КОНФИДЕНЦИАЛЬНО · ДЛЯ ВНУТРЕННЕГО ИСПОЛЬЗОВАНИЯ"
+    val classification: String = "КОНФИДЕНЦИАЛЬНО · ДЛЯ ВНУТРЕННЕГО ИСПОЛЬЗОВАНИЯ",
+    /** Аналитический вывод интеллектуального ассистента (может быть пустым). */
+    val aiAnalysis: String = "",
+    /** Оформленное ИИ-резюме исследования для отчёта (может быть пустым). */
+    val aiNarrative: String = ""
 )
