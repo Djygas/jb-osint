@@ -2,6 +2,7 @@ package ru.jbosint.osint.ui
 
 import android.app.Application
 import android.net.Uri
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -12,14 +13,25 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import ru.jbosint.osint.BuildConfig
 import ru.jbosint.osint.core.model.AggregatedData
 import ru.jbosint.osint.core.model.Fact
 import ru.jbosint.osint.data.CustomAuth
 import ru.jbosint.osint.data.CustomConnectionProbe
 import ru.jbosint.osint.data.CustomModule
 import ru.jbosint.osint.data.CustomModuleChecker
+import ru.jbosint.osint.data.Connectors
 import ru.jbosint.osint.data.CustomModuleSpec
 import ru.jbosint.osint.data.CustomModuleStore
+import ru.jbosint.osint.data.CustomResponseParser
+import ru.jbosint.osint.data.DiagBlock
+import ru.jbosint.osint.data.DiagMask
+import ru.jbosint.osint.data.DiagReport
+import ru.jbosint.osint.data.JsonShape
+import ru.jbosint.osint.data.Net
+import ru.jbosint.osint.core.model.RawFact
 import ru.jbosint.osint.data.FieldRule
 import ru.jbosint.osint.data.KeyCheck
 import ru.jbosint.osint.data.HistoryEntry
@@ -81,6 +93,8 @@ data class UiState(
     val secureScreen: Boolean = true,
     val autoWipeDays: Int = 30,
     val exporting: Boolean = false,
+    val diagRunning: Boolean = false,
+    val diagReport: String? = null,
     val toast: String? = null
 ) {
     val activeModules: Int
@@ -339,6 +353,148 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 checkKey(provider.spec.id)
             }
         }
+    }
+
+    // ------------------------------------------------------------- диагностика
+
+    /**
+     * Собирает отчёт по всем включённым модулям: что запрошено, что вернулось,
+     * как разобрано. Отчёт копируется в буфер и передаётся разработчику.
+     */
+    fun runDiagnostics(queryOverride: String? = null) {
+        if (_state.value.diagRunning) return
+        _state.update { it.copy(diagRunning = true, diagReport = null) }
+        viewModelScope.launch {
+            val query = queryOverride?.trim()?.takeIf { it.isNotBlank() }
+                ?: _state.value.query.trim().takeIf { it.isNotBlank() }
+                ?: "osint"
+            val blocks = ArrayList<DiagBlock>()
+            val startedAt = System.currentTimeMillis()
+            var index = 0
+
+            _state.value.providers.filter { it.enabled }.forEach { p ->
+                index++
+                val spec = p.spec
+                val hasKey = spec.keyless || keys.key(spec.id).isNotBlank()
+                val check = if (!hasKey) {
+                    KeyCheck(KeyState.EMPTY, "ключ не задан — модуль не сможет обратиться к сервису")
+                } else {
+                    runCatching { validator.check(spec.id) }
+                        .getOrElse { KeyCheck(KeyState.INVALID, "ошибка проверки: ${it.message ?: it.javaClass.simpleName}") }
+                }
+                val t0 = System.currentTimeMillis()
+                val facts = if (check.state == KeyState.VALID) {
+                    runCatching { Connectors.byId(spec.id)?.collect(query, keys) ?: emptyList() }
+                        .getOrElse { emptyList() }
+                } else emptyList()
+                val elapsed = System.currentTimeMillis() - t0
+                val first = facts.firstOrNull()
+                val sample = first?.let { f ->
+                    buildString {
+                        append("${f.kind}: ${f.value.take(120)}")
+                        if (f.attributes.isNotEmpty()) {
+                            append(" · ")
+                            append(f.attributes.entries.take(3).joinToString("; ") { "${it.key}: ${it.value.take(60)}" })
+                        }
+                    }
+                }.orEmpty()
+                val advice = when {
+                    check.state == KeyState.VALID && facts.isNotEmpty() -> "работает"
+                    check.state == KeyState.VALID -> "ключ принят, но фактов 0: по запросу «$query» сервис ничего не вернул"
+                    check.state == KeyState.OFFLINE -> "нет связи с сервисом (сеть или блокировка)"
+                    check.state == KeyState.EMPTY -> "ключ не задан"
+                    else -> "не работает: ${check.detail}"
+                }
+                blocks += DiagBlock(
+                    index = index,
+                    title = spec.title,
+                    kind = "встроенный модуль",
+                    enabled = p.enabled,
+                    endpoint = "адрес задан в коде модуля",
+                    method = "GET",
+                    code = if (check.state == KeyState.VALID) 200 else 0,
+                    elapsedMs = elapsed,
+                    bytes = 0,
+                    checkDetail = "${check.state.title}: ${check.detail} · документация: ${spec.docsUrl}",
+                    structure = "",
+                    facts = facts.size,
+                    fields = first?.attributes?.keys?.joinToString(", ").orEmpty(),
+                    sample = sample,
+                    error = if (check.state == KeyState.VALID) null else check.detail,
+                    advice = advice
+                )
+            }
+
+            _state.value.customModules.filter { it.enabled }.forEach { module ->
+                index++
+                val key = customStore.key(module.id)
+                val url = CustomModuleSpec.buildUrl(module, key, query)
+                val t0 = System.currentTimeMillis()
+                val response = runCatching {
+                    Net.fetch(url, CustomModuleSpec.headers(module, key), attempts = 1, method = module.method)
+                }.getOrNull()
+                val elapsed = System.currentTimeMillis() - t0
+                val body = response?.body.orEmpty()
+                val parsed = if (response != null && response.ok) parseCustom(body, module, query) else null
+                val maskedSample = if (body.isBlank()) "" else DiagMask.json(body).let {
+                    if (it.length > 1400) it.take(1400) + "\n… обрезано (${body.length} байт)" else it
+                }
+                val advice = when {
+                    response == null -> "нет ответа: сеть, таймаут или неверный адрес"
+                    response.code !in 200..299 -> "эндпоинт ответил ${response.code}: проверьте адрес, ключ и способ передачи «${module.auth.title}»"
+                    parsed == null -> "ответ не JSON — модуль разбирает только JSON API"
+                    parsed.isEmpty() -> "ответ получен, но поля не распознаны: задайте правила «JSON-путь → поле» (структура выше подскажет путь)"
+                    else -> "работает"
+                }
+                blocks += DiagBlock(
+                    index = index,
+                    title = module.title,
+                    kind = "пользовательский модуль",
+                    enabled = module.enabled,
+                    endpoint = DiagMask.url(url),
+                    method = module.method,
+                    code = response?.code ?: 0,
+                    elapsedMs = elapsed,
+                    bytes = body.length,
+                    checkDetail = "авторизация: ${module.auth.title}",
+                    structure = if (body.isBlank()) "" else JsonShape.describe(body),
+                    facts = parsed?.size ?: 0,
+                    fields = module.fields.joinToString(", ") { if (it.path.isBlank()) it.field.kind else "${it.path} → ${it.field.kind}" },
+                    sample = maskedSample,
+                    error = when {
+                        response == null -> "запрос не выполнен"
+                        response.code !in 200..299 -> "HTTP ${response.code}"
+                        parsed == null -> "тело ответа не является JSON"
+                        else -> null
+                    },
+                    advice = advice
+                )
+            }
+
+            val report = if (blocks.isEmpty()) {
+                "JB OSINT · диагностика\nВключённых модулей нет: включите хотя бы один модуль и повторите."
+            } else {
+                DiagReport.render(
+                    appVersion = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                    android = "${Build.VERSION.RELEASE} · ${Build.MANUFACTURER} ${Build.MODEL}",
+                    query = query,
+                    blocks = blocks,
+                    startedAt = startedAt
+                )
+            }
+            _state.update { it.copy(diagRunning = false, diagReport = report) }
+        }
+    }
+
+    fun clearDiagnostics() = _state.update { it.copy(diagReport = null) }
+
+    private fun parseCustom(body: String, module: CustomModule, query: String): List<RawFact>? {
+        val obj = runCatching { JSONObject(body) }.getOrNull()
+            ?: runCatching { JSONObject().put("items", JSONArray(body)) }.getOrNull()
+            ?: return null
+        return runCatching {
+            CustomResponseParser.parse(obj, query, CustomModuleSpec.SOURCE_ID, module.fields)
+        }.getOrNull()
     }
 
     // --------------------------------------------------- пользовательские модули

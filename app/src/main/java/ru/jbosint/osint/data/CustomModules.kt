@@ -288,7 +288,7 @@ object CustomResponseParser {
                         kind = rule.field.kind,
                         value = value.take(200),
                         subject = query,
-                        attributes = emptyMap(),
+                        attributes = ruleContext(json, rule.path),
                         sourceId = sourceKey
                     )
                 }
@@ -345,7 +345,7 @@ object CustomResponseParser {
                 else -> {
                     val field = heuristic[rawKey.lowercase()]
                         ?: if (rawKey.contains("url", true) || rawKey.contains("link", true)) FactField.DOMAIN else FactField.OTHER
-                    addFact(facts, field, value.toString(), query, sourceKey)
+                    addFact(facts, field, value.toString(), query, sourceKey, contextOf(node, rawKey))
                     fields++
                 }
             }
@@ -366,7 +366,8 @@ object CustomResponseParser {
         field: FactField,
         raw: String,
         query: String,
-        sourceKey: String
+        sourceKey: String,
+        context: Map<String, String> = emptyMap()
     ) {
         val value = Normalizer.canonical(field, raw)
         if (value.isBlank()) return
@@ -375,9 +376,44 @@ object CustomResponseParser {
             kind = field.kind,
             value = value.take(200),
             subject = query,
-            attributes = emptyMap(),
+            attributes = context,
             sourceId = sourceKey
         )
+    }
+
+    /**
+     * Соседние поля того же объекта — чтобы факт не терял смысл ответа сервиса
+     * (например, «страна», «провайдер», «источник утечки» рядом с адресом почты).
+     */
+    private fun contextOf(node: JSONObject, excludeKey: String? = null, limit: Int = 4): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        node.keys().forEach { rawKey ->
+            if (out.size >= limit) return@forEach
+            if (rawKey.equals(excludeKey, true)) return@forEach
+            val value = node.opt(rawKey)
+            if (value == null || value == JSONObject.NULL) return@forEach
+            if (value is JSONObject || value is JSONArray) return@forEach
+            val text = value.toString().trim()
+            if (text.isBlank() || text.length > 160) return@forEach
+            out[rawKey.take(40)] = text
+        }
+        return out
+    }
+
+    private fun ruleContext(root: JSONObject, path: String): Map<String, String> {
+        val segments = path.split('.')
+            .map { it.substringBefore('[').trim() }
+            .filter { it.isNotBlank() }
+        if (segments.isEmpty()) return emptyMap()
+        var node: JSONObject = root
+        segments.dropLast(1).forEach { segment ->
+            node = node.optJSONObject(segment)
+                ?: node.optJSONArray(segment)?.optJSONObject(0)
+                ?: return emptyMap()
+        }
+        val context = contextOf(node, segments.last(), 3).toMutableMap()
+        context["json_path"] = path.take(60)
+        return context
     }
 }
 

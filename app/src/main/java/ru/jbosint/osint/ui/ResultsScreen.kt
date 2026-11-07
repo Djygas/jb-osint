@@ -373,9 +373,16 @@ private fun FactCard(fact: Fact) {
         }
         if (fact.attributes.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
-            fact.attributes.entries.take(4).forEach { (key, value) ->
+            fact.attributes.entries.take(8).forEach { (key, value) ->
                 KeyValueRow(key, value)
                 Spacer(Modifier.height(2.dp))
+            }
+            if (fact.attributes.size > 8) {
+                Text(
+                    "и ещё ${fact.attributes.size - 8} полей — полностью в отчёте",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = JbFaint
+                )
             }
         }
         Spacer(Modifier.height(7.dp))

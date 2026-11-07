@@ -491,6 +491,7 @@ class PdfReport(
             gap(10f)
             h2("3.${index + 1}. ${category.title} · ${facts.size}")
             factTable(facts)
+            factDetails(facts)
         }
     }
 
@@ -515,6 +516,21 @@ class PdfReport(
         }
         val colors = facts.take(220).map { Palette.forConfidence(it.confidence) }
         table(columns, rows, cellColors = { row, col -> if (col == 5) colors[row] else null })
+    }
+
+    /** Детали фактов: поля исходного ответа сервиса, чтобы не терять контекст. */
+    private fun factDetails(facts: List<Fact>) {
+        val withDetails = facts.take(220).withIndex().filter { it.value.attributes.isNotEmpty() }
+        if (withDetails.isEmpty()) return
+        y += 2f
+        label("ДЕТАЛИ ИСХОДНОГО ОТВЕТА (${withDetails.size})")
+        withDetails.take(90).forEach { (index, fact) ->
+            val attrs = fact.attributes.entries
+                .filter { it.value.isNotBlank() }
+                .take(6)
+                .joinToString("; ") { "${it.key}: ${it.value}" }
+            bullet("№${index + 1} ${fact.kind} — ${fact.value.take(60)} · $attrs")
+        }
     }
 
     // ------------------------------------------------------------- достоверность

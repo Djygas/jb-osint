@@ -1,5 +1,8 @@
 package ru.jbosint.osint.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
@@ -13,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -20,6 +24,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -27,6 +32,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.OpenInNew
@@ -54,6 +60,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -111,6 +118,11 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                 )
                 TextButton(onClick = { vm.checkAll() }) {
                     Text("Проверить все", color = JbAccent2, style = MaterialTheme.typography.labelMedium)
+                }
+                TextButton(onClick = { vm.runDiagnostics() }) {
+                    Icon(Icons.Filled.BugReport, contentDescription = null, tint = JbAccent2, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Диагностика", color = JbAccent2, style = MaterialTheme.typography.labelMedium)
                 }
             }
         }
@@ -227,6 +239,59 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                     method = method
                 )
                 editorOpen = false
+            }
+        )
+    }
+
+    if (state.diagRunning) {
+        AlertDialog(
+            onDismissRequest = { vm.clearDiagnostics() },
+            title = { Text("Диагностика модулей") },
+            text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = JbAccent2)
+                    Spacer(Modifier.width(12.dp))
+                    Text("Проверяем включённые модули и читаем их ответы…", style = MaterialTheme.typography.bodySmall, color = JbMuted)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.clearDiagnostics() }) { Text("Отмена") }
+            }
+        )
+    } else state.diagReport?.let { report ->
+        AlertDialog(
+            onDismissRequest = { vm.clearDiagnostics() },
+            title = {
+                Text("Отчёт диагностики", style = MaterialTheme.typography.titleMedium)
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 430.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    SelectionContainer {
+                        Text(
+                            report,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = JbText
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("JB OSINT · диагностика", report))
+                    vm.notify("Отчёт скопирован — вставьте его в чат поддержки")
+                    vm.clearDiagnostics()
+                }) {
+                    Text("Скопировать", color = JbAccent2)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { vm.clearDiagnostics() }) { Text("Закрыть") }
             }
         )
     }
