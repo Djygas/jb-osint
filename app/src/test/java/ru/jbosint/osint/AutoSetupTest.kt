@@ -5,6 +5,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlinx.coroutines.runBlocking
 import ru.jbosint.osint.data.AutoSetup
 import ru.jbosint.osint.data.CustomAuth
 import ru.jbosint.osint.data.DocHints
@@ -32,6 +33,27 @@ class AutoSetupTest {
         assertNull(SourceLink.parse(""))
         assertNull(SourceLink.parse("localhost"))
         assertNull(SourceLink.parse("@ab"))
+    }
+
+    @Test
+    fun detectReportsExhaustedWithoutNetwork() = runBlocking {
+        val link = SourceLink.parse("api.example.com")
+        assertNotNull(link)
+        val outcome = AutoSetup.detect(link!!, "secret", DocHints(), skip = 999)
+        assertTrue(outcome.exhausted)
+        assertTrue(!outcome.fixed)
+        assertEquals(0, outcome.code)
+        assertEquals(AutoSetup.MAX_ATTEMPTS, outcome.attempts)
+    }
+
+    @Test
+    fun planTriesGetAndPostWithinLimit() {
+        val plan = AutoSetup.plan(AutoSetup.templates("api.example.com")).take(AutoSetup.MAX_ATTEMPTS)
+        assertEquals(AutoSetup.MAX_ATTEMPTS, plan.size)
+        assertTrue(plan.any { it.second.method == "GET" && it.second.auth == CustomAuth.PARAM })
+        assertTrue(plan.any { it.second.method == "POST" && it.second.auth == CustomAuth.JSON_BODY })
+        assertTrue(plan.any { it.second.method == "POST" && it.second.auth == CustomAuth.BEARER })
+        assertEquals(plan.size, plan.distinct().size)
     }
 
     @Test

@@ -304,23 +304,42 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                             color = JbMuted
                         )
                         Text(
-                            "Проверьте, что ключ действителен, а ссылка ведёт на страницу сервиса. Можно повторить подбор (продолжатся другие комбинации) или задать адрес вручную — самый вероятный вариант уже подставлен.",
+                            if (auto.exhausted) {
+                                "Перебраны все известные варианты адреса и передачи ключа. Задайте адрес вручную — самый вероятный вариант уже подставлен, останется указать путь из документации сервиса."
+                            } else {
+                                "Проверьте, что ключ действителен, а ссылка ведёт на страницу сервиса. Можно повторить подбор (продолжатся другие комбинации) или задать адрес вручную — самый вероятный вариант уже подставлен."
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = JbFaint
                         )
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = { vm.retryAutoSetup() }) {
-                        Text("Повторить автонастройку", color = JbAccent2)
+                    if (auto.exhausted) {
+                        TextButton(onClick = {
+                            vm.openManualAfterAuto()
+                            editorOpen = true
+                        }) {
+                            Text("Задать адрес вручную", color = JbAccent2)
+                        }
+                    } else {
+                        TextButton(onClick = { vm.retryAutoSetup() }) {
+                            Text("Повторить автонастройку", color = JbAccent2)
+                        }
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = {
-                        vm.openManualAfterAuto()
-                        editorOpen = true
-                    }) {
-                        Text("Ручная настройка", color = JbMuted)
+                    if (auto.exhausted) {
+                        TextButton(onClick = { vm.cancelAutoSetup() }) {
+                            Text("Закрыть", color = JbMuted)
+                        }
+                    } else {
+                        TextButton(onClick = {
+                            vm.openManualAfterAuto()
+                            editorOpen = true
+                        }) {
+                            Text("Ручная настройка", color = JbMuted)
+                        }
                     }
                 }
             )

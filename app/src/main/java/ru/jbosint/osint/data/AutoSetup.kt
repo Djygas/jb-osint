@@ -2,7 +2,6 @@ package ru.jbosint.osint.data
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import java.net.URI
 
 /**
@@ -65,7 +64,16 @@ data class DocHints(
 object AutoSetup {
 
     const val TEST_QUERY = "osint"
-    const val MAX_ATTEMPTS = 32
+    const val MAX_ATTEMPTS = 40
+
+    /** Хосты, которые почти всегда отдают картинки и виджеты, а не API: ключ туда не отправляем. */
+    private val noiseHosts = listOf(
+        "telegram.org", "telegram.me", "t.me", "tgme.org", "cdn-telegram.org",
+        "google.com", "googleapis.com", "gstatic.com", "youtube.com", "youtu.be",
+        "facebook.com", "fbcdn.net", "instagram.com", "twitter.com", "x.com",
+        "tiktok.com", "vk.com", "ok.ru", "discord.com", "discord.gg",
+        "whatsapp.com", "bit.ly", "t.co", "github.com", "githubusercontent.com"
+    )
 
     data class Variant(val method: String, val auth: CustomAuth, val headerName: String, val paramName: String)
 
@@ -76,7 +84,8 @@ object AutoSetup {
         val urlTemplate: String?,
         val attempts: Int,
         val code: Int,
-        val detail: String
+        val detail: String,
+        val exhausted: Boolean = false
     )
 
     val standardPaths = listOf(
@@ -127,8 +136,10 @@ object AutoSetup {
     /** Чтение страницы сервиса или публичной страницы Telegram-бота. Сеть может быть недоступна. */
     suspend fun fetchHints(link: SourceLink): DocHints = withContext(Dispatchers.IO) {
         if (link.kind == SourceLink.Kind.TELEGRAM) {
-            val html = runCatching { Net.fetch("https://t.me/s/${link.telegram}", attempts = 1).body }.getOrNull()
+            val page = runCatching { Net.fetch("https://t.me/s/${link.telegram}", attempts = 1) }.getOrNull()
                 ?: return@withContext DocHints()
+            val html = page.body.takeIf { page.code in 200..299 }.orEmpty()
+            if (html.isBlank()) return@withContext DocHints()
             return@withContext parseDocument(html, hintsFromTelegram(html))
         }
         val pages = buildList {
@@ -139,9 +150,10 @@ object AutoSetup {
         var best = DocHints()
         pages.forEach { page ->
             if (best.templates.size >= 2) return@forEach
-            val html = runCatching { Net.fetch(page, attempts = 1).body }.getOrNull()
-            if (html != null && !html.contains("404")) {
-                val parsed = parseDocument(html, DocHints())
+            val response = runCatching { Net.fetch(page, attempts = 1) }.getOrNull() ?: return@forEach
+            // Код ответа надёжнее поиска строки «404» в теле: цифры встречаются на живых страницах.
+            if (response.code in 200..299 && response.body.isNotBlank()) {
+                val parsed = parseDocument(response.body, DocHints())
                 if (parsed.templates.size > best.templates.size) best = parsed
             }
         }
@@ -160,10 +172,14 @@ object AutoSetup {
             .filterNot { it.contains("t.me") || it.contains("telegram.org") || it.contains("telegram.me") }
             .mapNotNull { runCatching { URI(it).host }.getOrNull() }
             .filter { it.contains('.') }
+            .map { it.lowercase().removePrefix("www.") }
+            .filterNot { host -> noiseHosts.any { host == it || host.endsWith(".$it") } }
             .distinct()
-            .take(2)
+            // Ключ уходит на найденный хост, поэтому берём только один адрес и отбрасываем
+            // CDN/соцсети: обычно это картинки и кнопки, а не API сервиса.
+            .take(1)
             .toList()
-        val hosts = links.map { it.lowercase().removePrefix("www.") }
+        val hosts = links
         val extra = hosts.flatMap { host ->
             listOf("https://$host/search?q={query}", "https://$host/api/search?query={query}")
         }
@@ -215,21 +231,41 @@ object AutoSetup {
         }
     }
 
+    /**
+     * План перебора: пять адресов × восемь комбинаций (GET и POST) = ровно [MAX_ATTEMPTS].
+     * Порядок «адрес → метод/ключ» важен: при прежнем «сначала все GET» POST-варианты
+     * не попадали в лимит и POST-API не находились вообще.
+     */
+    fun plan(templates: List<String>, prefer: List<CustomAuth> = emptyList()): List<Pair<String, Variant>> {
+        val combos = ArrayList<Pair<String, Variant>>()
+        templates.distinct().take(5).forEach { template ->
+            getVariants(prefer).forEach { combos += template to it }
+            postVariants(prefer).forEach { combos += template to it }
+        }
+        return combos
+    }
+
     suspend fun detect(
         link: SourceLink,
         key: String,
         hints: DocHints = DocHints(),
         skip: Int = 0
     ): Outcome = withContext(Dispatchers.IO) {
-        val templates = (if (link.kind == SourceLink.Kind.SITE) templates(link.host, hints) else hints.templates)
-            .distinct().take(8)
-        val combos = ArrayList<Pair<String, Variant>>()
-        templates.forEach { template -> getVariants(hints.prefer).forEach { combos += template to it } }
-        templates.forEach { template -> postVariants(hints.prefer).forEach { combos += template to it } }
+        val templates = if (link.kind == SourceLink.Kind.SITE) templates(link.host, hints) else hints.templates
+        val combos = plan(templates, hints.prefer)
         val limited = combos.take(MAX_ATTEMPTS)
+        if (limited.isEmpty() || skip >= limited.size) {
+            return@withContext Outcome(
+                fixed = false, strict = false, setup = null, urlTemplate = null,
+                attempts = minOf(skip, limited.size), code = 0,
+                detail = "Проверены все варианты подключения", exhausted = true
+            )
+        }
         var attemptNo = skip
         var rejected: Triple<String, Variant, Int>? = null
         var lastCode = 0
+        var htmlPage = false
+        var networkError = false
 
         for ((template, variant) in limited.drop(skip)) {
             attemptNo++
@@ -239,17 +275,24 @@ object AutoSetup {
                 headerName = variant.headerName, paramName = variant.paramName, enabled = false
             )
             val url = CustomModuleSpec.buildUrl(module, key, TEST_QUERY)
-            val body = if (variant.auth == CustomAuth.JSON_BODY) {
-                JSONObject().put(variant.paramName.ifBlank { "key" }, key).toString()
-            } else null
             val response = runCatching {
-                Net.fetch(url, CustomModuleSpec.headers(module, key), attempts = 1, method = variant.method, body = body)
-            }.getOrNull() ?: return@withContext Outcome(
-                fixed = false, strict = false, setup = null, urlTemplate = null,
-                attempts = attemptNo, code = 0, detail = "Нет соединения"
-            )
+                Net.fetch(
+                    url, CustomModuleSpec.headers(module, key), attempts = 1,
+                    method = variant.method, body = CustomModuleSpec.body(module, key)
+                )
+            }.getOrNull()
+            // Один мёртвый адрес (DNS, таймаут) не должен обрывать перебор остальных.
+            if (response == null) {
+                networkError = true
+                continue
+            }
             lastCode = response.code
             if (response.code in 200..299) {
+                // 200 с веб-страницей — типичный ответ SPA на любой путь, а не API поиска.
+                if (looksLikeHtml(response.body)) {
+                    htmlPage = true
+                    continue
+                }
                 return@withContext Outcome(
                     fixed = true, strict = true,
                     setup = CustomConnectionProbe.Setup(
@@ -272,11 +315,22 @@ object AutoSetup {
                 detail = "Адрес отвечает (${CustomConnectionProbe().describe(code)}), ключ отклонён"
             )
         }
+        val detail = when {
+            htmlPage && lastCode in 200..299 -> "Адрес отвечает веб-страницей, а не данными API"
+            lastCode == 0 && networkError -> "Нет соединения"
+            lastCode == 0 -> "Нет соединения"
+            else -> "Сервис не принял ни один вариант (последний код $lastCode)"
+        }
         Outcome(
             fixed = false, strict = false, setup = null, urlTemplate = null,
-            attempts = attemptNo, code = lastCode,
-            detail = if (lastCode == 0) "Нет соединения" else "Сервис не принял ни один вариант (последний код $lastCode)"
+            attempts = attemptNo, code = lastCode, detail = detail
         )
+    }
+
+    /** Признак HTML-страницы: такие ответы не считаем успешной настройкой поиска. */
+    private fun looksLikeHtml(body: String): Boolean {
+        val head = body.trimStart().take(200).lowercase()
+        return head.startsWith("<!doctype html") || head.startsWith("<html") || head.startsWith("<?xml")
     }
 
     fun authTitle(variant: Variant): String = when (variant.auth) {

@@ -64,6 +64,21 @@ class CustomModuleSpecTest {
     }
 
     @Test
+    fun jsonBodyCarriesKeyAndOtherAuthsDoNot() {
+        val json = CustomModuleSpec.body(module(CustomAuth.JSON_BODY), "secret")
+        assertNotNull(json)
+        assertEquals("secret", org.json.JSONObject(json!!).getString("api_key"))
+
+        val custom = module(CustomAuth.JSON_BODY).copy(paramName = "token")
+        assertEquals("secret", org.json.JSONObject(CustomModuleSpec.body(custom, "secret")!!).getString("token"))
+
+        assertNull(CustomModuleSpec.body(module(CustomAuth.JSON_BODY), ""))
+        assertNull(CustomModuleSpec.body(module(CustomAuth.PARAM), "secret"))
+        assertNull(CustomModuleSpec.body(module(CustomAuth.BEARER), "secret"))
+        assertNull(CustomModuleSpec.body(module(CustomAuth.NONE), ""))
+    }
+
+    @Test
     fun hostIsExtractedForModuleCard() {
         assertEquals("api.example.org", CustomModuleSpec.hostOf("https://api.example.org/v1/search?q={query}"))
     }

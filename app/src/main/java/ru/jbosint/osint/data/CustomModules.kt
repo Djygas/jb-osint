@@ -112,6 +112,16 @@ object CustomModuleSpec {
         return url
     }
 
+    /**
+     * Тело POST-запроса. Для [CustomAuth.JSON_BODY] ключ передаётся в JSON,
+     * иначе тело не нужно. Одна точка сборки на все вызовы (поиск, проверка,
+     * автоподбор, диагностика), чтобы ключ не терялся в части сценариев.
+     */
+    fun body(module: CustomModule, key: String): String? =
+        if (module.auth == CustomAuth.JSON_BODY && key.isNotBlank()) {
+            JSONObject().put(module.paramName.trim().ifBlank { "key" }, key).toString()
+        } else null
+
     fun headers(module: CustomModule, key: String): Map<String, String> = when (module.auth) {
         CustomAuth.BEARER -> if (key.isBlank()) emptyMap() else mapOf("Authorization" to "Bearer $key")
         CustomAuth.HEADER ->
@@ -431,10 +441,10 @@ class CustomConnector(
         if (CustomModuleSpec.validate(module.title, module.urlTemplate) != null) return emptyList()
         if (module.auth != CustomAuth.NONE && key.isBlank()) return emptyList()
         val url = CustomModuleSpec.buildUrl(module, key, query)
-        val body = if (module.auth == CustomAuth.JSON_BODY && key.isNotBlank()) {
-            JSONObject().put(module.paramName.trim().ifBlank { "key" }, key).toString()
-        } else null
-        val response = Net.fetch(url, CustomModuleSpec.headers(module, key), method = module.method, body = body)
+        val response = Net.fetch(
+            url, CustomModuleSpec.headers(module, key),
+            method = module.method, body = CustomModuleSpec.body(module, key)
+        )
         if (!response.ok) return emptyList()
         val json = runCatching { JSONObject(response.body) }.getOrNull() ?: return emptyList()
         return CustomResponseParser.parse(json, query, sourceKey, module.fields)
@@ -483,20 +493,23 @@ class CustomConnectionProbe {
         val candidates = if (key.isBlank()) listOf(CustomAuth.NONE) else transports
         val attempts = ArrayList<Attempt>()
         var networkError = false
+        var rejected: Attempt? = null
 
         for (method in listOf("GET", "POST")) {
-            var rejected: Attempt? = null
-            for (auth in if (method == "POST" && key.isNotBlank()) postTransports else candidates) {
-                if (networkError) break
+            val variants = if (method == "POST" && key.isNotBlank()) postTransports else candidates
+            for (auth in variants) {
                 val variant = module.copy(auth = auth, method = method)
                 val url = CustomModuleSpec.buildUrl(variant, key, "osint")
-                val outcome = runCatching {
-                    Net.fetch(url, CustomModuleSpec.headers(variant, key), attempts = 1, method = method)
-                }
-                val response = outcome.getOrNull()
+                val response = runCatching {
+                    // Ключ в JSON-теле обязателен: без него POST-проверка всегда даёт 401/400.
+                    Net.fetch(
+                        url, CustomModuleSpec.headers(variant, key),
+                        attempts = 1, method = method, body = CustomModuleSpec.body(variant, key)
+                    )
+                }.getOrNull()
                 if (response == null) {
                     networkError = true
-                    break
+                    continue
                 }
                 val reachable = response.code in 200..299 || response.code == 401 || response.code == 403
                 val attempt = Attempt(method, auth, response.code, reachable)
@@ -508,22 +521,20 @@ class CustomConnectionProbe {
                         detail = "Модуль настроен успешно"
                     )
                 }
+                // 401/403 на GET не доказывает, что нужен GET: POST может принимать ключ иначе.
+                // Запоминаем отказ и продолжаем перебор, чтобы не выбрать заведомо неверный способ.
                 if (reachable && rejected == null) rejected = attempt
-            }
-            // Адрес ответил отказом авторизации — метод рабочий, второй не проверяем.
-            if (rejected != null) {
-                return@withContext Result(
-                    ok = false,
-                    setup = Setup(
-                        rejected.method, rejected.auth,
-                        module.headerName, module.paramName, rejected.code
-                    ),
-                    detail = describe(rejected.code)
-                )
             }
         }
 
-        if (networkError) return@withContext Result(false, null, "Нет соединения")
+        rejected?.let {
+            return@withContext Result(
+                ok = false,
+                setup = Setup(it.method, it.auth, module.headerName, module.paramName, it.code),
+                detail = describe(it.code)
+            )
+        }
+        if (networkError && attempts.isEmpty()) return@withContext Result(false, null, "Нет соединения")
         val last = attempts.lastOrNull()
         Result(false, last?.let {
             Setup(it.method, it.auth, module.headerName, module.paramName, it.code)
@@ -554,7 +565,10 @@ class CustomModuleChecker(private val store: CustomModuleStore) {
         }
         runCatching {
             val url = CustomModuleSpec.buildUrl(module, key, "osint")
-            val response = Net.fetch(url, CustomModuleSpec.headers(module, key), attempts = 1, method = module.method)
+            val response = Net.fetch(
+                url, CustomModuleSpec.headers(module, key),
+                attempts = 1, method = module.method, body = CustomModuleSpec.body(module, key)
+            )
             val code = response.code
             when {
                 code in 200..299 -> KeyCheck(KeyState.VALID, "Модуль отвечает")

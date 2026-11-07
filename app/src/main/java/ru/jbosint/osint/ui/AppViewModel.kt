@@ -6,6 +6,7 @@ import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -60,7 +61,8 @@ data class AutoSetupUi(
     val link: String,
     val skip: Int = 0,
     val suggested: CustomModule? = null,
-    val hints: DocHints = DocHints()
+    val hints: DocHints = DocHints(),
+    val exhausted: Boolean = false
 )
 
 data class ProviderUi(
@@ -376,6 +378,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------- быстрая настройка
 
+    /** Фоновая задача автоподбора: отмена в диалоге должна действительно её останавливать. */
+    private var autoSetupJob: Job? = null
+
     /** Быстрый режим: только название, ключ и ссылка на сервис — остальное подбирает приложение. */
     fun createModuleQuick(title: String, key: String, link: String) {
         if (_state.value.autoSetup?.running == true) return
@@ -393,18 +398,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 )
             )
         }
-        viewModelScope.launch {
+        autoSetupJob = viewModelScope.launch {
             val hints = runCatching { AutoSetup.fetchHints(source) }.getOrDefault(DocHints())
             _state.update { it.copy(autoSetup = it.autoSetup?.copy(stage = "Подбираем способ подключения…", hints = hints)) }
-            val outcome = AutoSetup.detect(source, key, hints, skip = _state.value.autoSetup?.skip ?: 0)
+            val outcome = AutoSetup.detect(source, key, hints, skip = 0)
             applyAutoOutcome(cleanTitle, key, outcome)
         }
     }
 
     fun retryAutoSetup() {
         val ui = _state.value.autoSetup ?: return
+        if (ui.exhausted) return
         _state.update { it.copy(autoSetup = ui.copy(running = true, stage = "Пробуем оставшиеся варианты…", failed = false)) }
-        viewModelScope.launch {
+        autoSetupJob = viewModelScope.launch {
             val source = SourceLink.parse(ui.link) ?: return@launch
             val outcome = AutoSetup.detect(source, ui.key, ui.hints, skip = ui.skip)
             applyAutoOutcome(ui.title, ui.key, outcome)
@@ -427,11 +433,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearManualDraft() = _state.update { it.copy(manualDraft = null, manualKey = "") }
 
-    fun cancelAutoSetup() = _state.update { it.copy(autoSetup = null) }
+    fun cancelAutoSetup() {
+        autoSetupJob?.cancel()
+        autoSetupJob = null
+        _state.update { it.copy(autoSetup = null) }
+    }
 
     private fun applyAutoOutcome(title: String, key: String, outcome: AutoSetup.Outcome) {
         if (_state.value.autoSetup == null) return
         val setup = outcome.setup
+        autoSetupJob = null
         if (outcome.fixed && setup != null && !outcome.urlTemplate.isNullOrBlank()) {
             val module = CustomModule(
                 id = java.util.UUID.randomUUID().toString(),
@@ -468,7 +479,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 enabled = true,
                 hasKey = false
             )
-            _state.update { it.copy(autoSetup = it.autoSetup?.copy(running = false, failed = true, skip = outcome.attempts, suggested = suggested)) }
+            _state.update {
+                it.copy(
+                    autoSetup = it.autoSetup?.copy(
+                        running = false, failed = true, skip = outcome.attempts,
+                        suggested = suggested, exhausted = outcome.exhausted
+                    )
+                )
+            }
         }
     }
 
@@ -548,7 +566,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val url = CustomModuleSpec.buildUrl(module, key, query)
                 val t0 = System.currentTimeMillis()
                 val response = runCatching {
-                    Net.fetch(url, CustomModuleSpec.headers(module, key), attempts = 1, method = module.method)
+                    Net.fetch(
+                        url, CustomModuleSpec.headers(module, key), attempts = 1,
+                        method = module.method, body = CustomModuleSpec.body(module, key)
+                    )
                 }.getOrNull()
                 val elapsed = System.currentTimeMillis() - t0
                 val body = response?.body.orEmpty()
