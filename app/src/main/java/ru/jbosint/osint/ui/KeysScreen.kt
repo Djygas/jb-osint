@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
@@ -59,6 +60,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -73,6 +75,7 @@ import ru.jbosint.osint.data.CustomModuleSpec
 import ru.jbosint.osint.data.FactField
 import ru.jbosint.osint.data.FieldRule
 import ru.jbosint.osint.data.KeyCheck
+import ru.jbosint.osint.data.ConnectionUi
 import ru.jbosint.osint.data.KeyState
 import ru.jbosint.osint.data.ProviderGroup
 
@@ -125,6 +128,10 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                     Text("Диагностика", color = JbAccent2, style = MaterialTheme.typography.labelMedium)
                 }
             }
+        }
+
+        item(key = "connect_by_key") {
+            ConnectKeyCard(state = state, vm = vm)
         }
 
         ProviderGroup.entries.forEach { group ->
@@ -373,6 +380,25 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                         .heightIn(max = 430.dp)
                         .verticalScroll(rememberScrollState())
                 ) {
+                    if (state.repairLog.isNotEmpty()) {
+                        Text(
+                            "ПОЧИНКА",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = JbFaint
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        state.repairLog.forEach { line ->
+                            Text(
+                                "• $line",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = JbMuted
+                            )
+                            Spacer(Modifier.height(3.dp))
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text("ОТЧЁТ ПОСЛЕ ПОЧИНКИ", style = MaterialTheme.typography.labelSmall, color = JbFaint)
+                        Spacer(Modifier.height(4.dp))
+                    }
                     SelectionContainer {
                         Text(
                             report,
@@ -384,13 +410,24 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("JB OSINT · диагностика", report))
-                    vm.notify("Отчёт скопирован — вставьте его в чат поддержки")
-                    vm.clearDiagnostics()
-                }) {
-                    Text("Скопировать", color = JbAccent2)
+                Row {
+                    if (state.repairLog.isNotEmpty()) {
+                        TextButton(onClick = { vm.clearDiagnostics() }) { Text("Закрыть", color = JbMuted) }
+                    }
+                    TextButton(
+                        onClick = { vm.repairModules() },
+                        enabled = !state.repairing
+                    ) {
+                        Text(if (state.repairing) "Починка…" else "Починить", color = JbAccent2)
+                    }
+                    TextButton(onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("JB OSINT · диагностика", report))
+                        vm.notify("Отчёт скопирован — вставьте его в чат поддержки")
+                        vm.clearDiagnostics()
+                    }) {
+                        Text("Скопировать", color = JbAccent2)
+                    }
                 }
             },
             dismissButton = {
@@ -1040,6 +1077,123 @@ private fun CustomModuleDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("Отмена", color = JbMuted)
+            }
+        }
+    )
+}
+
+/**
+ * Подключение «одним ключом»: пользователь вставляет строку из кабинета
+ * сервиса, приложение само определяет модуль, сохраняет ключ и проверяет его.
+ */
+@Composable
+private fun ConnectKeyCard(state: UiState, vm: AppViewModel) {
+    var draft by rememberSaveable { mutableStateOf("") }
+    val clipboard = LocalClipboardManager.current
+    val busy = state.connection?.running == true
+
+    GlowCard(modifier = Modifier.fillMaxWidth(), padding = 16) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.Key, contentDescription = null, tint = JbAccent2, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Подключение по ключу", style = MaterialTheme.typography.titleMedium, color = JbText)
+                Text(
+                    "Вставьте ключ — можно вместе с адресом или названием сервиса. Приложение само " +
+                        "определит модуль, сохранит ключ и проверит его; для незнакомого сервиса соберёт свой модуль.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = JbMuted
+                )
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        OutlinedTextField(
+            value = draft,
+            onValueChange = { draft = it.take(600) },
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 2,
+            maxLines = 3,
+            placeholder = {
+                Text("ghp_… / vk1.a.… / ключ + https://api.example.com", color = JbFaint)
+            },
+            shape = RoundedCornerShape(12.dp),
+            colors = fieldColors()
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = {
+                clipboard.getText()?.text?.let { draft = it.take(600) }
+            }) { Text("Вставить из буфера", color = JbAccent2, style = MaterialTheme.typography.labelMedium) }
+            Spacer(Modifier.weight(1f))
+            TextButton(
+                onClick = {
+                    vm.connectByKey(draft)
+                    draft = ""
+                },
+                enabled = draft.isNotBlank() && !busy
+            ) {
+                if (busy) {
+                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = JbAccent2)
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text("Подобрать и подключить", color = if (draft.isNotBlank() && !busy) JbAccent2 else JbFaint)
+            }
+        }
+    }
+
+    state.connection?.let { connection -> ConnectionDialog(connection, vm) }
+}
+
+/** Итог подключения: шаги, результат и что делать дальше. */
+@Composable
+private fun ConnectionDialog(connection: ConnectionUi, vm: AppViewModel) {
+    AlertDialog(
+        onDismissRequest = { if (!connection.running) vm.closeConnection() },
+        containerColor = JbSurfaceHigh,
+        titleContentColor = JbText,
+        textContentColor = JbMuted,
+        title = {
+            Text(
+                when {
+                    connection.running -> "Подключаем…"
+                    connection.ok -> "Готово"
+                    else -> "Не получилось автоматически"
+                }
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())
+            ) {
+                if (connection.running) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = JbAccent2)
+                        Spacer(Modifier.width(10.dp))
+                        Text("Проверяем ключ…", style = MaterialTheme.typography.bodySmall)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+                connection.lines.forEach { line ->
+                    Text("• $line", style = MaterialTheme.typography.bodySmall, color = JbMuted)
+                    Spacer(Modifier.height(3.dp))
+                }
+                if (connection.done) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        connection.title,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = if (connection.ok) JbGreen else JbAmber
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(connection.detail, style = MaterialTheme.typography.bodySmall, color = JbMuted)
+                }
+            }
+        },
+        confirmButton = {
+            if (!connection.running) {
+                TextButton(onClick = { vm.closeConnection() }) {
+                    Text(if (connection.ok) "Готово" else "Закрыть", color = JbAccent2)
+                }
             }
         }
     )

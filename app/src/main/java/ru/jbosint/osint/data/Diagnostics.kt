@@ -108,6 +108,26 @@ object DiagMask {
         return parts[0] + "?" + query
     }
 
+    /** Bearer-заголовок или JWT, попавшие в текст ответа или в сообщение об ошибке. */
+    private val bearer = Regex("""(?i)(bearer\s+)([A-Za-z0-9_\-\.=:]{8,})""")
+    private val jwt = Regex("""\beyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{5,}\b""")
+    private val inText = Regex(
+        """(?i)(\b(?:api[_-]?key|apikey|access[_-]?token|token|secret|password|passwd|session)\b\s*[=:]\s*)([^\s&"',;)\]]+)"""
+    )
+
+    /**
+     * Маскирует секреты в произвольном тексте: сервисы нередко возвращают
+     * ошибку с полным адресом запроса или эхом ключа — такой ответ нельзя
+     * показывать в отчёте. Работает и для JSON, и для HTML/plain.
+     */
+    fun text(raw: String): String {
+        if (raw.isBlank()) return raw
+        return raw
+            .replace(jwt, "***")
+            .replace(bearer) { m -> m.groupValues[1] + "***" }
+            .replace(inText) { m -> m.groupValues[1] + "***" }
+    }
+
     /** Маскирует значения секретных полей в JSON, оставляя структуру читаемой. */
     fun json(text: String): String {
         val root = runCatching { JSONObject(text) }.getOrNull()
@@ -125,6 +145,7 @@ object DiagMask {
                 isSecret(name) -> out.put(name, "***")
                 value is JSONObject -> out.put(name, maskObject(value))
                 value is JSONArray -> out.put(name, maskArray(value))
+                value is String -> out.put(name, text(value))
                 else -> out.put(name, value)
             }
         }
@@ -137,6 +158,7 @@ object DiagMask {
             when (val value = array.opt(i)) {
                 is JSONObject -> out.put(maskObject(value))
                 is JSONArray -> out.put(maskArray(value))
+                is String -> out.put(text(value))
                 else -> out.put(value)
             }
         }
@@ -208,13 +230,27 @@ object DiagReport {
         val time = java.text.SimpleDateFormat("dd.MM.yyyy HH:mm:ss", java.util.Locale("ru"))
             .format(java.util.Date(startedAt))
         val sb = StringBuilder()
+        // Двойная защита: даже если какой-то блок собран в обход DiagMask,
+        // на выходе не должно остаться ни ключа в адресе, ни JWT в тексте ответа.
+        val safe = blocks.map { b ->
+            b.copy(
+                endpoint = DiagMask.text(b.endpoint),
+                checkDetail = DiagMask.text(b.checkDetail),
+                structure = DiagMask.text(b.structure),
+                fields = DiagMask.text(b.fields),
+                sample = DiagMask.text(b.sample),
+                error = b.error?.let { DiagMask.text(it) },
+                advice = DiagMask.text(b.advice),
+                testQuery = b.testQuery?.let { DiagMask.text(it) }
+            )
+        }
         sb.appendLine("JB OSINT · диагностика модулей")
         sb.appendLine("Версия: $appVersion · Android $android · $time")
         sb.appendLine("Тестовый запрос: $query")
         sb.appendLine("Секреты скрыты: значения ключей и токенов заменены на ***")
         sb.appendLine()
 
-        blocks.forEach { b ->
+        safe.forEach { b ->
             sb.appendLine("[${b.index}] ${b.title} · ${b.kind} · ${if (b.enabled) "ВКЛ" else "ВЫКЛ"}")
             sb.appendLine("Запрос: ${b.method} ${b.endpoint}")
             val size = if (b.bytes > 0) " · ${b.bytes} байт" else ""
@@ -237,9 +273,9 @@ object DiagReport {
             sb.appendLine()
         }
 
-        val working = blocks.count { it.advice.startsWith("работает") }
-        val empty = blocks.count { it.facts == 0 }
-        sb.appendLine("Итого: модулей ${blocks.size}, рабочих $working, без фактов $empty")
+        val working = safe.count { it.advice.startsWith("работает") }
+        val empty = safe.count { it.facts == 0 }
+        sb.appendLine("Итого: модулей ${safe.size}, рабочих $working, без фактов $empty")
         sb.appendLine("Подсказка: «0 фактов» чаще всего значит, что запрос не того типа — многие API принимают только email, IP или домен (см. «Оценка»).")
         sb.appendLine("Для пользовательских модулей добавьте правила разбора «JSON-путь → поле» в карточке модуля.")
         return sb.toString().trimEnd()

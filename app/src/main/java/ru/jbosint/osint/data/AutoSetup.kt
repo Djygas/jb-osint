@@ -376,11 +376,17 @@ object AutoSetup {
         return head.startsWith("<!doctype html") || head.startsWith("<html") || head.startsWith("<?xml")
     }
 
-    fun authTitle(variant: Variant): String = when (variant.auth) {
+    fun authTitle(variant: Variant): String =
+        authTitle(variant.auth, variant.headerName, variant.paramName)
+
+    fun authTitle(setup: CustomConnectionProbe.Setup): String =
+        authTitle(setup.auth, setup.headerName, setup.paramName)
+
+    private fun authTitle(auth: CustomAuth, headerName: String, paramName: String): String = when (auth) {
         CustomAuth.BEARER -> "Bearer-заголовок"
-        CustomAuth.HEADER -> "заголовок ${variant.headerName}"
-        CustomAuth.PARAM -> "параметр ?${variant.paramName}="
-        CustomAuth.JSON_BODY -> "JSON-тело {\"${variant.paramName}\": …}"
-        else -> variant.auth.title
+        CustomAuth.HEADER -> "заголовок $headerName"
+        CustomAuth.PARAM -> "параметр ?$paramName="
+        CustomAuth.JSON_BODY -> "JSON-тело {\"$paramName\": …}"
+        else -> auth.title
     }
 }

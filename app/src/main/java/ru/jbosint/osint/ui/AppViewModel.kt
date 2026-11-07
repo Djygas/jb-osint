@@ -57,7 +57,13 @@ import ru.jbosint.osint.data.KeyCheck
 import ru.jbosint.osint.data.HistoryEntry
 import ru.jbosint.osint.data.HistoryStore
 import ru.jbosint.osint.data.KeyRepository
+import ru.jbosint.osint.data.ConnectionUi
+import ru.jbosint.osint.data.KeyIntake
 import ru.jbosint.osint.data.KeyState
+import ru.jbosint.osint.data.ProviderGuess
+import ru.jbosint.osint.data.RepairPlan
+import ru.jbosint.osint.data.RepairStep
+import ru.jbosint.osint.data.SetupRoute
 import ru.jbosint.osint.data.KeyValidator
 import ru.jbosint.osint.data.ProviderCatalog
 import ru.jbosint.osint.data.ProviderSpec
@@ -139,12 +145,18 @@ data class UiState(
     val exporting: Boolean = false,
     val diagRunning: Boolean = false,
     val diagReport: String? = null,
+    val diagBlocks: List<DiagBlock> = emptyList(),
+    val repairing: Boolean = false,
+    val repairLog: List<String> = emptyList(),
+    val connection: ConnectionUi? = null,
     val autoSetup: AutoSetupUi? = null,
     val manualDraft: CustomModule? = null,
     val manualKey: String = "",
     val toast: String? = null,
     // ---------------------------------------------- интеллектуальный ассистент
     val assistantConfigured: Boolean = false,
+    val assistantProvider: String = AssistantCatalog.DEFAULT_PROVIDER,
+    val assistantBaseUrl: String = "",
     val assistantModel: String = AssistantCatalog.DEFAULT_MODEL,
     val assistantState: KeyState = KeyState.UNCHECKED,
     val assistantCheckedAt: Long = 0L,
@@ -208,6 +220,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             providers = buildProviders(),
             customModules = customStore.list(),
             assistantConfigured = assistantStore.configured(),
+            assistantProvider = assistantStore.provider,
+            assistantBaseUrl = assistantStore.customBaseUrl,
             assistantModel = assistantStore.model,
             assistantState = assistantStore.state(),
             assistantCheckedAt = assistantStore.checkedAt(),
@@ -689,6 +703,293 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ------------------------------------------------- подключение по ключу
+
+    /**
+     * Один ключ — один шаг: разбираем строку, определяем сервис, сохраняем
+     * ключ и проверяем его. Для незнакомого сервиса автоматически собирается
+     * свой модуль (адрес, метод и способ передачи ключа подбираются перебором).
+     */
+    fun connectByKey(raw: String) {
+        if (_state.value.connection?.running == true) return
+        val intake = KeyIntake.parse(raw)
+        if (intake == null || !intake.hasKey) {
+            _state.update {
+                it.copy(connection = ConnectionUi(
+                    done = true, ok = false, title = "Ключ не распознан",
+                    detail = "Вставьте ключ из кабинета сервиса — строку длиной от 8 символов. Можно вместе с адресом или названием сервиса."
+                ))
+            }
+            return
+        }
+        val route = ProviderGuess.route(intake)
+        _state.update {
+            it.copy(connection = ConnectionUi(running = true).step("Ключ найден: ${maskKey(intake.key)}"))
+        }
+        viewModelScope.launch {
+            val result = when (route) {
+                is SetupRoute.BuiltIn -> connectBuiltIn(route.id, intake.key, route.how)
+                is SetupRoute.Assistant -> connectAssistant(route.providerId, intake.key, route.how)
+                is SetupRoute.Custom -> connectCustom(route.url, route.title, intake.key, route.how)
+                is SetupRoute.Unknown -> ConnectionUi(
+                    done = true, ok = false, title = "Сервис не определён",
+                    detail = "Добавьте адрес API (например, https://api.example.com) рядом с ключом — тогда приложение подберёт запрос само.",
+                    lines = _state.value.connection?.lines.orEmpty()
+                )
+            }
+            _state.update { it.copy(connection = result) }
+        }
+    }
+
+    fun closeConnection() = _state.update { it.copy(connection = null) }
+
+    private fun appendStep(text: String) {
+        _state.update { s -> s.copy(connection = s.connection?.step(text)) }
+    }
+
+    /** Маска ключа для журнала: видно только начало и конец. */
+    private fun maskKey(key: String): String =
+        if (key.length <= 10) "***"
+        else key.take(4) + "…" + key.takeLast(4)
+
+    private suspend fun connectBuiltIn(id: String, key: String, why: String): ConnectionUi {
+        val spec = ProviderCatalog.byId(id)
+            ?: return ConnectionUi(done = true, ok = false, title = "Нет такого модуля", detail = why)
+        appendStep("Сервис: ${spec.title} — $why")
+        keys.saveKey(id, key)
+        keys.setEnabled(id, true)
+        refreshProviders()
+        appendStep("Ключ сохранён, модуль включён. Проверяем…")
+        val check = runCatching { validator.check(id) }
+            .getOrElse { KeyCheck(KeyState.INVALID, it.message ?: "ошибка проверки") }
+        refreshProviders()
+        return if (check.state == KeyState.VALID) {
+            ConnectionUi(
+                done = true, ok = true, title = "${spec.title} подключён",
+                detail = "${check.detail}. Модуль включён и участвует в поиске.",
+                lines = _state.value.connection?.lines.orEmpty() + "Проверка: ${check.detail}"
+            )
+        } else {
+            ConnectionUi(
+                done = true, ok = false, title = "${spec.title}: ключ не принят",
+                detail = "${check.detail}. Проверьте тип ключа в кабинете сервиса: ${spec.docsUrl}",
+                lines = _state.value.connection?.lines.orEmpty() + "Проверка: ${check.detail}"
+            )
+        }
+    }
+
+    private suspend fun connectAssistant(providerId: String, key: String, why: String): ConnectionUi {
+        val spec = AssistantCatalog.provider(providerId)
+        appendStep("Это ключ ИИ-ассистента (${spec.title}) — подключаю его в настройках ассистента")
+        assistantStore.provider = spec.id
+        assistantStore.saveKey(key, spec.id)
+        if (spec.defaultModel.isNotBlank() && !AssistantCatalog.isKnown(assistantStore.model)) {
+            assistantStore.model = spec.defaultModel
+        }
+        val check = runCatching { assistantService.probe() }
+            .getOrElse { KeyCheck(KeyState.INVALID, it.message ?: "ошибка проверки") }
+        _state.update {
+            it.copy(
+                assistantProvider = assistantStore.provider,
+                assistantBaseUrl = assistantStore.customBaseUrl,
+                assistantModel = assistantStore.model,
+                assistantConfigured = assistantStore.configured(),
+                assistantState = assistantStore.state(),
+                assistantCheckedAt = assistantStore.checkedAt()
+            )
+        }
+        return if (check.state == KeyState.VALID) {
+            ConnectionUi(
+                done = true, ok = true, title = "Ассистент на ${spec.title} подключён",
+                detail = "${check.detail}. Модель: ${assistantStore.model}.",
+                lines = _state.value.connection?.lines.orEmpty()
+            )
+        } else {
+            ConnectionUi(
+                done = true, ok = false, title = "${spec.title}: ключ не принят",
+                detail = "${check.detail}. Ключ получить: ${spec.docsUrl}",
+                lines = _state.value.connection?.lines.orEmpty()
+            )
+        }
+    }
+
+    private suspend fun connectCustom(
+        url: String,
+        title: String,
+        key: String,
+        why: String
+    ): ConnectionUi {
+        appendStep("$why. Изучаю документацию и подбираю запрос…")
+        val link = SourceLink.parse(url)
+            ?: return ConnectionUi(done = true, ok = false, title = "Адрес не разобран", detail = url)
+        val hints = runCatching { AutoSetup.fetchHints(link) }.getOrDefault(DocHints())
+        val outcome = AutoSetup.detect(link, key, hints)
+        val setup = outcome.setup
+        if (outcome.fixed && setup != null && !outcome.urlTemplate.isNullOrBlank()) {
+            val module = CustomModule(
+                id = java.util.UUID.randomUUID().toString(),
+                title = title.take(CustomModuleSpec.MAX_TITLE),
+                urlTemplate = outcome.urlTemplate,
+                auth = setup.auth,
+                method = setup.method,
+                headerName = setup.headerName.ifBlank { "X-API-Key" },
+                paramName = setup.paramName.ifBlank { "api_key" },
+                enabled = true,
+                createdAt = System.currentTimeMillis(),
+                hasKey = true
+            )
+            customStore.save(module, key)
+            refreshCustom()
+            appendStep("Модуль создан: ${setup.method} ${outcome.urlTemplate}, ${AutoSetup.authTitle(setup)}")
+            val key2 = if (outcome.strict) "Ключ принят сервисом" else "Адрес найден, но ключ отклонён (${outcome.code})"
+            return ConnectionUi(
+                done = true, ok = outcome.strict,
+                title = if (outcome.strict) "«${module.title}» подключён" else "«${module.title}»: нужен рабочий ключ",
+                detail = "$key2. Модуль включён — ответы попадут в отчёт с пометкой источника.",
+                lines = _state.value.connection?.lines.orEmpty()
+            )
+        }
+        return ConnectionUi(
+            done = true, ok = false, title = "«$title» не подобрался автоматически",
+            detail = "${outcome.detail}. Добавьте модуль вручную в разделе «Свои модули»: адрес, ключ и правила разбора.",
+            lines = _state.value.connection?.lines.orEmpty()
+        )
+    }
+
+    // ------------------------------------------------------- починка модулей
+
+    /**
+     * Разбирает последний отчёт диагностики и лечит, что лечится без человека:
+     * переносит ключ из своего модуля-дубликата во встроенный, заново подбирает
+     * адрес и способ передачи ключа, перепроверяет отклонённые ключи.
+     * В конце собирает свежий отчёт — видно, что изменилось.
+     */
+    fun repairModules() {
+        val blocks = _state.value.diagBlocks
+        if (blocks.isEmpty()) {
+            notify("Сначала выполните диагностику — исправлять нечего")
+            return
+        }
+        if (_state.value.repairing) return
+        _state.update { it.copy(repairing = true, repairLog = emptyList()) }
+        viewModelScope.launch {
+            var fixed = 0
+            var checked = 0
+            for (block in blocks) {
+                runCatching {
+                    if (block.kind.startsWith("пользовательский")) {
+                        val module = customStore.list().firstOrNull { it.title == block.title }
+                            ?: return@runCatching
+                        when (val step = RepairPlan.forCustom(module, block.code)) {
+                            is RepairStep.Migrate -> {
+                                checked++
+                                if (migrateToBuiltIn(module, step.providerId, step.reason)) fixed++
+                            }
+                            is RepairStep.Rediscover -> {
+                                checked++
+                                if (rediscoverCustom(module, step.reason)) fixed++
+                            }
+                            else -> appendRepair("«${module.title}»: ${step.reason()}")
+                        }
+                    } else {
+                        val provider = _state.value.providers
+                            .firstOrNull { it.spec.title == block.title } ?: return@runCatching
+                        val id = provider.spec.id
+                        val state = keys.state(id)
+                        when (val step = RepairPlan.forBuiltIn(id, state, block.facts)) {
+                            is RepairStep.Recheck -> {
+                                checked++
+                                val check = validator.check(id)
+                                refreshProviders()
+                                if (check.state == KeyState.VALID) {
+                                    fixed++
+                                    appendRepair("«${provider.spec.title}»: ключ принят заново — ${check.detail}")
+                                } else {
+                                    appendRepair("«${provider.spec.title}»: ${check.detail}")
+                                }
+                            }
+                            is RepairStep.Manual -> appendRepair("«${provider.spec.title}»: ${step.reason}")
+                            else -> Unit
+                        }
+                    }
+                }.onFailure { appendRepair("${block.title}: ${it.message ?: "ошибка починки"}") }
+            }
+            _state.update {
+                it.copy(repairing = false, toast = "Проверено модулей: $checked, исправлено: $fixed")
+            }
+            runDiagnostics()
+        }
+    }
+
+    fun clearRepairLog() = _state.update { it.copy(repairLog = emptyList()) }
+
+    private fun appendRepair(line: String) {
+        _state.update { s -> s.copy(repairLog = s.repairLog + DiagMask.text(line)) }
+    }
+
+    private fun RepairStep.reason(): String = when (this) {
+        is RepairStep.Migrate -> reason
+        is RepairStep.Rediscover -> reason
+        is RepairStep.Recheck -> reason
+        is RepairStep.Manual -> reason
+    }
+
+    /** Ключ из своего модуля → встроенный; дубликат выключается только после успешной проверки. */
+    private suspend fun migrateToBuiltIn(module: CustomModule, providerId: String, reason: String): Boolean {
+        val spec = ProviderCatalog.byId(providerId) ?: return false
+        val key = customStore.key(module.id)
+        if (key.isBlank()) {
+            appendRepair("«${module.title}»: $reason, но ключ не сохранён — добавьте его в «${spec.title}» вручную")
+            return false
+        }
+        keys.saveKey(providerId, key)
+        keys.setEnabled(providerId, true)
+        refreshProviders()
+        val check = validator.check(providerId)
+        refreshProviders()
+        return if (check.state == KeyState.VALID) {
+            customStore.setEnabled(module.id, false)
+            refreshCustom()
+            appendRepair("«${module.title}» → встроенный «${spec.title}»: ключ перенесён и принят, дубликат выключен")
+            true
+        } else {
+            appendRepair("«${module.title}» → «${spec.title}»: ключ отклонён (${check.detail})")
+            false
+        }
+    }
+
+    /** Повторный автоподбор запроса для своего модуля с сохранением найденного варианта. */
+    private suspend fun rediscoverCustom(module: CustomModule, reason: String): Boolean {
+        val host = CustomModuleSpec.hostOf(module.urlTemplate)
+        val link = SourceLink.parse("https://$host") ?: return false
+        val key = customStore.key(module.id)
+        if (key.isBlank()) {
+            appendRepair("«${module.title}»: $reason, но ключ не сохранён — перенастроить нельзя")
+            return false
+        }
+        val hints = runCatching { AutoSetup.fetchHints(link) }.getOrDefault(DocHints())
+        val outcome = AutoSetup.detect(link, key, hints)
+        val setup = outcome.setup
+        if (outcome.fixed && setup != null && !outcome.urlTemplate.isNullOrBlank()) {
+            customStore.save(
+                module.copy(
+                    urlTemplate = outcome.urlTemplate,
+                    auth = setup.auth,
+                    method = setup.method,
+                    headerName = setup.headerName.ifBlank { module.headerName },
+                    paramName = setup.paramName.ifBlank { module.paramName },
+                    enabled = true
+                ),
+                key
+            )
+            refreshCustom()
+            appendRepair("«${module.title}»: $reason → найден рабочий вариант ${setup.method} ${outcome.urlTemplate} (${AutoSetup.authTitle(setup)})")
+            return true
+        }
+        appendRepair("«${module.title}»: $reason, но рабочий вариант не найден — ${outcome.detail}")
+        return false
+    }
+
     // ------------------------------------------------------------- диагностика
 
     /**
@@ -827,7 +1128,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     startedAt = startedAt
                 )
             }
-            _state.update { it.copy(diagRunning = false, diagReport = report) }
+            _state.update { it.copy(diagRunning = false, diagReport = report, diagBlocks = blocks) }
         }
     }
 
@@ -1010,7 +1311,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------ интеллектуальный ассистент
 
     fun saveAssistantKey(value: String) {
-        assistantStore.saveKey(value)
+        assistantStore.saveKey(value, assistantStore.provider)
         _state.update {
             it.copy(
                 assistantConfigured = assistantStore.configured(),
@@ -1032,6 +1333,48 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Смена поставщика ИИ: ключи хранятся раздельно, модель — своя у каждого. */
+    fun setAssistantProvider(id: String) {
+        val spec = AssistantCatalog.provider(id)
+        assistantStore.provider = spec.id
+        if (spec.custom && assistantStore.customBaseUrl.isBlank()) {
+            assistantStore.customBaseUrl = ""
+        }
+        _state.update {
+            it.copy(
+                assistantProvider = assistantStore.provider,
+                assistantBaseUrl = assistantStore.customBaseUrl,
+                assistantModel = assistantStore.model,
+                assistantConfigured = assistantStore.configured(),
+                assistantState = if (assistantStore.configured()) KeyState.UNCHECKED else KeyState.EMPTY,
+                assistantCheckedAt = 0L,
+                assistantError = null
+            )
+        }
+    }
+
+    /** Базовый адрес для «своего сервера»: только https, без /chat/completions. */
+    fun setAssistantBaseUrl(raw: String) {
+        if (raw.isBlank()) {
+            assistantStore.customBaseUrl = ""
+            _state.update { it.copy(assistantBaseUrl = "", assistantError = null) }
+            return
+        }
+        val normalised = AssistantCatalog.normaliseBase(raw)
+        if (normalised == null) {
+            _state.update { it.copy(assistantError = "Нужен адрес вида https://api.example.com/v1") }
+            return
+        }
+        assistantStore.customBaseUrl = normalised
+        val known = AssistantCatalog.byBaseUrl(normalised)
+        if (known != null && known.id != "custom") {
+            // Адрес совпал с известным поставщиком — переключаемся на него.
+            setAssistantProvider(known.id)
+            return
+        }
+        _state.update { it.copy(assistantBaseUrl = normalised, assistantError = null) }
+    }
+
     fun setAssistantModel(id: String) {
         assistantStore.model = id.trim().ifBlank { AssistantCatalog.DEFAULT_MODEL }
         _state.update { it.copy(assistantModel = assistantStore.model) }
@@ -1039,7 +1382,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun checkAssistantKey() {
         if (!assistantStore.configured()) {
-            _state.update { it.copy(assistantError = "Сначала вставьте ключ Hugging Face") }
+            val title = AssistantCatalog.provider(assistantStore.provider).title
+            _state.update { it.copy(assistantError = "Сначала вставьте ключ $title") }
             return
         }
         if (_state.value.assistantChecking) return
@@ -1160,7 +1504,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(
                 assistantError = "Ключ ассистента не задан",
-                toast = "Добавьте ключ Hugging Face в «Настройки → Интеллектуальный ассистент»"
+                toast = "Добавьте ключ в «Настройки → Интеллектуальный ассистент»"
             )
         }
         return false

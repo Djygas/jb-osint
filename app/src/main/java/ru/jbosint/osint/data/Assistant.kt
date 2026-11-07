@@ -28,7 +28,30 @@ enum class AssistantRole(val title: String, val task: String, val maxTokens: Int
 
 data class AssistantModel(val id: String, val title: String, val note: String)
 
-/** Модели, реально доступные на роутере Hugging Face; ID кастомной можно ввести вручную. */
+/** Как проверяется ключ выбранного поставщика. */
+enum class AssistantProbe { HUGGINGFACE_WHOAMI, OPENAI_MODELS, NONE }
+
+/**
+ * Поставщик модели. Все — OpenAI-совместимый `POST {base}/chat/completions`,
+ * поэтому смена ИИ не меняет ни промты, ни разбор ответа.
+ */
+data class AssistantProvider(
+    val id: String,
+    val title: String,
+    val baseUrl: String,
+    val docsUrl: String,
+    val keyHint: String,
+    val defaultModel: String,
+    val models: List<AssistantModel>,
+    val probe: AssistantProbe = AssistantProbe.OPENAI_MODELS,
+    val custom: Boolean = false
+)
+
+/**
+ * Каталог поставщиков. Hugging Face — по умолчанию, остальные подключаются
+ * своим ключом; «Свой сервер» принимает любой совместимый адрес (в том числе
+ * локальный прокси на https). Ключи разных поставщиков хранятся раздельно.
+ */
 object AssistantCatalog {
     const val BASE_URL = "https://router.huggingface.co/v1"
     const val CHAT_URL = "$BASE_URL/chat/completions"
@@ -36,6 +59,7 @@ object AssistantCatalog {
     const val WHOAMI_URL = "https://huggingface.co/api/whoami-v2"
     const val TOKENS_URL = "https://huggingface.co/settings/tokens"
     const val DEFAULT_MODEL = "openai/gpt-oss-20b"
+    const val DEFAULT_PROVIDER = "hf"
 
     val models: List<AssistantModel> = listOf(
         AssistantModel("openai/gpt-oss-20b", "GPT-OSS 20B", "быстрый, для черновиков"),
@@ -46,10 +70,103 @@ object AssistantCatalog {
         AssistantModel("deepseek-ai/DeepSeek-V3", "DeepSeek V3", "длинный контекст")
     )
 
+    val providers: List<AssistantProvider> = listOf(
+        AssistantProvider(
+            id = "hf", title = "Hugging Face", baseUrl = BASE_URL,
+            docsUrl = TOKENS_URL, keyHint = "hf_…", defaultModel = DEFAULT_MODEL,
+            models = models, probe = AssistantProbe.HUGGINGFACE_WHOAMI
+        ),
+        AssistantProvider(
+            id = "openrouter", title = "OpenRouter", baseUrl = "https://openrouter.ai/api/v1",
+            docsUrl = "https://openrouter.ai/keys", keyHint = "sk-or-v1-…",
+            defaultModel = "openai/gpt-4o-mini",
+            models = listOf(
+                AssistantModel("openai/gpt-4o-mini", "GPT-4o mini", "быстрый и недорогой"),
+                AssistantModel("openai/gpt-4o", "GPT-4o", "универсальный"),
+                AssistantModel("anthropic/claude-3.5-sonnet", "Claude 3.5 Sonnet", "длинные отчёты"),
+                AssistantModel("google/gemini-2.0-flash-001", "Gemini 2.0 Flash", "большой контекст"),
+                AssistantModel("deepseek/deepseek-chat", "DeepSeek Chat", "цена и качество")
+            )
+        ),
+        AssistantProvider(
+            id = "openai", title = "OpenAI", baseUrl = "https://api.openai.com/v1",
+            docsUrl = "https://platform.openai.com/api-keys", keyHint = "sk-…",
+            defaultModel = "gpt-4o-mini",
+            models = listOf(
+                AssistantModel("gpt-4o-mini", "GPT-4o mini", "быстрый и недорогой"),
+                AssistantModel("gpt-4o", "GPT-4o", "универсальный"),
+                AssistantModel("gpt-4.1-mini", "GPT-4.1 mini", "новое поколение")
+            )
+        ),
+        AssistantProvider(
+            id = "groq", title = "Groq", baseUrl = "https://api.groq.com/openai/v1",
+            docsUrl = "https://console.groq.com/keys", keyHint = "gsk_…",
+            defaultModel = "llama-3.3-70b-versatile",
+            models = listOf(
+                AssistantModel("llama-3.3-70b-versatile", "Llama 3.3 70B", "очень быстрый"),
+                AssistantModel("llama-3.1-8b-instant", "Llama 3.1 8B", "мгновенный")
+            )
+        ),
+        AssistantProvider(
+            id = "deepseek", title = "DeepSeek", baseUrl = "https://api.deepseek.com/v1",
+            docsUrl = "https://platform.deepseek.com/api_keys", keyHint = "sk-…",
+            defaultModel = "deepseek-chat",
+            models = listOf(
+                AssistantModel("deepseek-chat", "DeepSeek Chat", "цена и качество"),
+                AssistantModel("deepseek-reasoner", "DeepSeek Reasoner", "пошаговые выводы")
+            )
+        ),
+        AssistantProvider(
+            id = "mistral", title = "Mistral", baseUrl = "https://api.mistral.ai/v1",
+            docsUrl = "https://console.mistral.ai/api-keys/", keyHint = "…",
+            defaultModel = "mistral-small-latest",
+            models = listOf(
+                AssistantModel("mistral-small-latest", "Mistral Small", "быстрый"),
+                AssistantModel("mistral-large-latest", "Mistral Large", "глубокий анализ")
+            )
+        ),
+        AssistantProvider(
+            id = "custom", title = "Свой сервер", baseUrl = "",
+            docsUrl = "https://platform.openai.com/docs/api-reference/chat", keyHint = "ключ сервера",
+            defaultModel = "", models = emptyList(), custom = true
+        )
+    )
+
+    fun provider(id: String): AssistantProvider =
+        providers.firstOrNull { it.id == id } ?: providers.first()
+
     fun titleFor(id: String): String =
-        models.firstOrNull { it.id == id }?.title ?: id
+        models.firstOrNull { it.id == id }?.title
+            ?: providers.firstNotNullOfOrNull { p -> p.models.firstOrNull { it.id == id }?.title }
+            ?: id
 
     fun isKnown(id: String): Boolean = models.any { it.id == id }
+
+    /** Нормализует базовый адрес: только https, без хвостового слэша и без /chat/completions. */
+    fun normaliseBase(raw: String): String? {
+        val clean = raw.trim().trimEnd('/')
+        if (clean.isBlank()) return null
+        val url = if (clean.startsWith("http", ignoreCase = true)) clean else "https://$clean"
+        if (!url.startsWith("https://", ignoreCase = true)) return null
+        val host = url.removePrefix("https://").substringBefore('/')
+        if (host.isBlank() || !host.contains('.')) return null
+        return url.removeSuffix("/chat/completions")
+    }
+
+    /** Угадывает поставщика по вставленному адресу. */
+    fun byBaseUrl(raw: String): AssistantProvider? {
+        val url = normaliseBase(raw) ?: return null
+        return providers.firstOrNull { it.baseUrl.isNotBlank() && url.startsWith(it.baseUrl) }
+    }
+
+    /** Угадывает поставщика по префиксу ключа. */
+    fun byKey(key: String): AssistantProvider? = when {
+        key.startsWith("hf_") -> provider("hf")
+        key.startsWith("sk-or-v1-") -> provider("openrouter")
+        key.startsWith("gsk_") -> provider("groq")
+        key.startsWith("sk-") -> provider("openai")
+        else -> null
+    }
 }
 
 /** Один результат классификации: тип данных и релевантность. */
@@ -426,22 +543,50 @@ class AssistantStore(context: Context) {
     private val secure = SecureStore(context)
     private val prefs = context.getSharedPreferences("jb_assistant", Context.MODE_PRIVATE)
 
-    fun key(): String = secure.get(KEY_NAME).orEmpty()
+    /** Поставщик модели: id из [AssistantCatalog.providers]. */
+    var provider: String
+        get() = prefs.getString("provider", AssistantCatalog.DEFAULT_PROVIDER).orEmpty()
+            .ifBlank { AssistantCatalog.DEFAULT_PROVIDER }
+            .let { id -> if (AssistantCatalog.providers.any { it.id == id }) id else AssistantCatalog.DEFAULT_PROVIDER }
+        set(value) = prefs.edit().putString("provider", value.trim().take(40)).apply()
 
-    fun saveKey(value: String) {
-        secure.put(KEY_NAME, value.trim())
+    /** Базовый адрес для «своего сервера» (только https, проверяется при сохранении). */
+    var customBaseUrl: String
+        get() = prefs.getString("base_url", "").orEmpty()
+        set(value) = prefs.edit().putString("base_url", value.trim().take(200)).apply()
+
+    /** Базовый адрес текущего поставщика: у известных он из каталога, у своего — сохранённый. */
+    fun baseUrl(): String {
+        val spec = AssistantCatalog.provider(provider)
+        val raw = if (spec.custom) customBaseUrl else spec.baseUrl
+        return AssistantCatalog.normaliseBase(raw).orEmpty()
+    }
+
+    fun chatUrl(): String = baseUrl().trimEnd('/') + "/chat/completions"
+
+    fun keyName(providerId: String = provider): String =
+        if (providerId == "hf") LEGACY_KEY else "${LEGACY_KEY}_$providerId"
+
+    fun key(): String = secure.get(keyName()).orEmpty()
+
+    fun hasKey(providerId: String = provider): Boolean = secure.get(keyName(providerId)).orEmpty().isNotBlank()
+
+    fun saveKey(value: String, providerId: String = provider) {
+        secure.put(keyName(providerId), value.trim())
         prefs.edit().remove("state").remove("checked").apply()
     }
 
-    fun clearKey() {
-        secure.remove(KEY_NAME)
+    fun clearKey(providerId: String = provider) {
+        secure.remove(keyName(providerId))
         prefs.edit().remove("state").remove("checked").apply()
     }
 
     var model: String
-        get() = prefs.getString("model", AssistantCatalog.DEFAULT_MODEL).orEmpty()
-            .ifBlank { AssistantCatalog.DEFAULT_MODEL }
-        set(value) = prefs.edit().putString("model", value.trim().take(120)).apply()
+        get() = prefs.getString(modelKey(), null)?.takeIf { it.isNotBlank() }
+            ?: AssistantCatalog.provider(provider).defaultModel.ifBlank { AssistantCatalog.DEFAULT_MODEL }
+        set(value) = prefs.edit().putString(modelKey(), value.trim().take(160)).apply()
+
+    private fun modelKey(): String = "model_$provider"
 
     var autoAnalyze: Boolean
         get() = prefs.getBoolean("auto_analyze", false)
@@ -475,8 +620,11 @@ class AssistantStore(context: Context) {
 
     fun configured(): Boolean = key().isNotBlank()
 
+    /** Есть ли ключ хотя бы у одного поставщика — для подсказки «другой ИИ уже настроен». */
+    fun anyConfigured(): Boolean = AssistantCatalog.providers.any { hasKey(it.id) }
+
     private companion object {
-        const val KEY_NAME = "assistant_key"
+        const val LEGACY_KEY = "assistant_key"
     }
 }
 
@@ -487,6 +635,9 @@ class AssistantService(private val store: AssistantStore) {
         runCatching {
             val key = store.key()
             if (key.isBlank()) throw IllegalStateException("Ключ ассистента не задан")
+            val base = store.baseUrl()
+            if (base.isBlank()) throw IllegalStateException("Укажите базовый адрес сервера (https)")
+            if (store.model.isBlank()) throw IllegalStateException("Выберите модель")
             val body = JSONObject()
                 .put("model", store.model)
                 .put("messages", JSONArray()
@@ -497,7 +648,7 @@ class AssistantService(private val store: AssistantStore) {
                 .put("stream", false)
                 .toString()
             val response = Net.fetch(
-                AssistantCatalog.CHAT_URL,
+                base.trimEnd('/') + "/chat/completions",
                 mapOf(
                     "Authorization" to "Bearer $key",
                     "Content-Type" to "application/json"
@@ -517,15 +668,27 @@ class AssistantService(private val store: AssistantStore) {
         }
     }
 
-    /** Проверка ключа через whoami Hugging Face: 200 только с валидным токеном. */
+    /**
+     * Проверка ключа: Hugging Face — через whoami, остальные — через список
+     * моделей `GET {base}/models` (200 только с валидным ключом).
+     */
     suspend fun probe(): KeyCheck = withContext(Dispatchers.IO) {
         val key = store.key()
         if (key.isBlank()) return@withContext KeyCheck(KeyState.EMPTY, "Ключ не задан")
+        val spec = AssistantCatalog.provider(store.provider)
+        val base = store.baseUrl()
+        if (base.isBlank()) {
+            return@withContext KeyCheck(KeyState.INVALID, "Укажите базовый адрес сервера (https)")
+        }
+        val url = when (spec.probe) {
+            AssistantProbe.HUGGINGFACE_WHOAMI -> AssistantCatalog.WHOAMI_URL
+            AssistantProbe.NONE, AssistantProbe.OPENAI_MODELS -> base.trimEnd('/') + "/models"
+        }
         val response = runCatching {
-            Net.fetch(AssistantCatalog.WHOAMI_URL, mapOf("Authorization" to "Bearer $key"), attempts = 1)
+            Net.fetch(url, mapOf("Authorization" to "Bearer $key"), attempts = 1)
         }.getOrElse {
             store.setState(KeyState.OFFLINE)
-            return@withContext KeyCheck(KeyState.OFFLINE, "Нет связи с Hugging Face")
+            return@withContext KeyCheck(KeyState.OFFLINE, "Нет связи с ${spec.title}")
         }
         response.crossHostRedirect?.let {
             store.setState(KeyState.INVALID)
@@ -537,13 +700,17 @@ class AssistantService(private val store: AssistantStore) {
                     ?.optString("name").orEmpty()
                 KeyCheck(
                     KeyState.VALID,
-                    if (name.isBlank()) "Ключ принят Hugging Face"
-                    else "Ключ принят: $name"
+                    when {
+                        spec.probe == AssistantProbe.HUGGINGFACE_WHOAMI && name.isNotBlank() -> "Ключ принят: $name"
+                        spec.probe == AssistantProbe.HUGGINGFACE_WHOAMI -> "Ключ принят Hugging Face"
+                        else -> "Ключ принят: ${spec.title}, модель ${store.model}"
+                    }
                 )
             }
             response.code == 401 || response.code == 403 ->
-                KeyCheck(KeyState.INVALID, "Hugging Face отклонил ключ (${response.code})")
+                KeyCheck(KeyState.INVALID, "${spec.title} отклонил ключ (${response.code})")
             response.code == 429 -> KeyCheck(KeyState.VALID, "Ключ активен, превышен лимит запросов")
+            response.code == 404 -> KeyCheck(KeyState.INVALID, "Адрес ${url} не найден (404) — проверьте базовый адрес")
             else -> KeyCheck(KeyState.INVALID, "Ответ сервиса ${response.code}")
         }
         store.setState(result.state)

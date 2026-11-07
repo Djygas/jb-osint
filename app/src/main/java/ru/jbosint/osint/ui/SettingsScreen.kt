@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -324,18 +325,64 @@ private fun AssistantSection(state: UiState, vm: AppViewModel) {
     var modelDraft by remember(state.assistantModel) { mutableStateOf(state.assistantModel) }
     val context = LocalContext.current
 
+    val provider = AssistantCatalog.provider(state.assistantProvider)
+    var baseDraft by remember(state.assistantBaseUrl) { mutableStateOf(state.assistantBaseUrl) }
+
     SectionHeader("Интеллектуальный ассистент")
     GlowCard(modifier = Modifier.fillMaxWidth(), padding = 16) {
-        Text("Hugging Face", style = MaterialTheme.typography.titleSmall, color = JbText)
+        Text("Модель и поставщик", style = MaterialTheme.typography.titleSmall, color = JbText)
         Spacer(Modifier.height(3.dp))
         Text(
             "Ассистент формирует аналитические выводы, размечает типы данных и готовит резюме отчёта. " +
-                "Запросы уходят напрямую на router.huggingface.co по HTTPS; ключ хранится в зашифрованном виде " +
-                "на устройстве и прикладывается только к запросам к Hugging Face.",
+                "Подключите любого OpenAI-совместимого поставщика или свой сервер: запросы уходят только " +
+                "по HTTPS на выбранный адрес, ключи разных поставщиков хранятся раздельно в зашифрованном виде.",
             style = MaterialTheme.typography.bodySmall,
             color = JbMuted
         )
+        Spacer(Modifier.height(8.dp))
+        AssistantCatalog.providers.chunked(3).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                row.forEach { item ->
+                    ProviderChip(
+                        title = item.title,
+                        selected = state.assistantProvider == item.id,
+                        hasKey = state.assistantProvider == item.id && state.assistantConfigured,
+                        modifier = Modifier.weight(1f),
+                        onClick = { vm.setAssistantProvider(item.id) }
+                    )
+                }
+                repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+            }
+            Spacer(Modifier.height(6.dp))
+        }
+
+        if (provider.custom) {
+            Spacer(Modifier.height(4.dp))
+            OutlinedTextField(
+                value = baseDraft,
+                onValueChange = { baseDraft = it.trim() },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Базовый адрес, https", color = JbFaint) },
+                placeholder = { Text("https://api.example.com/v1", color = JbFaint) },
+                shape = RoundedCornerShape(12.dp),
+                colors = fieldColors(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                trailingIcon = {
+                    TextButton(
+                        onClick = { vm.setAssistantBaseUrl(baseDraft) },
+                        enabled = baseDraft.isNotBlank()
+                    ) { Text("Применить", color = JbAccent2, style = MaterialTheme.typography.labelSmall) }
+                }
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+
+        Spacer(Modifier.height(2.dp))
+        GradientDivider()
         Spacer(Modifier.height(10.dp))
+        Text("Ключ ${provider.title}", style = MaterialTheme.typography.titleSmall, color = JbText)
+        Spacer(Modifier.height(6.dp))
         OutlinedTextField(
             value = keyDraft,
             onValueChange = { keyDraft = it.trim() },
@@ -343,7 +390,8 @@ private fun AssistantSection(state: UiState, vm: AppViewModel) {
             singleLine = true,
             placeholder = {
                 Text(
-                    if (state.assistantConfigured) "Ключ сохранён — вставьте новый, чтобы заменить" else "hf_…",
+                    if (state.assistantConfigured) "Ключ сохранён — вставьте новый, чтобы заменить"
+                    else provider.keyHint,
                     color = JbFaint
                 )
             },
@@ -399,11 +447,18 @@ private fun AssistantSection(state: UiState, vm: AppViewModel) {
                     context.startActivity(
                         android.content.Intent(
                             android.content.Intent.ACTION_VIEW,
-                            android.net.Uri.parse(AssistantCatalog.TOKENS_URL)
+                            android.net.Uri.parse(provider.docsUrl)
                         )
                     )
                 }
-            }) { Text("Получить ключ на huggingface.co", color = JbAccent2, style = MaterialTheme.typography.labelMedium) }
+            }) {
+                Text(
+                    if (provider.custom) "Документация OpenAI-совместимого API"
+                    else "Получить ключ: ${provider.title}",
+                    color = JbAccent2,
+                    style = MaterialTheme.typography.labelMedium
+                )
+            }
             if (state.assistantConfigured) {
                 TextButton(onClick = vm::clearAssistantKey) {
                     Text("Удалить ключ", color = JbRed, style = MaterialTheme.typography.labelMedium)
@@ -418,13 +473,14 @@ private fun AssistantSection(state: UiState, vm: AppViewModel) {
         Text("Модель", style = MaterialTheme.typography.titleSmall, color = JbText)
         Spacer(Modifier.height(3.dp))
         Text(
-            "Список — модели, доступные на роутере Hugging Face. Можно указать любой ID вручную.",
+            if (provider.models.isEmpty()) "Укажите ID модели, который поддерживает ваш сервер."
+            else "Модели ${provider.title}. Можно указать любой ID вручную.",
             style = MaterialTheme.typography.bodySmall,
             color = JbMuted
         )
         Spacer(Modifier.height(8.dp))
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            AssistantCatalog.models.chunked(2).forEach { rowModels ->
+            provider.models.chunked(2).forEach { rowModels ->
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     rowModels.forEach { model ->
                         ModelChip(
@@ -495,6 +551,47 @@ private fun AssistantSection(state: UiState, vm: AppViewModel) {
             checked = state.assistantPolish,
             onCheckedChange = vm::setAssistantPolish
         )
+    }
+}
+
+/** Компактный переключатель поставщика ИИ. */
+@Composable
+private fun ProviderChip(
+    title: String,
+    selected: Boolean,
+    hasKey: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) JbAccent.copy(alpha = 0.18f) else JbSurface)
+            .border(
+                1.dp,
+                if (selected) JbAccent.copy(alpha = 0.55f) else JbBorder,
+                RoundedCornerShape(10.dp)
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (selected) JbText else JbSlate,
+            maxLines = 1,
+            modifier = Modifier.weight(1f, fill = false)
+        )
+        if (hasKey) {
+            Spacer(Modifier.width(4.dp))
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(JbGreen)
+            )
+        }
     }
 }
 
