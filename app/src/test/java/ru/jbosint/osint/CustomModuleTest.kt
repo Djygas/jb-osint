@@ -133,6 +133,7 @@ class ConnectionProbeTest {
         assertTrue(probe.describe(404).contains("адрес не найден"))
         assertTrue(probe.describe(200).contains("Модуль отвечает"))
         assertTrue(probe.describe(503).contains("сервер недоступен"))
+        assertTrue(probe.describe(302).contains("перенаправление"))
     }
 
     @Test

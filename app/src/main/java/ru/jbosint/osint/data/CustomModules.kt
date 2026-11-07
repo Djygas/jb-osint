@@ -547,6 +547,7 @@ class CustomConnectionProbe {
         404 -> "Ошибка 404: Not Found — адрес не найден"
         400 -> "Ошибка 400: Bad Request — проверьте шаблон адреса"
         429 -> "Модуль отвечает (429: превышен лимит запросов)"
+        in 300..399 -> "Код $code: перенаправление — укажите конечный адрес API"
         in 200..299 -> "Модуль отвечает"
         in 500..599 -> "Ошибка $code: сервер недоступен"
         else -> "Ответ сервера: код $code"
@@ -569,6 +570,13 @@ class CustomModuleChecker(private val store: CustomModuleStore) {
                 url, CustomModuleSpec.headers(module, key),
                 attempts = 1, method = module.method, body = CustomModuleSpec.body(module, key)
             )
+            val redirect = response.crossHostRedirect
+            if (redirect != null) {
+                return@runCatching KeyCheck(
+                    KeyState.INVALID,
+                    "Сервис перенаправляет на $redirect — укажите конечный адрес API"
+                )
+            }
             val code = response.code
             when {
                 code in 200..299 -> KeyCheck(KeyState.VALID, "Модуль отвечает")

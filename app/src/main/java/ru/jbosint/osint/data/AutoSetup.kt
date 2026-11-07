@@ -1,6 +1,7 @@
 package ru.jbosint.osint.data
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.net.URI
 
@@ -265,7 +266,8 @@ object AutoSetup {
         var rejected: Triple<String, Variant, Int>? = null
         var lastCode = 0
         var htmlPage = false
-        var networkError = false
+        var redirectHost: String? = null
+        var rateLimited = false
 
         for ((template, variant) in limited.drop(skip)) {
             attemptNo++
@@ -274,17 +276,20 @@ object AutoSetup {
                 auth = variant.auth, method = variant.method,
                 headerName = variant.headerName, paramName = variant.paramName, enabled = false
             )
-            val url = CustomModuleSpec.buildUrl(module, key, TEST_QUERY)
-            val response = runCatching {
-                Net.fetch(
-                    url, CustomModuleSpec.headers(module, key), attempts = 1,
-                    method = variant.method, body = CustomModuleSpec.body(module, key)
-                )
-            }.getOrNull()
+            // 429 — «подождите», а не «неверный ключ»: пробуем тот же вариант ещё раз.
+            var response = fetchVariant(module, key)
+            if (response?.code == 429) {
+                delay(700)
+                response = fetchVariant(module, key)
+                if (response?.code == 429) rateLimited = true
+            }
             // Один мёртвый адрес (DNS, таймаут) не должен обрывать перебор остальных.
-            if (response == null) {
-                networkError = true
-                continue
+            if (response == null) continue
+            // Ключ в query ушёл бы на чужой хост вместе с редиректом — дальше не идём.
+            val redirect = response.crossHostRedirect
+            if (redirect != null) {
+                redirectHost = redirect
+                break
             }
             lastCode = response.code
             if (response.code in 200..299) {
@@ -316,8 +321,9 @@ object AutoSetup {
             )
         }
         val detail = when {
+            redirectHost != null -> "Сервис перенаправляет на $redirectHost — укажите конечный адрес API вручную"
+            rateLimited -> "Сервис ограничивает частоту запросов (429) — повторите через минуту"
             htmlPage && lastCode in 200..299 -> "Адрес отвечает веб-страницей, а не данными API"
-            lastCode == 0 && networkError -> "Нет соединения"
             lastCode == 0 -> "Нет соединения"
             else -> "Сервис не принял ни один вариант (последний код $lastCode)"
         }
@@ -325,6 +331,18 @@ object AutoSetup {
             fixed = false, strict = false, setup = null, urlTemplate = null,
             attempts = attemptNo, code = lastCode, detail = detail
         )
+    }
+
+    /** Один пробный запрос варианта; null — сеть недоступна. */
+    private suspend fun fetchVariant(module: CustomModule, key: String): Net.Response? {
+        val url = CustomModuleSpec.buildUrl(module, key, TEST_QUERY)
+        return runCatching {
+            // Ключ в JSON-теле обязателен: без него POST-проверка всегда даёт 401/400.
+            Net.fetch(
+                url, CustomModuleSpec.headers(module, key), attempts = 1,
+                method = module.method, body = CustomModuleSpec.body(module, key)
+            )
+        }.getOrNull()
     }
 
     /** Признак HTML-страницы: такие ответы не считаем успешной настройкой поиска. */

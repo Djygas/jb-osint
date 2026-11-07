@@ -329,6 +329,10 @@ class KeyValidator(private val repo: KeyRepository) {
      */
     private suspend fun probeBodyAware(url: String): KeyCheck {
         val response = Net.fetch(url, attempts = 1)
+        val redirect = response.crossHostRedirect
+        if (redirect != null) {
+            return KeyCheck(KeyState.INVALID, "Сервис перенаправляет на $redirect — ключ не отправлен")
+        }
         if (response.code in 200..299) {
             val errorInBody = runCatching { org.json.JSONObject(response.body) }.getOrNull()?.let { json ->
                 json.has("error") || json.optString("status") == "error"
@@ -345,6 +349,10 @@ class KeyValidator(private val repo: KeyRepository) {
         treat422AsValid: Boolean = true
     ): KeyCheck {
         val response = Net.fetch(url, headers)
+        val redirect = response.crossHostRedirect
+        if (redirect != null) {
+            return KeyCheck(KeyState.INVALID, "Сервис перенаправляет на $redirect — ключ не отправлен")
+        }
         return when {
             response.code in 200..299 -> KeyCheck(KeyState.VALID, "Ключ принят сервисом")
             response.code == 401 || response.code == 403 -> KeyCheck(KeyState.INVALID, "Сервис отклонил ключ (${response.code})")
