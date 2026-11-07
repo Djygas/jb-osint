@@ -57,7 +57,11 @@ report-core/               Чистый Kotlin/JVM: модель, агрегат
 
 Дополнительно можно добавить собственные модули (см. выше) — количество не ограничено, каждый хранится в зашифрованном виде.
 
-Поиск: Google CSE (требует ключ + CX), SerpAPI. Утечки: Have I Been Pwned. Инфраструктура: VirusTotal, Shodan, RDAP (без ключа). Почта и телефоны: Hunter, Numverify. Соцсети: GitHub, Telegram (TGStat). Реестры: OpenCorporates. Плюс демо-модуль для проверки интерфейса без ключей.
+Поиск: Google CSE (ключ + CX), Яндекс XML (ключ + folderid), Brave Search, SerpAPI, DuckDuckGo и Wikipedia — последние два без ключа.
+
+Инфраструктура: VirusTotal, Shodan, urlscan.io (без ключа), SecurityTrails (поддомены), IPinfo, RDAP (без ключа). Почта и телефоны: Hunter, Numverify, AbuseIPDB (репутация IP), Have I Been Pwned (утечки). Соцсети: GitHub, GitLab (без ключа), VK, Telegram через TGStat. Реестры: OpenCorporates. Плюс демо-модуль для проверки интерфейса без ключей.
+
+Модули без ключа включаются тумблером и проверяются кнопкой «Проверить» — ключ для них не запрашивается. Для остальных ссылка «Где взять ключ» ведёт на актуальную страницу выдачи токена.
 
 ## Безопасность
 

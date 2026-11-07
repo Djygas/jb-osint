@@ -129,7 +129,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         ProviderUi(
             spec = spec,
             enabled = keys.isEnabled(spec.id),
-            hasKey = keys.key(spec.id).isNotBlank(),
+            hasKey = spec.keyless || keys.key(spec.id).isNotBlank(),
             hasSecond = keys.secondField(spec.id).isNotBlank(),
             state = keys.state(spec.id),
             checkedAt = keys.checkedAt(spec.id)
@@ -287,6 +287,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ------------------------------------------------------------------- ключи
+
+    fun notify(message: String) = _state.update { it.copy(toast = message) }
 
     fun toggleProvider(id: String, enabled: Boolean) {
         keys.setEnabled(id, enabled)

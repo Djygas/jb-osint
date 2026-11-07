@@ -1,8 +1,10 @@
 package ru.jbosint.osint
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import ru.jbosint.osint.data.Connectors
 import ru.jbosint.osint.data.ProviderCatalog
 import ru.jbosint.osint.data.QueryDetector
 import ru.jbosint.osint.data.QueryKind
@@ -58,6 +60,26 @@ class ProviderCatalogTest {
         val ids = ProviderCatalog.all.map { it.id }
         assertEquals(ids.size, ids.toSet().size)
         assertTrue(ids.none { it.isBlank() })
+    }
+
+    @Test
+    fun everyProviderHasConnector() {
+        ProviderCatalog.all.forEach { spec ->
+            assertNotNull("нет коннектора для ${spec.id}", Connectors.byId(spec.id))
+        }
+    }
+
+    @Test
+    fun keylessProvidersAreMarked() {
+        val keyless = ProviderCatalog.all.filter { it.keyless }.map { it.id }
+        assertTrue(keyless.containsAll(listOf("ddg", "wikipedia", "urlscan", "gitlab")))
+    }
+
+    @Test
+    fun yandexDocsPointToLiveRegistrationPage() {
+        val yandex = ProviderCatalog.byId("yandex")
+        assertNotNull(yandex)
+        assertTrue(yandex!!.docsUrl.endsWith("/concepts/registration"))
     }
 
     @Test

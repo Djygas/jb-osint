@@ -135,9 +135,10 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                         onClear = { vm.clearKey(provider.spec.id) },
                         onCheck = { vm.checkKey(provider.spec.id) },
                         onOpenDocs = {
-                            runCatching {
+                            val opened = runCatching {
                                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(provider.spec.docsUrl)))
-                            }
+                            }.isSuccess
+                            if (!opened) vm.notify("Не удалось открыть ссылку — проверьте браузер")
                         }
                     )
                 }
@@ -271,7 +272,9 @@ private fun ProviderCard(
         Row(verticalAlignment = Alignment.CenterVertically) {
             StatePill(if (provider.checking) KeyState.CHECKING else provider.state)
             Spacer(Modifier.width(8.dp))
-            if (provider.hasKey) {
+            if (provider.spec.keyless) {
+                Text("публичный API, ключ не нужен", style = MaterialTheme.typography.labelSmall, color = JbFaint)
+            } else if (provider.hasKey) {
                 Text(
                     if (provider.checkedAt > 0) "проверен ${dateShort(provider.checkedAt)}" else "ключ сохранён",
                     style = MaterialTheme.typography.labelSmall,
@@ -286,35 +289,44 @@ private fun ProviderCard(
             }
         }
 
-        Spacer(Modifier.height(10.dp))
-        OutlinedTextField(
-            value = keyText,
-            onValueChange = { keyText = it },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            placeholder = {
-                Text(
-                    if (provider.hasKey) "Ключ сохранён — введите новый, чтобы заменить"
-                    else provider.spec.hint,
-                    color = JbFaint,
-                    maxLines = 1,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            },
-            visualTransformation = if (revealed) VisualTransformation.None else PasswordVisualTransformation(),
-            trailingIcon = {
-                IconButton(onClick = { revealed = !revealed }) {
-                    Icon(
-                        if (revealed) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                        contentDescription = if (revealed) "Скрыть" else "Показать",
-                        tint = JbFaint
+        if (provider.spec.keyless) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Модуль работает без регистрации и ключа — включите тумблер и проверьте связь.",
+                style = MaterialTheme.typography.labelSmall,
+                color = JbFaint
+            )
+        } else {
+            Spacer(Modifier.height(10.dp))
+            OutlinedTextField(
+                value = keyText,
+                onValueChange = { keyText = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                placeholder = {
+                    Text(
+                        if (provider.hasKey) "Ключ сохранён — введите новый, чтобы заменить"
+                        else provider.spec.hint,
+                        color = JbFaint,
+                        maxLines = 1,
+                        style = MaterialTheme.typography.bodySmall
                     )
-                }
-            },
-            shape = RoundedCornerShape(12.dp),
-            colors = fieldColors(),
-            textStyle = MaterialTheme.typography.bodyMedium
-        )
+                },
+                visualTransformation = if (revealed) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    IconButton(onClick = { revealed = !revealed }) {
+                        Icon(
+                            if (revealed) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                            contentDescription = if (revealed) "Скрыть" else "Показать",
+                            tint = JbFaint
+                        )
+                    }
+                },
+                shape = RoundedCornerShape(12.dp),
+                colors = fieldColors(),
+                textStyle = MaterialTheme.typography.bodyMedium
+            )
+        }
 
         if (secondLabel != null) {
             Spacer(Modifier.height(8.dp))
@@ -345,7 +357,7 @@ private fun ProviderCard(
                 Text("Где взять ключ", style = MaterialTheme.typography.labelMedium, color = JbMuted)
             }
             Spacer(Modifier.weight(1f))
-            if (provider.hasKey) {
+            if (provider.hasKey && !provider.spec.keyless) {
                 IconButton(onClick = onClear) {
                     Icon(Icons.Filled.Delete, contentDescription = "Удалить ключ", tint = JbFaint, modifier = Modifier.size(18.dp))
                 }

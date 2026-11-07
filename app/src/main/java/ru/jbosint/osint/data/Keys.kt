@@ -24,7 +24,9 @@ data class ProviderSpec(
     val hint: String,
     val docsUrl: String,
     val group: ProviderGroup,
-    val requiresSecondField: String? = null
+    val requiresSecondField: String? = null,
+    /** Публичный API: ключ не требуется, модуль включается тумблером. */
+    val keyless: Boolean = false
 )
 
 object ProviderCatalog {
@@ -71,8 +73,40 @@ object ProviderCatalog {
         ),
         ProviderSpec(
             "yandex", "Яндекс Поиск", "Индекс и цитирование",
-            "apikey (Yandex XML)", "https://yandex.ru/dev/xml/", ProviderGroup.SEARCH,
+            "apikey (Yandex XML)", "https://yandex.ru/dev/xml/doc/ru/concepts/registration", ProviderGroup.SEARCH,
             requiresSecondField = "folderid"
+        ),
+        ProviderSpec(
+            "brave", "Brave Search", "Независимый веб-индекс",
+            "X-Subscription-Token", "https://api.search.brave.com/app/keys", ProviderGroup.SEARCH
+        ),
+        ProviderSpec(
+            "serpapi", "SerpAPI", "Google, Bing, Яндекс через один шлюз",
+            "api_key", "https://serpapi.com/manage-api-key", ProviderGroup.SEARCH
+        ),
+        ProviderSpec(
+            "ddg", "DuckDuckGo", "Мгновенные ответы и связанные темы",
+            "Ключ не требуется", "https://duckduckgo.com/api", ProviderGroup.SEARCH, keyless = true
+        ),
+        ProviderSpec(
+            "wikipedia", "Wikipedia", "Поиск по статьям и упоминаниям",
+            "Ключ не требуется", "https://www.mediawiki.org/wiki/API:Search", ProviderGroup.SEARCH, keyless = true
+        ),
+        ProviderSpec(
+            "urlscan", "urlscan.io", "Сканы сайтов и связанные домены",
+            "Ключ не требуется", "https://urlscan.io/docs/api/", ProviderGroup.INFRA, keyless = true
+        ),
+        ProviderSpec(
+            "securitytrails", "SecurityTrails", "Поддомены и DNS-история",
+            "APIKEY", "https://securitytrails.com/app/account/credentials", ProviderGroup.INFRA
+        ),
+        ProviderSpec(
+            "abuseipdb", "AbuseIPDB", "Репутация IP-адресов",
+            "Key", "https://www.abuseipdb.com/api", ProviderGroup.LEAKS
+        ),
+        ProviderSpec(
+            "gitlab", "GitLab", "Профили и публичные проекты",
+            "Ключ не требуется", "https://docs.gitlab.com/ee/api/users.html", ProviderGroup.SOCIAL, keyless = true
         ),
         ProviderSpec(
             "google", "Google Custom Search", "Веб-индекс",
@@ -138,12 +172,14 @@ class KeyRepository(context: Context) {
 
     fun checkedAt(id: String): Long = flags.getLong("checked_$id", 0L)
 
+    fun isReady(spec: ProviderSpec): Boolean = spec.keyless || key(spec.id).isNotBlank()
+
     fun enabledWithKeys(): Map<String, String> =
         ProviderCatalog.all
-            .filter { isEnabled(it.id) && key(it.id).isNotBlank() }
+            .filter { isEnabled(it.id) && isReady(it) }
             .associate { it.id to key(it.id) }
 
-    fun activeCount(): Int = ProviderCatalog.all.count { isEnabled(it.id) && key(it.id).isNotBlank() }
+    fun activeCount(): Int = ProviderCatalog.all.count { isEnabled(it.id) && isReady(it) }
 
     fun wipeKeys() {
         ProviderCatalog.all.forEach {
@@ -165,8 +201,8 @@ class KeyValidator(private val repo: KeyRepository) {
 
     suspend fun check(id: String): KeyCheck = withContext(Dispatchers.IO) {
         val key = repo.key(id)
-        if (key.isBlank()) return@withContext KeyCheck(KeyState.EMPTY, "Ключ не задан")
         val spec = repo.spec(id) ?: return@withContext KeyCheck(KeyState.INVALID, "Неизвестный провайдер")
+        if (key.isBlank() && !spec.keyless) return@withContext KeyCheck(KeyState.EMPTY, "Ключ не задан")
         if (spec.requiresSecondField != null && repo.secondField(id).isBlank()) {
             return@withContext KeyCheck(KeyState.INVALID, "Нужно второе поле: ${spec.requiresSecondField}")
         }
@@ -202,11 +238,11 @@ class KeyValidator(private val repo: KeyRepository) {
                 { probeHttp("https://ipinfo.io/8.8.8.8/json?token=${Net.urlEncode(key)}") }
             }
             "tgstat" -> {
-                { probeHttp("https://api.tgstat.ru/channels/search?token=${Net.urlEncode(key)}&q=osint") }
+                { probeBodyAware("https://api.tgstat.ru/channels/search?token=${Net.urlEncode(key)}&q=osint") }
             }
             "vk" -> {
                 {
-                    probeHttp(
+                    probeBodyAware(
                         "https://api.vk.com/method/users.get?access_token=${Net.urlEncode(key)}&v=5.199"
                     )
                 }
@@ -232,6 +268,44 @@ class KeyValidator(private val repo: KeyRepository) {
                     )
                 }
             }
+            "brave" -> {
+                {
+                    probeHttp(
+                        "https://api.search.brave.com/res/v1/web/search?q=test&count=1",
+                        mapOf("X-Subscription-Token" to key),
+                        treat422AsValid = false
+                    )
+                }
+            }
+            "serpapi" -> {
+                { probeHttp("https://serpapi.com/account.json?api_key=${Net.urlEncode(key)}") }
+            }
+            "securitytrails" -> {
+                {
+                    probeHttp(
+                        "https://api.securitytrails.com/v1/ping",
+                        mapOf("APIKEY" to key, "Accept" to "application/json")
+                    )
+                }
+            }
+            "abuseipdb" -> {
+                {
+                    probeHttp(
+                        "https://api.abuseipdb.com/api/v2/check?ipAddress=8.8.8.8&maxAgeInDays=1",
+                        mapOf("Key" to key, "Accept" to "application/json")
+                    )
+                }
+            }
+            "ddg" -> { { probeHttp("https://api.duckduckgo.com/?q=osint&format=json&no_html=1") } }
+            "wikipedia" -> {
+                {
+                    probeHttp(
+                        "https://ru.wikipedia.org/w/api.php?action=query&list=search&srsearch=osint&format=json&srlimit=1"
+                    )
+                }
+            }
+            "urlscan" -> { { probeHttp("https://urlscan.io/api/v1/search/?q=example.com&size=1") } }
+            "gitlab" -> { { probeHttp("https://gitlab.com/api/v4/users?username=root") } }
             else -> { { KeyCheck(KeyState.UNCHECKED, "Проверка не поддерживается") } }
         }
         val result = runCatching { probe() }.getOrElse {
@@ -249,11 +323,32 @@ class KeyValidator(private val repo: KeyRepository) {
             .toMap()
     }
 
-    private suspend fun probeHttp(url: String, headers: Map<String, String> = emptyMap()): KeyCheck {
+    /**
+     * Часть сервисов отвечает 200 и кладёт ошибку авторизации в тело —
+     * такие ответы нельзя считать успешными.
+     */
+    private suspend fun probeBodyAware(url: String): KeyCheck {
+        val response = Net.fetch(url, attempts = 1)
+        if (response.code in 200..299) {
+            val errorInBody = runCatching { org.json.JSONObject(response.body) }.getOrNull()?.let { json ->
+                json.has("error") || json.optString("status") == "error"
+            } ?: false
+            if (errorInBody) return KeyCheck(KeyState.INVALID, "Сервис отклонил ключ (ошибка в ответе)")
+            return KeyCheck(KeyState.VALID, "Ключ принят сервисом")
+        }
+        return probeHttp(url)
+    }
+
+    private suspend fun probeHttp(
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        treat422AsValid: Boolean = true
+    ): KeyCheck {
         val response = Net.fetch(url, headers)
         return when {
             response.code in 200..299 -> KeyCheck(KeyState.VALID, "Ключ принят сервисом")
             response.code == 401 || response.code == 403 -> KeyCheck(KeyState.INVALID, "Сервис отклонил ключ (${response.code})")
+            response.code == 422 && !treat422AsValid -> KeyCheck(KeyState.INVALID, "Сервис отклонил ключ (422)")
             response.code == 400 || response.code == 404 || response.code == 422 ->
                 // Сервис ответил осмысленно — значит авторизация пройдена.
                 KeyCheck(KeyState.VALID, "Сервис ответил, ключ принят (${response.code})")

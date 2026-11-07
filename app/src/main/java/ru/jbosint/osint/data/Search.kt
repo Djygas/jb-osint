@@ -68,7 +68,9 @@ object Connectors {
     val all: List<Connector> = listOf(
         GithubConnector, HibpConnector, VirusTotalConnector, ShodanConnector,
         NumverifyConnector, HunterConnector, IpinfoConnector, TgstatConnector,
-        VkConnector, OpenCorporatesConnector, GoogleConnector, YandexConnector
+        VkConnector, OpenCorporatesConnector, GoogleConnector, YandexConnector,
+        BraveConnector, SerpApiConnector, DdgConnector, WikipediaConnector,
+        UrlscanConnector, SecurityTrailsConnector, AbuseIpdbConnector, GitlabConnector
     )
 
     fun byId(id: String): Connector? = all.firstOrNull { it.id == id }
@@ -463,6 +465,234 @@ private object YandexConnector : Connector {
                 buildMap { if (title.isNotBlank()) put("Заголовок", title.take(120)) }
             )
         }.toList()
+    }
+}
+
+
+private object BraveConnector : Connector {
+    override val id = "brave"
+
+    override suspend fun collect(query: String, key: KeyRepository): List<RawFact> {
+        val json = Net.json(
+            "https://api.search.brave.com/res/v1/web/search?q=${Net.urlEncode(query)}&count=8",
+            mapOf("X-Subscription-Token" to key.key(id), "Accept" to "application/json")
+        ).getOrNull() ?: return emptyList()
+        val results = json.optJSONObject("web")?.optJSONArray("results") ?: return emptyList()
+        val facts = ArrayList<RawFact>()
+        for (i in 0 until minOf(results.length(), 8)) {
+            val item = results.getJSONObject(i)
+            val link = item.optString("url")
+            if (link.isBlank()) continue
+            facts += fact(
+                FactCategory.OTHER, "Упоминание", link, query, id,
+                buildMap {
+                    item.optString("title").takeIf { it.isNotBlank() }?.let { put("Заголовок", it.take(120)) }
+                    item.optString("description").takeIf { it.isNotBlank() }?.let { put("Фрагмент", it.take(200)) }
+                }
+            )
+        }
+        return facts
+    }
+}
+
+private object SerpApiConnector : Connector {
+    override val id = "serpapi"
+
+    override suspend fun collect(query: String, key: KeyRepository): List<RawFact> {
+        val json = Net.json(
+            "https://serpapi.com/search.json?engine=google&num=8&q=${Net.urlEncode(query)}" +
+                "&api_key=${Net.urlEncode(key.key(id))}"
+        ).getOrNull() ?: return emptyList()
+        val results = json.optJSONArray("organic_results") ?: return emptyList()
+        val facts = ArrayList<RawFact>()
+        for (i in 0 until minOf(results.length(), 8)) {
+            val item = results.getJSONObject(i)
+            val link = item.optString("link")
+            if (link.isBlank()) continue
+            facts += fact(
+                FactCategory.OTHER, "Упоминание", link, query, id,
+                buildMap {
+                    item.optString("title").takeIf { it.isNotBlank() }?.let { put("Заголовок", it.take(120)) }
+                    item.optString("snippet").takeIf { it.isNotBlank() }?.let { put("Фрагмент", it.take(200)) }
+                }
+            )
+        }
+        return facts
+    }
+}
+
+/** Публичный API без ключа: мгновенный ответ и связанные темы. */
+private object DdgConnector : Connector {
+    override val id = "ddg"
+
+    override suspend fun collect(query: String, key: KeyRepository): List<RawFact> {
+        val json = Net.json(
+            "https://api.duckduckgo.com/?q=${Net.urlEncode(query)}&format=json&no_html=1&skip_disambig=1"
+        ).getOrNull() ?: return emptyList()
+        val facts = ArrayList<RawFact>()
+        val abstractText = json.optString("AbstractText")
+        val abstractUrl = json.optString("AbstractURL")
+        if (abstractUrl.isNotBlank()) {
+            facts += fact(
+                FactCategory.OTHER, "Упоминание", abstractUrl, query, id,
+                buildMap { if (abstractText.isNotBlank()) put("Фрагмент", abstractText.take(240)) }
+            )
+        }
+        val topics = ArrayList<JSONObject>()
+        fun walk(array: JSONArray?) {
+            if (array == null) return
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                val nested = item.optJSONArray("Topics")
+                if (nested != null) walk(nested) else topics += item
+            }
+        }
+        walk(json.optJSONArray("RelatedTopics"))
+        topics.take(8).forEach { topic ->
+            val url = topic.optString("FirstURL")
+            if (url.isBlank()) return@forEach
+            val text = topic.optString("Text")
+            facts += fact(
+                FactCategory.OTHER, "Упоминание", url, query, id,
+                buildMap { if (text.isNotBlank()) put("Фрагмент", text.take(200)) }
+            )
+        }
+        return facts.distinctBy { it.value }.take(8)
+    }
+}
+
+/** Публичный поиск MediaWiki: статьи и совпадения по запросу. */
+private object WikipediaConnector : Connector {
+    override val id = "wikipedia"
+
+    override suspend fun collect(query: String, key: KeyRepository): List<RawFact> {
+        val json = Net.json(
+            "https://ru.wikipedia.org/w/api.php?action=query&list=search&format=json&utf8=1" +
+                "&srlimit=8&srsearch=${Net.urlEncode(query)}"
+        ).getOrNull() ?: return emptyList()
+        val items = json.optJSONObject("query")?.optJSONArray("search") ?: return emptyList()
+        val facts = ArrayList<RawFact>()
+        for (i in 0 until items.length()) {
+            val item = items.getJSONObject(i)
+            val title = item.optString("title")
+            if (title.isBlank()) continue
+            val url = "https://ru.wikipedia.org/wiki/" + Net.urlEncode(title.replace(' ', '_'))
+            val snippet = item.optString("snippet").replace(Regex("<[^>]+>"), "").trim()
+            facts += fact(
+                FactCategory.OTHER, "Упоминание", url, query, id,
+                buildMap {
+                    put("Заголовок", title.take(120))
+                    if (snippet.isNotBlank()) put("Фрагмент", snippet.take(200))
+                }
+            )
+        }
+        return facts
+    }
+}
+
+/** Публичный поиск сканов urlscan.io. */
+private object UrlscanConnector : Connector {
+    override val id = "urlscan"
+
+    override suspend fun collect(query: String, key: KeyRepository): List<RawFact> {
+        val json = Net.json(
+            "https://urlscan.io/api/v1/search/?q=${Net.urlEncode(query)}&size=8"
+        ).getOrNull() ?: return emptyList()
+        val results = json.optJSONArray("results") ?: return emptyList()
+        val facts = ArrayList<RawFact>()
+        for (i in 0 until minOf(results.length(), 8)) {
+            val item = results.getJSONObject(i)
+            val page = item.optJSONObject("page") ?: continue
+            val url = page.optString("url")
+            if (url.isBlank()) continue
+            facts += fact(
+                FactCategory.OTHER, "Упоминание", url, query, id,
+                buildMap {
+                    page.optString("domain").takeIf { it.isNotBlank() }?.let { put("Домен", it) }
+                    page.optString("ip").takeIf { it.isNotBlank() }?.let { put("IP", it) }
+                    page.optString("country").takeIf { it.isNotBlank() }?.let { put("Страна", it) }
+                }
+            )
+        }
+        return facts
+    }
+}
+
+/** Поддомены домена по данным SecurityTrails. */
+private object SecurityTrailsConnector : Connector {
+    override val id = "securitytrails"
+
+    override suspend fun collect(query: String, key: KeyRepository): List<RawFact> {
+        if (QueryDetector.detect(query) != QueryKind.DOMAIN) return emptyList()
+        val json = Net.json(
+            "https://api.securitytrails.com/v1/domain/${Net.urlEncode(query)}/subdomains",
+            mapOf("APIKEY" to key.key(id), "Accept" to "application/json")
+        ).getOrNull() ?: return emptyList()
+        val subs = json.optJSONArray("subdomains") ?: return emptyList()
+        val facts = ArrayList<RawFact>()
+        for (i in 0 until minOf(subs.length(), 12)) {
+            val sub = subs.optString(i)
+            if (sub.isBlank()) continue
+            facts += fact(
+                FactCategory.TECHNICAL, "Поддомен", "$sub.$query", query, id
+            )
+        }
+        return facts
+    }
+}
+
+/** Репутация IP-адреса по данным AbuseIPDB. */
+private object AbuseIpdbConnector : Connector {
+    override val id = "abuseipdb"
+
+    override suspend fun collect(query: String, key: KeyRepository): List<RawFact> {
+        if (QueryDetector.detect(query) != QueryKind.IP) return emptyList()
+        val json = Net.json(
+            "https://api.abuseipdb.com/api/v2/check?ipAddress=${Net.urlEncode(query)}&maxAgeInDays=90",
+            mapOf("Key" to key.key(id), "Accept" to "application/json")
+        ).getOrNull() ?: return emptyList()
+        val data = json.optJSONObject("data") ?: return emptyList()
+        val score = data.optInt("abuseConfidenceScore", -1)
+        val attrs = buildMap {
+            if (score >= 0) put("Оценка злоупотреблений", "$score%")
+            data.optString("countryCode").takeIf { it.isNotBlank() }?.let { put("Страна", it) }
+            data.optString("isp").takeIf { it.isNotBlank() }?.let { put("Провайдер", it) }
+            data.optString("usageType").takeIf { it.isNotBlank() }?.let { put("Тип использования", it) }
+            if (data.has("totalReports")) put("Жалоб", data.optInt("totalReports").toString())
+            data.optString("domain").takeIf { it.isNotBlank() }?.let { put("Домен", it) }
+        }
+        return listOf(fact(FactCategory.TECHNICAL, "IP-адрес", query, query, id, attrs))
+    }
+}
+
+/** Публичные профили GitLab по нику. */
+private object GitlabConnector : Connector {
+    override val id = "gitlab"
+
+    override suspend fun collect(query: String, key: KeyRepository): List<RawFact> {
+        val username = query.removePrefix("@").substringBefore(' ').trim()
+        if (username.isBlank()) return emptyList()
+        val response = runCatching {
+            Net.fetch("https://gitlab.com/api/v4/users?username=${Net.urlEncode(username)}")
+        }.getOrNull() ?: return emptyList()
+        if (!response.ok) return emptyList()
+        val users = runCatching { JSONArray(response.body) }.getOrNull() ?: return emptyList()
+        val facts = ArrayList<RawFact>()
+        for (i in 0 until minOf(users.length(), 5)) {
+            val user = users.optJSONObject(i) ?: continue
+            val nick = user.optString("username")
+            if (nick.isBlank()) continue
+            val url = user.optString("web_url").ifBlank { "https://gitlab.com/$nick" }
+            facts += fact(
+                FactCategory.PERSON, "Профиль", url, query, id,
+                buildMap {
+                    user.optString("name").takeIf { it.isNotBlank() }?.let { put("Имя", it) }
+                    put("Никнейм", nick)
+                    user.optString("public_email").takeIf { it.isNotBlank() }?.let { put("Почта", it) }
+                }
+            )
+        }
+        return facts
     }
 }
 
