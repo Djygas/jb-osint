@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import ru.jbosint.osint.BuildConfig
 import ru.jbosint.osint.core.model.ReportMeta
+import ru.jbosint.osint.core.report.HtmlReport
 import ru.jbosint.osint.core.report.JsonReport
 import ru.jbosint.osint.core.report.PdfReport
 import ru.jbosint.osint.core.report.ReportFonts
@@ -39,14 +40,15 @@ class ReportExporter(private val context: Context) {
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "Excel"
         ),
-        JSON("json", "application/json", "JSON")
+        JSON("json", "application/json", "JSON"),
+        HTML("html", "text/html", "HTML")
     }
 
     data class Exported(
         val uri: Uri,
         val mime: String,
         val fileName: String,
-        val format: Format,
+        val format: Format?,
         val publicFolder: String?
     )
 
@@ -70,8 +72,28 @@ class ReportExporter(private val context: Context) {
             Format.PDF -> PdfReport(meta, entry.data, fonts()).build()
             Format.XLSX -> XlsxReport(meta, entry.data).build()
             Format.JSON -> JsonReport(meta, entry.data).build().toByteArray(Charsets.UTF_8)
+            Format.HTML -> HtmlReport(meta, entry.data, intro = entry.photoNote)
+                .build().toByteArray(Charsets.UTF_8)
         }
 
+        deliver(fileName, bytes, format)
+    }
+
+    /**
+     * Сохраняет произвольный файл (HTML-отчёт Telegram-парсера, CSV-выгрузку аудитории)
+     * по тем же правилам: приватная копия для шаринга + публикация в JB_OSINT_Reports.
+     */
+    suspend fun save(fileName: String, bytes: ByteArray, mime: String): Exported =
+        withContext(Dispatchers.IO) {
+            deliver(fileName, bytes, format = null, mime = mime)
+        }
+
+    private fun deliver(
+        fileName: String,
+        bytes: ByteArray,
+        format: Format?,
+        mime: String = format?.mime ?: "application/octet-stream"
+    ): Exported {
         // 1) приватная копия для шаринга
         val shareDir = File(context.cacheDir, "share").apply { mkdirs() }
         // чистим старые файлы, чтобы кеш не разрастался
@@ -80,9 +102,9 @@ class ReportExporter(private val context: Context) {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", shareFile)
 
         // 2) копия в пользовательскую папку отчётов
-        val publicFolder = runCatching { publish(fileName, format.mime, bytes) }.getOrNull()
+        val publicFolder = runCatching { publish(fileName, mime, bytes) }.getOrNull()
 
-        Exported(uri, format.mime, fileName, format, publicFolder)
+        return Exported(uri, mime, fileName, format, publicFolder)
     }
 
     /** Публикация в общую папку JB_OSINT_Reports. Возвращает отображаемый путь или null. */

@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VpnKey
@@ -128,6 +129,7 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
                 when (state.screen) {
                     Screen.HOME -> HomeScreen(state, vm)
                     Screen.RESULTS -> ResultsScreen(state, vm)
+                    Screen.TELEGRAM -> TelegramScreen(state, vm)
                     Screen.KEYS -> KeysScreen(state, vm)
                     Screen.SETTINGS -> SettingsScreen(state, vm)
                 }
@@ -140,6 +142,7 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
 private fun JbBottomBar(current: Screen, onNavigate: (Screen) -> Unit) {
     val items = listOf(
         Triple(Screen.HOME, "Поиск", Icons.Filled.Search),
+        Triple(Screen.TELEGRAM, "Telegram", Icons.Filled.Forum),
         Triple(Screen.KEYS, "Ключи", Icons.Filled.VpnKey),
         Triple(Screen.SETTINGS, "Настройки", Icons.Filled.Settings)
     )

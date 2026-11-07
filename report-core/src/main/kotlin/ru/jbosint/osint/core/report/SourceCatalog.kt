@@ -21,7 +21,7 @@ object SourceCatalog {
         SourceRef("tgstat", "Telegram-аналитика (TGStat)", "https://tgstat.ru"),
         SourceRef("vk", "VK API", "https://vk.com"),
         SourceRef("dyxless", "Dyxless", "https://t.me"),
-        SourceRef("telesint", "TeleSINT", "https://t.me"),
+        SourceRef("telesint", "TeleSINT", "https://telesint.dev"),
         SourceRef("opencorporates", "OpenCorporates", "https://opencorporates.com"),
         SourceRef("google", "Google Custom Search", "https://www.google.com"),
         SourceRef("yandex", "Яндекс XML", "https://yandex.ru"),

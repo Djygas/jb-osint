@@ -50,6 +50,7 @@ object DiagSamples {
         "securitytrails" to "example.com",
         "dyxless" to "diag-check-zz@example.invalid",
         "leakcheck" to "diag-check-zz@example.invalid",
+        "telesint" to "@telegram",
         "faceapi" to "face-photo.jpg",
         "opencorporates" to "tesla",
         "tgstat" to "osint",
@@ -82,7 +83,8 @@ object DiagSamples {
         "tgstat" to "слово, канал или ссылка",
         "github" to "ник или имя",
         "gitlab" to "ник",
-        "dyxless" to "email, телефон, IP, полное ФИО (3 слова), Telegram-ник или id:123456789"
+        "dyxless" to "email, телефон, IP, полное ФИО (3 слова), Telegram-ник или id:123456789",
+        "telesint" to "ник (@name), телефон, имя или id:123456789"
     )
 
     fun acceptedFor(id: String): String? = accepted[id]

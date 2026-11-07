@@ -78,10 +78,30 @@ object Connectors {
         NumverifyConnector, HunterConnector, IpinfoConnector, TgstatConnector,
         VkConnector, DyxlessConnector, OpenCorporatesConnector, GoogleConnector, YandexConnector,
         BraveConnector, SerpApiConnector, DdgConnector, WikipediaConnector,
-        UrlscanConnector, SecurityTrailsConnector, AbuseIpdbConnector, GitlabConnector
+        UrlscanConnector, SecurityTrailsConnector, AbuseIpdbConnector, GitlabConnector,
+        TeleSintConnector
     )
 
     fun byId(id: String): Connector? = all.firstOrNull { it.id == id }
+}
+
+/**
+ * TeleSINT: поиск профилей и каналов Telegram по нику, телефону или имени.
+ * Запрос платный (1 ₽ за успешный ответ), поэтому модуль работает только при
+ * заданном ключе и только для типов запросов, которые сервис принимает.
+ */
+private object TeleSintConnector : Connector {
+    override val id = "telesint"
+
+    override suspend fun collect(query: String, key: KeyRepository): List<RawFact> {
+        val token = key.key(id)
+        if (token.isBlank()) return emptyList()
+        val kind = QueryDetector.detect(query)
+        if (kind !in setOf(QueryKind.USERNAME, QueryKind.PHONE, QueryKind.NAME)) return emptyList()
+        return runCatching { TeleSint.search(token, query, limit = 20) }
+            .getOrElse { emptyList() }
+            .take(40)
+    }
 }
 
 private object GithubConnector : Connector {

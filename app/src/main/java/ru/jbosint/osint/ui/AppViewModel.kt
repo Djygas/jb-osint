@@ -70,9 +70,15 @@ import ru.jbosint.osint.data.ProviderCatalog
 import ru.jbosint.osint.data.ProviderSpec
 import ru.jbosint.osint.data.SearchEngine
 import ru.jbosint.osint.data.SettingsStore
+import ru.jbosint.osint.core.model.ReportMeta
+import ru.jbosint.osint.core.report.HtmlReport
+import ru.jbosint.osint.core.report.XlsxReport
+import ru.jbosint.osint.data.TgDossier
+import ru.jbosint.osint.data.TgExport
+import ru.jbosint.osint.data.TgParser
 import ru.jbosint.osint.report.ReportExporter
 
-enum class Screen { HOME, RESULTS, KEYS, SETTINGS }
+enum class Screen { HOME, RESULTS, TELEGRAM, KEYS, SETTINGS }
 
 /** Состояние быстрой настройки модуля: прогресс или предложение ручной настройки. */
 data class AutoSetupUi(
@@ -100,6 +106,17 @@ data class ProviderUi(
 
 data class ShareRequest(val uri: Uri, val mime: String, val fileName: String)
 
+/** Формат выгрузки Telegram-парсера. */
+enum class TgFormat(val extension: String, val mime: String, val label: String) {
+    HTML("html", "text/html", "HTML-отчёт"),
+    CSV("csv", "text/csv", "CSV"),
+    XLSX(
+        "xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Excel"
+    )
+}
+
 /** Краткая карточка снимка, по которому выполняется или выполнен поиск. */
 data class PhotoCard(
     val fileName: String,
@@ -120,6 +137,17 @@ data class PreviewState(
 ) {
     val isEmpty: Boolean get() = facts.isEmpty()
 }
+
+/** Состояние Telegram-парсера: ввод канала, прогресс сбора и готовый список аудитории. */
+data class TgUi(
+    val channel: String = "",
+    val pages: Int = TgParser.DEFAULT_MAX_PAGES,
+    val running: Boolean = false,
+    val exporting: Boolean = false,
+    val stage: String = "",
+    val error: String? = null,
+    val dossier: TgDossier? = null
+)
 
 data class UiState(
     val ready: Boolean = false,
@@ -154,6 +182,7 @@ data class UiState(
     val manualDraft: CustomModule? = null,
     val manualKey: String = "",
     val toast: String? = null,
+    val tg: TgUi = TgUi(),
     // ---------------------------------------------- интеллектуальный ассистент
     val assistantConfigured: Boolean = false,
     val assistantProvider: String = AssistantCatalog.DEFAULT_PROVIDER,
@@ -1718,6 +1747,108 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 research = if (s.resultEntry?.id == entry.id) entry.aiResearch else s.research,
                 history = entries
             )
+        }
+    }
+
+    // -------------------------------------------------------- telegram-парсер
+
+    fun setTgChannel(value: String) = _state.update { it.copy(tg = it.tg.copy(channel = value, error = null)) }
+
+    fun setTgPages(pages: Int) = _state.update {
+        it.copy(tg = it.tg.copy(pages = pages.coerceIn(1, 20)))
+    }
+
+    fun runTelegramParse() {
+        val current = _state.value.tg
+        if (current.running) return
+        val channel = current.channel.trim()
+        if (channel.isBlank()) {
+            _state.update { it.copy(tg = it.tg.copy(error = "Укажите канал: @name или ссылку t.me/name")) }
+            return
+        }
+        if (keys.key("telesint").isBlank()) {
+            _state.update {
+                it.copy(tg = it.tg.copy(error = "Сначала добавьте ключ TeleSINT в разделе «Модули»"))
+            }
+            return
+        }
+        _state.update { it.copy(tg = it.tg.copy(running = true, stage = "Подготовка…", error = null, dossier = null)) }
+        viewModelScope.launch {
+            val outcome = runCatching {
+                TgParser.collect(
+                    key = keys.key("telesint"),
+                    channel = channel,
+                    maxPages = current.pages
+                ) { stage -> _state.update { it.copy(tg = it.tg.copy(stage = stage)) } }
+            }
+            outcome.onSuccess { dossier ->
+                _state.update {
+                    it.copy(
+                        tg = it.tg.copy(running = false, stage = "", dossier = dossier),
+                        toast = "Собрано ${dossier.members.size} участников"
+                    )
+                }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        tg = it.tg.copy(running = false, stage = "", error = error.message ?: "Не удалось собрать данные")
+                    )
+                }
+            }
+        }
+    }
+
+    /** Выгрузка результата парсера: HTML-отчёт, CSV или Excel. */
+    fun exportTelegram(format: TgFormat) {
+        val dossier = _state.value.tg.dossier ?: run {
+            _state.update { it.copy(toast = "Сначала соберите аудиторию канала") }
+            return
+        }
+        if (_state.value.tg.exporting) return
+        _state.update { it.copy(tg = it.tg.copy(exporting = true)) }
+        viewModelScope.launch {
+            val meta = ReportMeta(
+                analyst = _state.value.analyst,
+                reportId = "TG-" + java.text.SimpleDateFormat("yyMMdd-HHmm", java.util.Locale.US)
+                    .format(java.util.Date(dossier.collectedAt)),
+                createdAt = dossier.collectedAt,
+                appVersion = BuildConfig.VERSION_NAME,
+                queryType = "Telegram-канал",
+                classification = "КОНФИДЕНЦИАЛЬНО · ДЛЯ ВНУТРЕННЕГО ИСПОЛЬЗОВАНИЯ"
+            )
+            val bytes = runCatching {
+                when (format) {
+                    TgFormat.HTML -> {
+                        val intro = "Канал ${dossier.title} (${dossier.link}): " +
+                            "загружено ${dossier.members.size} участников за ${dossier.pagesLoaded} стр." +
+                            if (dossier.hasMore) ", выгрузка неполная — увеличьте число страниц." else "."
+                        HtmlReport(meta, TgExport.data(dossier), intro = intro, factsTitle = "Профиль канала и аудитория")
+                            .build().toByteArray(Charsets.UTF_8)
+                    }
+                    TgFormat.CSV -> TgExport.csv(dossier).toByteArray(Charsets.UTF_8)
+                    TgFormat.XLSX -> XlsxReport(meta, TgExport.data(dossier)).build()
+                }
+            }
+            _state.update { it.copy(tg = it.tg.copy(exporting = false)) }
+            bytes.onSuccess { data ->
+                val outcome = runCatching {
+                    exporter.save(TgExport.fileName(dossier, format.extension), data, format.mime)
+                }
+                outcome.onSuccess { exported ->
+                    val where = exported.publicFolder
+                    _state.update {
+                        it.copy(
+                            toast = if (where != null) "${format.label} сохранён: $where"
+                            else "${format.label} готов — используйте «Поделиться»"
+                        )
+                    }
+                    _shareEvents.emit(ShareRequest(exported.uri, exported.mime, exported.fileName))
+                }.onFailure { error ->
+                    _state.update { it.copy(toast = "Ошибка выгрузки: ${error.message ?: "неизвестная"}") }
+                }
+            }.onFailure { error ->
+                _state.update { it.copy(toast = "Ошибка выгрузки: ${error.message ?: "неизвестная"}") }
+            }
         }
     }
 

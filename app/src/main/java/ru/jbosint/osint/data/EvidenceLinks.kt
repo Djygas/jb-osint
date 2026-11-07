@@ -27,6 +27,7 @@ object EvidenceLinks {
             "tgstat" -> "https://tgstat.ru/channel/${enc(v.trimStart('@'))}"
             "vk" -> "https://vk.com/${enc(v.trimStart('@'))}"
             "dyxless" -> "https://t.me/${enc(v.trimStart('@'))}"
+            "telesint" -> if (v.startsWith("@")) "https://t.me/${enc(v.trimStart('@'))}" else "https://telesint.dev"
             "opencorporates" -> "https://opencorporates.com/companies?q=${enc(query)}&jurisdiction_code=ru"
             "google" -> "https://www.google.com/search?q=${enc(query)}"
             "yandex" -> "https://yandex.ru/search/?text=${enc(query)}"

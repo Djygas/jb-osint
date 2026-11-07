@@ -79,6 +79,10 @@ object ProviderCatalog {
             requiresSecondField = "Максимум ₽ на запрос (Telegram-поиск — от 10)"
         ),
         ProviderSpec(
+            "telesint", "TeleSINT", "Профили и каналы Telegram, участники групп",
+            "Api-Key (32 символа)", "https://docs.telesint.dev/en/api/", ProviderGroup.SOCIAL
+        ),
+        ProviderSpec(
             "opencorporates", "OpenCorporates", "Юридические лица",
             "api_token", "https://opencorporates.com/api_accounts/new", ProviderGroup.REGISTRY
         ),
@@ -282,6 +286,30 @@ class KeyValidator(private val repo: KeyRepository) {
             }
             "vk" -> { { probeVk(key) } }
             "dyxless" -> { { probeDyxless(key) } }
+            "telesint" -> {
+                {
+                    // /v1/me/ бесплатен: 200 — токен и баланс, 401 — токен отклонён.
+                    if (!TeleSint.looksLikeKey(key)) {
+                        KeyCheck(KeyState.INVALID, "Ключ TeleSINT — 32 символа")
+                    } else {
+                        val probe = runCatching { TeleSint.account(key) }
+                        probe.fold(
+                            onSuccess = { acc ->
+                                val balance = if (acc.balance > 0) "баланс ${acc.balance.toInt()} ₽" else "баланс не указан"
+                                KeyCheck(KeyState.VALID, "Ключ принят, $balance")
+                            },
+                            onFailure = { error ->
+                                val api = error as? TeleSint.ApiException
+                                when (api?.code) {
+                                    401, 403 -> KeyCheck(KeyState.INVALID, api.message ?: "Ключ отклонён")
+                                    429 -> KeyCheck(KeyState.VALID, "Ключ активен, превышен лимит запросов")
+                                    else -> KeyCheck(KeyState.INVALID, api?.message ?: (error.message ?: "Нет связи с сервисом"))
+                                }
+                            }
+                        )
+                    }
+                }
+            }
             "opencorporates" -> {
                 {
                     probeHttp(
