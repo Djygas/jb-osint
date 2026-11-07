@@ -108,6 +108,7 @@ class PdfReport(
         dossierSection()
         documentsSection()
         mediaSection()
+        faceSection()
         aiSection()
         confidenceSection()
         limitationsSection()
@@ -1058,6 +1059,66 @@ class PdfReport(
         bullet("Совпадение изображения в нескольких профилях указывает на использование одного аватара " +
             "либо на копирование контента; это не тождественно принадлежности одному лицу.")
         bullet("Ссылки на медиа приведены без встраивания файлов: отчёт не содержит бинарных вложений.")
+    }
+
+    // ------------------------------------------------------------- достоверность
+
+    /**
+     * Результаты обратного поиска по фотографии: страницы, где встретилось то же
+     * лицо или изображение. Раздел отделён от «Медиа», потому что здесь важны
+     * схожесть, порог и статус проверки, а не сам файл.
+     */
+    private fun faceSection() {
+        val faces = ReportSections.faceFacts(data)
+        if (faces.isEmpty()) return
+        newContentPage("Поиск по лицу")
+        h1("4.1. Результаты поиска по лицу")
+        p("Раздел содержит совпадения, найденные обратным поиском по загруженной фотографии. " +
+            "Для каждой находки указаны ресурс, ссылка на страницу, схожесть по шкале сервиса и " +
+            "статус проверки. Совпадение изображения указывает на использование того же снимка или " +
+            "похожего лица, но само по себе не подтверждает тождество личности.")
+
+        if (meta.photoNote.isNotBlank()) {
+            gap(4f)
+            callout(meta.photoNote)
+            gap(6f)
+        }
+
+        label("СОВПАДЕНИЯ ПО ФОТО (${faces.size})")
+        gap(4f)
+        table(
+            columns = listOf(
+                Column("№", 20f),
+                Column("Страница", contentW - 20f - 60f - 74f - 54f - 96f),
+                Column("Схожесть", 60f, Align.RIGHT),
+                Column("Статус", 74f),
+                Column("Дата", 54f),
+                Column("Источник", 96f)
+            ),
+            rows = faces.take(60).mapIndexed { i, f ->
+                listOf(
+                    (i + 1).toString(),
+                    f.value.take(80),
+                    ReportSections.faceSimilarity(f)?.let { "$it%" } ?: "—",
+                    "● ${ReportSections.faceStatus(f, data)}",
+                    ReportSections.dateText(f.firstSeen),
+                    ReportSections.sourceNames(f).ifBlank { "—" }
+                )
+            }
+        )
+
+        gap(10f)
+        h2("4.1.1. Карточки находок")
+        faces.take(30).forEach { f ->
+            val url = ReportSections.evidenceUrl(f)
+            bullet("${f.value.take(90)}" + if (url.isBlank()) "" else " · $url")
+            bullet("   " + ReportSections.faceNote(f, data))
+        }
+
+        gap(10f)
+        callout("Порог 90% и независимое подтверждение трактуются как «Подтверждено»; 60–89% — " +
+            "«Требует проверки». Перед любыми выводами сверьте профиль вручную: имя, город, " +
+            "круг общения и даты публикаций.")
     }
 
     // ------------------------------------------------------------- достоверность

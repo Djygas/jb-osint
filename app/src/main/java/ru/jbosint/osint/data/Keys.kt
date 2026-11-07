@@ -124,6 +124,11 @@ object ProviderCatalog {
             "api_key", "https://saucenao.com/user.php?page=search-api", ProviderGroup.SEARCH, photoOnly = true
         ),
         ProviderSpec(
+            "faceapi", "Поиск по лицу (ProFaceFinder)", "Обратный поиск лица: страницы с тем же лицом среди публичных изображений",
+            "API-ключ сервиса", "https://profacefinder.com", ProviderGroup.SEARCH,
+            requiresSecondField = "URL API (https)", photoOnly = true
+        ),
+        ProviderSpec(
             "google", "Google Custom Search", "Веб-индекс",
             "API key", "https://developers.google.com/custom-search/v1/introduction", ProviderGroup.SEARCH,
             requiresSecondField = "cx"
@@ -282,6 +287,28 @@ class KeyValidator(private val repo: KeyRepository) {
                     probeHttp(
                         "https://api.opencorporates.com/v0.4/companies/search?q=test&api_token=${Net.urlEncode(key)}"
                     )
+                }
+            }
+            "faceapi" -> {
+                {
+                    // Проверяем адрес эндпоинта, а не снимок: любой ответ, кроме 404/redirect,
+                    // означает, что сервис доступен. Ключ проверяется первым же реальным поиском.
+                    val endpoint = repo.secondField(id)
+                    if (!endpoint.startsWith("https://")) {
+                        KeyCheck(KeyState.INVALID, "Адрес API должен начинаться с https://")
+                    } else {
+                        val probe = Net.fetch(endpoint, mapOf("Authorization" to "Bearer $key"), attempts = 1)
+                        val redirect = probe.crossHostRedirect
+                        when {
+                            redirect != null -> KeyCheck(KeyState.INVALID, "Сервис перенаправляет на $redirect — ключ не отправлен")
+                            probe.code == 404 -> KeyCheck(KeyState.INVALID, "Адрес API не найден (404)")
+                            probe.code == 401 || probe.code == 403 -> KeyCheck(KeyState.INVALID, "Сервис отклонил ключ (${probe.code})")
+                            probe.code in 200..299 || probe.code == 400 || probe.code == 405 || probe.code == 422 ->
+                                KeyCheck(KeyState.VALID, "Сервис доступен, ключ сохранён")
+                            probe.code == 429 -> KeyCheck(KeyState.VALID, "Сервис доступен, превышен лимит запросов")
+                            else -> KeyCheck(KeyState.INVALID, "Ответ сервиса ${probe.code}")
+                        }
+                    }
                 }
             }
             "google" -> {

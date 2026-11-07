@@ -308,6 +308,137 @@ object ReverseImage {
         }
 }
 
+/**
+ * Совпадение поиска по лицу: страница, где встретилось то же лицо.
+ * Схожесть приходит от сервиса и трактуется только как оценка совпадения изображения.
+ */
+data class FaceHit(
+    val url: String,
+    val title: String,
+    val similarity: Int,
+    val provider: String,
+    val status: String
+)
+
+/**
+ * Поиск по лицу через внешний сервис. Публичного документированного API у
+ * ProFaceFinder нет, поэтому адрес эндпоинта и ключ задаёт пользователь
+ * (модуль работает с любым сервисом, принимающим multipart-загрузку снимка
+ * и возвращающим JSON со списком совпадений). Разбор ответа терпимый:
+ * поддерживаются поля url/link/page_url, similarity/score/confidence.
+ */
+object FaceSearch {
+
+    const val MIN_SIMILARITY = 50
+
+    fun statusFor(similarity: Int, confirmed: Boolean): String = when {
+        similarity >= 90 && confirmed -> "Подтверждено"
+        similarity >= 60 -> "Требует проверки"
+        else -> "Не подтверждено"
+    }
+
+    suspend fun search(
+        endpoint: String,
+        key: String,
+        photo: PhotoAnalysis,
+        limit: Int = 10
+    ): List<FaceHit> = withContext(Dispatchers.IO) {
+        val target = endpoint.trim()
+        if (!target.startsWith("https://")) return@withContext emptyList()
+        val boundary = "----jb" + System.nanoTime()
+        val body = ByteArrayOutputStream()
+        fun field(name: String, value: String) {
+            body.write("--$boundary\r\n".toByteArray())
+            body.write("Content-Disposition: form-data; name=\"$name\"\r\n\r\n".toByteArray())
+            body.write(value.toByteArray())
+            body.write("\r\n".toByteArray())
+        }
+        if (key.isNotBlank()) field("api_key", key)
+        field("limit", limit.toString())
+        body.write("--$boundary\r\n".toByteArray())
+        body.write(
+            ("Content-Disposition: form-data; name=\"image\"; filename=\"${photo.fileName}\"\r\n" +
+                "Content-Type: ${photo.mime}\r\n\r\n").toByteArray()
+        )
+        body.write(photo.bytes)
+        body.write("\r\n--$boundary--\r\n".toByteArray())
+        val headers = if (key.isBlank()) emptyMap() else mapOf("Authorization" to "Bearer $key")
+        val response = runCatching {
+            Net.postMultipart(target, body.toByteArray(), "multipart/form-data; boundary=$boundary", headers)
+        }.getOrElse { return@withContext emptyList() }
+        parse(response, photo.fileName).take(limit)
+    }
+
+    /** Разбор ответа сервиса: массив совпадений в любом из типовых конвертов. */
+    fun parse(body: String, subject: String = ""): List<FaceHit> {
+        val root = runCatching { JSONObject(body) }.getOrNull()
+            ?: runCatching { org.json.JSONArray(body) }.getOrNull()
+            ?: return emptyList()
+        val items = collect(root, 0)
+        val hits = items.mapNotNull { item -> toHit(item) }
+            .filter { it.similarity >= MIN_SIMILARITY }
+            .distinctBy { it.url }
+            .sortedByDescending { it.similarity }
+        return hits
+    }
+
+    private fun collect(node: Any?, depth: Int): List<JSONObject> {
+        if (node == null || depth > 4) return emptyList()
+        if (node is org.json.JSONArray) {
+            return (0 until node.length()).flatMap { index ->
+                when (val child = node.opt(index)) {
+                    is JSONObject -> listOf(child)
+                    is org.json.JSONArray -> collect(child, depth + 1)
+                    else -> emptyList()
+                }
+            }
+        }
+        val obj = node as? JSONObject ?: return emptyList()
+        for (key in listOf("results", "matches", "data", "hits", "items", "images", "faces")) {
+            val child = obj.opt(key)
+            if (child is org.json.JSONArray || child is JSONObject) {
+                val found = collect(child, depth + 1)
+                if (found.isNotEmpty()) return found
+            }
+        }
+        // Единственный объект-совпадение без конверта.
+        return if (obj.has("url") || obj.has("link") || obj.has("page_url")) listOf(obj) else emptyList()
+    }
+
+    private fun toHit(item: JSONObject): FaceHit? {
+        val url = firstString(item, "url", "link", "page_url", "profile_url", "source", "href")
+            ?.takeIf { it.startsWith("http") } ?: return null
+        val similarity = firstNumber(item, "similarity", "score", "confidence", "match", "similarity_percent")
+            .let { raw -> if (raw in 0.0..1.0) (raw * 100).toInt() else raw.toInt() }
+            .coerceIn(0, 100)
+        val title = firstString(item, "title", "name", "source_name", "domain", "site", "page_title")
+            ?: url.substringAfter("://").substringBefore('/')
+        val provider = firstString(item, "provider", "engine", "service") ?: "Поиск по лицу"
+        return FaceHit(url, title.take(120), similarity, provider, statusFor(similarity, false))
+    }
+
+    private fun firstString(obj: JSONObject, vararg keys: String): String? {
+        for (key in keys) {
+            val value = obj.opt(key) ?: continue
+            if (value is String && value.isNotBlank()) return value.trim()
+        }
+        return null
+    }
+
+    private fun firstNumber(obj: JSONObject, vararg keys: String): Double {
+        for (key in keys) {
+            val raw = obj.opt(key) ?: continue
+            val value = when (raw) {
+                is Number -> raw.toDouble()
+                is String -> raw.replace(',', '.').toDoubleOrNull() ?: 0.0
+                else -> 0.0
+            }
+            if (value > 0.0) return value
+        }
+        return 0.0
+    }
+}
+
 /** Пересборка сводки из нескольких наборов фактов (фото + уточняющие поиски). */
 object DataMerge {
 

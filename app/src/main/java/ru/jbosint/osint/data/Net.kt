@@ -151,5 +151,32 @@ object Net {
         }
     }
 
+    /** Multipart-загрузка с произвольными заголовками (ключ сервиса в заголовке). */
+    suspend fun postMultipart(
+        url: String,
+        bytes: ByteArray,
+        contentType: String,
+        headers: Map<String, String> = emptyMap(),
+        timeoutMs: Long = 60_000
+    ): String = withContext(Dispatchers.IO) {
+        require(url.startsWith("https://")) { "Разрешён только HTTPS" }
+        val builder = Request.Builder()
+            .url(url)
+            .header("User-Agent", "JB-OSINT/1.0 (Android)")
+        headers.forEach { (name, value) -> builder.header(name, value) }
+        val request = builder.post(bytes.toRequestBody(contentType.toMediaType())).build()
+        val upload = client.newBuilder()
+            .callTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .build()
+        upload.newCall(request).execute().use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IOException("HTTP ${response.code}: ${text.take(200)}")
+            }
+            text
+        }
+    }
+
     fun urlEncode(value: String): String = java.net.URLEncoder.encode(value, "UTF-8")
 }

@@ -103,6 +103,7 @@ object ProviderGuess {
         "securitytrails.com" to "securitytrails",
         "abuseipdb.com" to "abuseipdb",
         "saucenao.com" to "saucenao",
+        "profacefinder.com" to "faceapi",
         "googleapis.com" to "google"
     )
 
@@ -127,6 +128,7 @@ object ProviderGuess {
         "securitytrails" to "securitytrails",
         "abuseipdb" to "abuseipdb",
         "saucenao" to "saucenao",
+        "profacefinder" to "faceapi", "профейс" to "faceapi", "facecheck" to "faceapi",
         "google" to "google", "гугл" to "google"
     )
 

@@ -48,6 +48,70 @@ object ReportSections {
 
     fun mediaFacts(data: AggregatedData): List<Fact> = data.facts.filter { isMedia(it) }
 
+    /**
+     * Совпадения обратного поиска по фотографии: страницы, где встретилось то же
+     * лицо или то же изображение. Метаданные самого файла (хеш, EXIF, размер)
+     * сюда не попадают — это не находки, а свойства снимка.
+     */
+    fun faceFacts(data: AggregatedData): List<Fact> = data.facts.filter { fact ->
+        val kind = fact.kind.lowercase()
+        val match = kind.contains("совпадени") &&
+            (kind.contains("фото") || kind.contains("изображени") || kind.contains("лиц"))
+        match || fact.sourceIds.any { it == "faceapi" || it == "face" }
+    }
+
+    /** Схожесть найденного совпадения в процентах (или null, если сервис её не сообщил). */
+    fun faceSimilarity(fact: Fact): Int? {
+        for (key in listOf("схожесть", "совпадение", "similarity", "score")) {
+            val raw = fact.attributes.entries.firstOrNull { it.key.equals(key, true) }?.value ?: continue
+            val number = Regex("\\d{1,3}([.,]\\d+)?").find(raw)?.value?.replace(',', '.') ?: continue
+            val value = number.toDoubleOrNull() ?: continue
+            return if (value <= 1.0 && raw.contains('.')) (value * 100).toInt() else value.toInt()
+        }
+        return null
+    }
+
+    /**
+     * Статус совпадения: схожесть ≥ 90% и подтверждение тем же ресурсом от другого
+     * независимого модуля — «Подтверждено»; 60–89% либо 90% без подтверждения —
+     * «Требует проверки»; ниже — «Не подтверждено». Статус относится к совпадению
+     * изображения, а не к тождеству личности.
+     */
+    fun faceStatus(fact: Fact, data: AggregatedData): String {
+        val similarity = faceSimilarity(fact)
+        val host = evidenceUrl(fact).substringAfter("://").substringBefore('/').removePrefix("www.")
+        val confirmedElsewhere = data.facts.any { other ->
+            if (other === fact) return@any false
+            // подтверждением считается только независимый модуль, а не тот же источник
+            if (other.sourceIds.any { it in fact.sourceIds }) return@any false
+            val samePage = other.value.equals(fact.value, ignoreCase = true)
+            val sameHost = host.isNotBlank() && other.value.contains(host, ignoreCase = true)
+            (samePage || sameHost) && (faceSimilarity(other) ?: 0) >= 60
+        }
+        return when {
+            similarity == null -> "Требует проверки"
+            similarity >= 90 && confirmedElsewhere -> "Подтверждено"
+            similarity >= 60 -> "Требует проверки"
+            else -> "Не подтверждено"
+        }
+    }
+
+    /** Примечание к совпадению: провайдер, порог и оговорка о пределах вывода. */
+    fun faceNote(fact: Fact, data: AggregatedData): String {
+        val provider = fact.attributes.entries.firstOrNull { it.key.equals("ресурс", true) }?.value
+            ?: fact.attributes.entries.firstOrNull { it.key.equals("провайдер", true) }?.value
+            ?: sourceNames(fact)
+        val similarity = faceSimilarity(fact)?.let { "$it%" } ?: "не указана"
+        val status = faceStatus(fact, data)
+        return buildString {
+            append("Сервис: ").append(provider.ifBlank { "—" })
+            append("; схожесть: ").append(similarity)
+            append("; вывод: ").append(status.lowercase())
+            if (status != "Подтверждено") append(" — требуется ручная сверка профиля")
+            append(". Совпадение изображения не подтверждает тождество личности.")
+        }
+    }
+
     private fun isMedia(fact: Fact): Boolean {
         if (fact.value.contains(imageExt)) return true
         if (fact.attributes.values.any { it.contains(imageExt) }) return true

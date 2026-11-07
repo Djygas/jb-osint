@@ -46,6 +46,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import ru.jbosint.osint.BuildConfig
 import ru.jbosint.osint.data.AssistantCatalog
+import ru.jbosint.osint.data.PerplexityAgent
 import ru.jbosint.osint.data.KeyState
 
 @Composable
@@ -492,6 +493,28 @@ private fun AssistantSection(state: UiState, vm: AppViewModel) {
                         )
                     }
                     if (rowModels.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+        if (provider.agent) {
+            Spacer(Modifier.height(12.dp))
+            Text("Уровень усилий Agent API", style = MaterialTheme.typography.titleSmall, color = JbText)
+            Spacer(Modifier.height(3.dp))
+            Text(
+                "Глубина поиска и анализа: чем выше, тем больше источников проверяет сервис.",
+                style = MaterialTheme.typography.bodySmall,
+                color = JbMuted
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                PerplexityAgent.presets.forEach { (id, note) ->
+                    ModelChip(
+                        title = id,
+                        note = note,
+                        selected = state.assistantPreset == id,
+                        modifier = Modifier.weight(1f),
+                        onClick = { vm.setAssistantPreset(id) }
+                    )
                 }
             }
         }

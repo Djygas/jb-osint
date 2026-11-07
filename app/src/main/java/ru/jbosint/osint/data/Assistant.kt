@@ -44,7 +44,9 @@ data class AssistantProvider(
     val defaultModel: String,
     val models: List<AssistantModel>,
     val probe: AssistantProbe = AssistantProbe.OPENAI_MODELS,
-    val custom: Boolean = false
+    val custom: Boolean = false,
+    /** Работает через Agent API (`/v1/agent`) с инструментами поиска, а не `/chat/completions`. */
+    val agent: Boolean = false
 )
 
 /**
@@ -60,6 +62,9 @@ object AssistantCatalog {
     const val TOKENS_URL = "https://huggingface.co/settings/tokens"
     const val DEFAULT_MODEL = "openai/gpt-oss-20b"
     const val DEFAULT_PROVIDER = "hf"
+
+    /** Agent API Perplexity: один запрос с инструментами поиска и структурированным ответом. */
+    const val AGENT_URL = "https://api.perplexity.ai/v1/agent"
 
     val models: List<AssistantModel> = listOf(
         AssistantModel("openai/gpt-oss-20b", "GPT-OSS 20B", "быстрый, для черновиков"),
@@ -126,6 +131,17 @@ object AssistantCatalog {
             )
         ),
         AssistantProvider(
+            id = "perplexity", title = "Perplexity", baseUrl = "https://api.perplexity.ai",
+            docsUrl = "https://www.perplexity.ai/settings/api", keyHint = "pplx-…",
+            defaultModel = "sonar-pro",
+            models = listOf(
+                AssistantModel("sonar-pro", "Sonar Pro", "поиск с источниками"),
+                AssistantModel("sonar", "Sonar", "быстрый поиск"),
+                AssistantModel("sonar-reasoning-pro", "Sonar Reasoning Pro", "разбор со ссылками")
+            ),
+            probe = AssistantProbe.OPENAI_MODELS, agent = true
+        ),
+        AssistantProvider(
             id = "custom", title = "Свой сервер", baseUrl = "",
             docsUrl = "https://platform.openai.com/docs/api-reference/chat", keyHint = "ключ сервера",
             defaultModel = "", models = emptyList(), custom = true
@@ -168,6 +184,7 @@ object AssistantCatalog {
         key.startsWith("hf_") -> provider("hf")
         key.startsWith("sk-or-v1-") -> provider("openrouter")
         key.startsWith("gsk_") -> provider("groq")
+        key.startsWith("pplx-") -> provider("perplexity")
         key.startsWith("sk-") -> provider("openai")
         else -> null
     }
@@ -385,6 +402,277 @@ object AssistantPrompts {
 }
 
 /** Разбор ответов модели: код-фенсы, лишний текст и вложенные обёртки отбрасываются. */
+/** Источник из ответа Agent API. */
+data class AgentSource(val title: String, val url: String, val snippet: String = "")
+
+/** Факт, найденный моделью в открытых источниках. */
+data class AgentFact(
+    val type: String,
+    val value: String,
+    val source: String = "",
+    val date: String = "",
+    val status: String = "",
+    val note: String = ""
+)
+
+/**
+ * Структурированный ответ Agent API: тема, краткое резюме, факты со ссылками,
+ * аналитика и ограничения. Используется кнопкой «Интернет-поиск» и попадает
+ * в отчёт как есть, без пересказа модели.
+ */
+data class AgentReport(
+    val subject: String,
+    val summary: String,
+    val analysis: String,
+    val limitations: String,
+    val facts: List<AgentFact>,
+    val sources: List<AgentSource>,
+    val responseId: String = "",
+    val cached: Boolean = false
+) {
+    fun asText(): String = buildString {
+        if (subject.isNotBlank()) append("Тема: ").append(subject).append("\n\n")
+        if (summary.isNotBlank()) append(summary.trim()).append("\n\n")
+        if (facts.isNotEmpty()) {
+            append("Установленные сведения:\n")
+            facts.forEach { fact ->
+                append("- ").append(fact.type).append(": ").append(fact.value)
+                if (fact.status.isNotBlank()) append(" (").append(fact.status).append(")")
+                if (fact.source.isNotBlank()) append(" — ").append(fact.source)
+                append('\n')
+            }
+            append('\n')
+        }
+        if (analysis.isNotBlank()) append(analysis.trim()).append("\n\n")
+        if (limitations.isNotBlank()) append("Ограничения: ").append(limitations.trim()).append("\n\n")
+        if (sources.isNotEmpty()) {
+            append("Источники:\n")
+            sources.forEach { source ->
+                append("- ").append(source.title.ifBlank { source.url })
+                if (source.url.isNotBlank()) append(" — ").append(source.url)
+                append('\n')
+            }
+        }
+    }.trim()
+}
+
+/**
+ * Клиент Agent API Perplexity (`POST /v1/agent`): один запрос, встроенный
+ * веб-поиск, структурированный JSON по схеме и продолжение диалога через
+ * `previous_response_id`. Разбор и сборка тела вынесены в чистые функции,
+ * чтобы их можно было проверить без сети.
+ */
+object PerplexityAgent {
+
+    const val PRESET_DEFAULT = "medium"
+    const val DEFAULT_PRESET_FIELD = "effort"
+
+    val presets: List<Pair<String, String>> = listOf(
+        "low" to "быстрый",
+        "medium" to "сбалансированный",
+        "high" to "глубокий"
+    )
+
+    /** Схема ответа: фиксированный набор полей, чтобы отчёт не зависел от формата модели. */
+    fun schema(): JSONObject {
+        val source = JSONObject()
+            .put("type", "object")
+            .put("properties", JSONObject()
+                .put("title", JSONObject().put("type", "string"))
+                .put("url", JSONObject().put("type", "string")))
+            .put("required", JSONArray().put("title").put("url"))
+        val fact = JSONObject()
+            .put("type", "object")
+            .put("properties", JSONObject()
+                .put("type", JSONObject().put("type", "string"))
+                .put("value", JSONObject().put("type", "string"))
+                .put("source", JSONObject().put("type", "string"))
+                .put("date", JSONObject().put("type", "string"))
+                .put("status", JSONObject().put("type", "string"))
+                .put("note", JSONObject().put("type", "string")))
+            .put("required", JSONArray().put("type").put("value"))
+        val properties = JSONObject()
+            .put("subject", JSONObject().put("type", "string"))
+            .put("summary", JSONObject().put("type", "string"))
+            .put("facts", JSONObject().put("type", "array").put("items", fact))
+            .put("sources", JSONObject().put("type", "array").put("items", source))
+            .put("analysis", JSONObject().put("type", "string"))
+            .put("limitations", JSONObject().put("type", "string"))
+        return JSONObject()
+            .put("type", "object")
+            .put("properties", properties)
+            .put("required", JSONArray().put("subject").put("summary").put("facts").put("analysis"))
+    }
+
+    fun body(
+        input: String,
+        instructions: String,
+        preset: String,
+        tools: List<String>,
+        model: String = "",
+        maxTokens: Int = 1200,
+        responseId: String = "",
+        structured: Boolean = false,
+        presetField: String = DEFAULT_PRESET_FIELD
+    ): String {
+        val root = JSONObject()
+            .put("input", input.trim().take(6000))
+            .put(presetField, preset.takeIf { it in presets.map { p -> p.first } } ?: PRESET_DEFAULT)
+            .put("max_output_tokens", maxTokens.coerceIn(200, 4000))
+        if (instructions.isNotBlank()) root.put("instructions", instructions.trim().take(6000))
+        if (model.isNotBlank()) root.put("model", model.trim())
+        if (responseId.isNotBlank()) root.put("previous_response_id", responseId.trim().take(120))
+        if (tools.isNotEmpty()) {
+            root.put("tools", JSONArray().apply {
+                tools.distinct().forEach { put(JSONObject().put("type", it)) }
+            })
+        }
+        if (structured) {
+            root.put("response_format", JSONObject()
+                .put("type", "json_schema")
+                .put("json_schema", JSONObject()
+                    .put("name", "osint_report")
+                    .put("schema", schema())))
+        }
+        return root.toString()
+    }
+
+    /** Переставляет имя параметра уровня усилий — API принимает и `effort`, и `preset`. */
+    fun withPresetField(body: String, field: String): String {
+        val root = runCatching { JSONObject(body) }.getOrNull() ?: return body
+        val value = root.optString("effort", "").ifBlank { root.optString("preset", "") }
+        root.remove("effort")
+        root.remove("preset")
+        root.put(field, value.ifBlank { PRESET_DEFAULT })
+        return root.toString()
+    }
+
+    /** Текст ответа: сначала output_text, затем части сообщений в output[]. */
+    fun text(body: String): String {
+        val root = runCatching { JSONObject(body) }.getOrElse {
+            throw IllegalStateException("Сервис вернул не JSON")
+        }
+        root.optJSONObject("error")?.let {
+            val message = it.optString("message", "").ifBlank { "Ошибка сервиса" }
+            throw IllegalStateException(message.take(300))
+        }
+        root.optString("output_text", "").takeIf { it.isNotBlank() }?.let { return it.trim() }
+        val output = root.optJSONArray("output") ?: return ""
+        val parts = ArrayList<String>()
+        for (i in 0 until output.length()) {
+            val item = output.optJSONObject(i) ?: continue
+            val type = item.optString("type", "")
+            if (type == "message" || type == "output_text") {
+                val content = item.optJSONArray("content")
+                if (content != null) {
+                    for (j in 0 until content.length()) {
+                        val part = content.optJSONObject(j) ?: continue
+                        val partType = part.optString("type", "")
+                        if (partType == "output_text" || partType == "text") {
+                            val chunk = part.optString("text", "")
+                            if (chunk.isNotBlank()) parts += chunk
+                        }
+                    }
+                }
+                val direct = item.optString("text", "")
+                if (direct.isNotBlank()) parts += direct
+            }
+        }
+        return parts.joinToString("").trim()
+    }
+
+    fun responseId(body: String): String =
+        runCatching { JSONObject(body).optString("id", "") }.getOrDefault("")
+
+    /** Источники: search_results/results, либо простой массив citations со ссылками. */
+    fun sources(body: String): List<AgentSource> {
+        val root = runCatching { JSONObject(body) }.getOrNull() ?: return emptyList()
+        val out = ArrayList<AgentSource>()
+        // search_results (объекты) и citations (строки) могут прийти вместе — берём оба.
+        val arrays = listOf("search_results", "results", "citations", "sources")
+            .mapNotNull { root.optJSONArray(it) }
+        for (array in arrays) {
+            for (i in 0 until array.length()) {
+                when (val item = array.opt(i)) {
+                    is String -> if (item.startsWith("http")) out += AgentSource("", item)
+                    is JSONObject -> {
+                        val url = item.optString("url", "").ifBlank { item.optString("link", "") }
+                        if (!url.startsWith("http")) continue
+                        out += AgentSource(
+                            title = item.optString("title", "").ifBlank { item.optString("name", "") }.take(160),
+                            url = url,
+                            snippet = item.optString("snippet", "")
+                                .ifBlank { item.optString("text", "") }
+                                .ifBlank { item.optString("description", "") }
+                                .take(300)
+                        )
+                    }
+                }
+            }
+        }
+        return out.distinctBy { it.url }
+    }
+
+    /** Разбор структурированного ответа; при сбое JSON текст становится аналитикой. */
+    fun report(body: String, cached: Boolean = false): AgentReport {
+        val raw = text(body)
+        val sources = sources(body)
+        val id = responseId(body)
+        val json = extractJson(raw) ?: return AgentReport(
+            subject = "", summary = raw.take(4000), analysis = raw.take(8000),
+            limitations = "", facts = emptyList(), sources = sources,
+            responseId = id, cached = cached
+        )
+        val facts = ArrayList<AgentFact>()
+        json.optJSONArray("facts")?.let { array ->
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                val value = item.optString("value", "").trim()
+                if (value.isBlank()) continue
+                facts += AgentFact(
+                    type = item.optString("type", "").ifBlank { "Сведение" }.take(80),
+                    value = value.take(300),
+                    source = item.optString("source", "").take(300),
+                    date = item.optString("date", "").take(40),
+                    status = item.optString("status", "").take(40),
+                    note = item.optString("note", "").take(300)
+                )
+            }
+        }
+        val mergedSources = ArrayList<AgentSource>(sources)
+        json.optJSONArray("sources")?.let { array ->
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                val url = item.optString("url", "")
+                if (url.startsWith("http")) {
+                    mergedSources += AgentSource(item.optString("title", "").take(160), url)
+                }
+            }
+        }
+        return AgentReport(
+            subject = json.optString("subject", "").take(200),
+            summary = json.optString("summary", "").take(4000),
+            analysis = json.optString("analysis", "").take(8000),
+            limitations = json.optString("limitations", "").take(1500),
+            facts = facts,
+            sources = mergedSources.distinctBy { it.url },
+            responseId = id,
+            cached = cached
+        )
+    }
+
+    private fun extractJson(raw: String): JSONObject? {
+        val text = raw.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+        if (text.startsWith("{")) {
+            runCatching { JSONObject(text) }.getOrNull()?.let { return it }
+        }
+        val start = text.indexOf('{')
+        val end = text.lastIndexOf('}')
+        if (start < 0 || end <= start) return null
+        return runCatching { JSONObject(text.substring(start, end + 1)) }.getOrNull()
+    }
+}
+
 object AssistantParser {
 
     fun content(responseBody: String): String? {
@@ -594,9 +882,43 @@ class AssistantStore(context: Context) {
     }
 
     var model: String
-        get() = prefs.getString(modelKey(), null)?.takeIf { it.isNotBlank() }
-            ?: AssistantCatalog.provider(provider).defaultModel.ifBlank { AssistantCatalog.DEFAULT_MODEL }
+        get() {
+            val spec = AssistantCatalog.provider(provider)
+            return prefs.getString(modelKey(), null)?.takeIf { it.isNotBlank() }
+                ?: spec.defaultModel.ifBlank { if (spec.agent) "" else AssistantCatalog.DEFAULT_MODEL }
+        }
         set(value) = prefs.edit().putString(modelKey(), value.trim().take(160)).apply()
+
+    /** Уровень усилий Agent API Perplexity: low / medium / high. */
+    var preset: String
+        get() = prefs.getString("agent_preset", PerplexityAgent.PRESET_DEFAULT).orEmpty()
+            .takeIf { it in PerplexityAgent.presets.map { p -> p.first } }
+            ?: PerplexityAgent.PRESET_DEFAULT
+        set(value) = prefs.edit()
+            .putString("agent_preset", value.trim().lowercase().take(12))
+            .apply()
+
+    /** Кэш ответов Agent API: одинаковый запрос в течение суток не оплачивается повторно. */
+    fun cachedAgent(cacheKey: String): String? {
+        val raw = prefs.getString("agent_cache_$cacheKey", null) ?: return null
+        val obj = runCatching { JSONObject(raw) }.getOrNull() ?: return null
+        val at = obj.optLong("at", 0L)
+        if (System.currentTimeMillis() - at > AGENT_CACHE_TTL_MS) return null
+        return obj.optString("body").takeIf { it.isNotBlank() }
+    }
+
+    fun putAgentCache(cacheKey: String, body: String) {
+        if (body.length > 400_000) return
+        val payload = JSONObject()
+            .put("at", System.currentTimeMillis())
+            .put("body", body)
+        prefs.edit().putString("agent_cache_$cacheKey", payload.toString()).apply()
+        // Держим кэш компактным: старые записи чистим по префиксу.
+        val keys = prefs.all.keys.filter { it.startsWith("agent_cache_") }
+        if (keys.size > 24) {
+            keys.take(keys.size - 24).forEach { prefs.edit().remove(it).apply() }
+        }
+    }
 
     private fun modelKey(): String = "model_$provider"
 
@@ -651,6 +973,7 @@ class AssistantStore(context: Context) {
 
     private companion object {
         const val LEGACY_KEY = "assistant_key"
+        const val AGENT_CACHE_TTL_MS = 24 * 60 * 60 * 1000L
     }
 }
 
@@ -658,6 +981,7 @@ class AssistantStore(context: Context) {
 class AssistantService(private val store: AssistantStore) {
 
     suspend fun chat(role: AssistantRole, prompt: String): Result<String> = withContext(Dispatchers.IO) {
+        if (AssistantCatalog.provider(store.provider).agent) return@withContext agentChat(role, prompt)
         runCatching {
             val key = store.key()
             if (key.isBlank()) throw IllegalStateException("Ключ ассистента не задан")
@@ -695,6 +1019,110 @@ class AssistantService(private val store: AssistantStore) {
     }
 
     /**
+     * Ответ через Agent API: та же роль, но запрос идёт на `/v1/agent`.
+     * Инструмент веб-поиска включается только для исследовательских ролей,
+     * чтобы классификация и планирование запросов оставались дешёвыми.
+     */
+    private suspend fun agentChat(role: AssistantRole, prompt: String): Result<String> = runCatching {
+        val key = store.key()
+        if (key.isBlank()) throw IllegalStateException("Ключ ассистента не задан")
+        val tools = if (role == AssistantRole.RESEARCHER || role == AssistantRole.SYNTHESIS) {
+            listOf("web_search")
+        } else emptyList()
+        val payload = PerplexityAgent.body(
+            input = prompt,
+            instructions = AssistantPrompts.system(role),
+            preset = store.preset,
+            tools = tools,
+            model = store.model,
+            maxTokens = role.maxTokens
+        )
+        PerplexityAgent.text(callAgent(key, payload))
+            .takeIf { it.isNotBlank() }
+            ?: throw IllegalStateException("Модель вернула пустой ответ")
+    }
+
+    /**
+     * Аналитический запрос с веб-граундингом: структурированный ответ по схеме,
+     * кэш на сутки и продолжение диалога через `previous_response_id`.
+     */
+    suspend fun agentReport(query: String, context: String = ""): Result<AgentReport> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val key = store.key()
+                if (key.isBlank()) throw IllegalStateException("Ключ ассистента не задан")
+                val trimmed = query.trim()
+                if (trimmed.length < 2) throw IllegalStateException("Слишком короткий запрос")
+                val cacheKey = agentCacheKey(trimmed, context)
+                store.cachedAgent(cacheKey)?.let { cached ->
+                    return@runCatching runCatching { PerplexityAgent.report(cached, cached = true) }
+                        .getOrElse { PerplexityAgent.report(cached) }
+                }
+                val payload = PerplexityAgent.body(
+                    input = buildString {
+                        append("Объект исследования: ").append(trimmed)
+                        if (context.isNotBlank()) {
+                            append("\nУже установленные сведения: ").append(context.take(2500))
+                        }
+                        append("\nПроверь открытые источники и верни только факты со ссылками.")
+                    },
+                    instructions = AssistantPrompts.system(AssistantRole.ANALYST) +
+                        "\nВерни ответ строго одним JSON-объектом по схеме: subject, summary, " +
+                        "facts[{type,value,source,date,status,note}], sources[{title,url}], " +
+                        "analysis, limitations. Без markdown и пояснений вокруг JSON.",
+                    preset = store.preset,
+                    tools = listOf("web_search"),
+                    model = store.model,
+                    maxTokens = AssistantRole.SYNTHESIS.maxTokens,
+                    structured = true
+                )
+                val response = callAgent(key, payload)
+                val report = PerplexityAgent.report(response)
+                store.putAgentCache(cacheKey, response)
+                report
+            }
+        }
+
+    /** Один вызов Agent API с повтором на альтернативном имени параметра уровня усилий. */
+    private suspend fun callAgent(key: String, payload: String): String {
+        var body = payload
+        var response = Net.fetch(
+            AssistantCatalog.AGENT_URL,
+            mapOf("Authorization" to "Bearer $key", "Content-Type" to "application/json"),
+            attempts = 2,
+            method = "POST",
+            body = body
+        )
+        response.crossHostRedirect?.let {
+            throw IllegalStateException("Сервис перенаправляет на $it — ключ не отправлен")
+        }
+        if (response.code == 400) {
+            val alternate = if (body.contains("\"effort\"")) "preset" else "effort"
+            body = PerplexityAgent.withPresetField(body, alternate)
+            response = Net.fetch(
+                AssistantCatalog.AGENT_URL,
+                mapOf("Authorization" to "Bearer $key", "Content-Type" to "application/json"),
+                attempts = 1,
+                method = "POST",
+                body = body
+            )
+            response.crossHostRedirect?.let {
+                throw IllegalStateException("Сервис перенаправляет на $it — ключ не отправлен")
+            }
+        }
+        if (response.code !in 200..299) {
+            throw IllegalStateException(AssistantParser.error(response.code, response.body))
+        }
+        return response.body
+    }
+
+    private fun agentCacheKey(query: String, context: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val raw = "${store.provider}|${store.model}|${store.preset}|$query|$context"
+        return digest.digest(raw.toByteArray()).joinToString("") { "%02x".format(it) }.take(24)
+    }
+
+    /**
      * Проверка ключа: Hugging Face — через whoami, остальные — через список
      * моделей `GET {base}/models` (200 только с валидным ключом).
      */
@@ -706,6 +1134,7 @@ class AssistantService(private val store: AssistantStore) {
         if (base.isBlank()) {
             return@withContext KeyCheck(KeyState.INVALID, "Укажите базовый адрес сервера (https)")
         }
+        if (spec.agent) return@withContext probeAgent(spec, key)
         val url = when (spec.probe) {
             AssistantProbe.HUGGINGFACE_WHOAMI -> AssistantCatalog.WHOAMI_URL
             AssistantProbe.NONE, AssistantProbe.OPENAI_MODELS -> base.trimEnd('/') + "/models"
@@ -741,6 +1170,30 @@ class AssistantService(private val store: AssistantStore) {
         }
         store.setState(result.state)
         result
+    }
+
+    /** Проверка ключа Agent API: GET на эндпоинт даёт 401 у неверного ключа. */
+    private suspend fun probeAgent(spec: AssistantProvider, key: String): KeyCheck {
+        val response = runCatching {
+            Net.fetch(AssistantCatalog.AGENT_URL, mapOf("Authorization" to "Bearer $key"), attempts = 1)
+        }.getOrElse {
+            store.setState(KeyState.OFFLINE)
+            return KeyCheck(KeyState.OFFLINE, "Нет связи с ${spec.title}")
+        }
+        response.crossHostRedirect?.let {
+            store.setState(KeyState.INVALID)
+            return KeyCheck(KeyState.INVALID, "Сервис перенаправляет на $it — ключ не отправлен")
+        }
+        val result = when (response.code) {
+            401, 403 -> KeyCheck(KeyState.INVALID, "${spec.title} отклонил ключ (${response.code})")
+            400, 405, 422, 429 -> KeyCheck(KeyState.VALID, "Ключ принят: ${spec.title}")
+            404 -> KeyCheck(KeyState.INVALID, "Agent API не найден (404)")
+            else -> if (response.code in 200..299) {
+                KeyCheck(KeyState.VALID, "Ключ принят: ${spec.title}")
+            } else KeyCheck(KeyState.INVALID, "Ответ сервиса ${response.code}")
+        }
+        store.setState(result.state)
+        return result
     }
 }
 

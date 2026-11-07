@@ -38,6 +38,8 @@ object EvidenceLinks {
             "abuseipdb" -> if (v.isIp()) "https://www.abuseipdb.com/check/$v" else "https://www.abuseipdb.com/"
             "rdap" -> "https://rdap.org/domain/${enc(query)}"
             "face" -> ""
+            "faceapi" -> if (v.startsWith("http")) v else "https://profacefinder.com"
+            "photo" -> if (v.startsWith("http")) v else "https://saucenao.com"
             else -> SourceCatalog.ref(moduleId).url
         }
     }

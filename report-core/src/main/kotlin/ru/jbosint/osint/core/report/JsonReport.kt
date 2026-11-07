@@ -52,7 +52,8 @@ class JsonReport(
         sb.append("    \"emails\": ${ReportSections.emailFacts(data).size},\n")
         sb.append("    \"leaks\": ${ReportSections.leakFacts(data).size},\n")
         sb.append("    \"documents\": ${ReportSections.documentFacts(data).size},\n")
-        sb.append("    \"media\": ${ReportSections.mediaFacts(data).size}\n")
+        sb.append("    \"media\": ${ReportSections.mediaFacts(data).size},\n")
+        sb.append("    \"face_matches\": ${ReportSections.faceFacts(data).size}\n")
         sb.append("  },\n")
 
         sb.append("  \"sources\": [")

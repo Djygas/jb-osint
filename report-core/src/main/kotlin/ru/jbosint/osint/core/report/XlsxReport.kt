@@ -41,6 +41,7 @@ class XlsxReport(
         categorySheet(FactCategory.TECHNICAL, "Технические"),
         genericSheet("Документы", ReportSections.documentFacts(data)),
         genericSheet("Медиа", ReportSections.mediaFacts(data)),
+        faceSheet(),
         sourcesSheet(),
         linksSheet(),
         aiSheet(),
@@ -222,6 +223,36 @@ class XlsxReport(
                 Column("Ссылка", 46f),
                 Column("Дата", 12f),
                 Column("Статус", 16f)
+            ),
+            rows = rows
+        )
+    }
+
+    /** Лист «Поиск по лицу»: совпадения обратного поиска со схожестью и статусом. */
+    private fun faceSheet(): Sheet {
+        val facts = ReportSections.faceFacts(data)
+        val rows = facts.mapIndexed { index, fact ->
+            listOf(
+                Cell((index + 1).toString(), numeric = true),
+                Cell(fact.value),
+                Cell(fact.attributes.entries.firstOrNull { it.key.equals("ресурс", true) }?.value
+                    ?: ReportSections.sourceNames(fact).ifBlank { "Поиск JB OSINT" }),
+                Cell(ReportSections.faceSimilarity(fact)?.toString().orEmpty(), numeric = true),
+                Cell(ReportSections.faceStatus(fact, data)),
+                Cell(ReportSections.dateText(fact.firstSeen)),
+                Cell(ReportSections.faceNote(fact, data))
+            )
+        }
+        return Sheet(
+            name = "Поиск по лицу",
+            columns = listOf(
+                Column("№", 6f),
+                Column("Страница", 56f),
+                Column("Сервис", 22f),
+                Column("Схожесть, %", 13f),
+                Column("Статус", 18f),
+                Column("Дата", 12f),
+                Column("Примечание", 60f)
             ),
             rows = rows
         )

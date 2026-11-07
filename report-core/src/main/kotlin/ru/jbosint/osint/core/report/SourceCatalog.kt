@@ -35,6 +35,9 @@ object SourceCatalog {
         SourceRef("rdap", "RDAP-реестр", "https://rdap.org"),
         SourceRef("demo", "Демо-модуль", "https://jbosint.ru"),
         SourceRef("face", "Поиск по фото", "https://jbosint.ru"),
+        SourceRef("photo", "Обратный поиск изображения (SauceNAO)", "https://saucenao.com"),
+        SourceRef("faceapi", "Поиск по лицу (ProFaceFinder)", "https://profacefinder.com"),
+        SourceRef("leakcheck", "LeakCheck", "https://leakcheck.io"),
         SourceRef("custom", "Свой модуль", "https://jbosint.ru")
     ).associateBy { it.id }
 

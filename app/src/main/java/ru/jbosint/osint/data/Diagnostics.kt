@@ -50,6 +50,7 @@ object DiagSamples {
         "securitytrails" to "example.com",
         "dyxless" to "diag-check-zz@example.invalid",
         "leakcheck" to "diag-check-zz@example.invalid",
+        "faceapi" to "face-photo.jpg",
         "opencorporates" to "tesla",
         "tgstat" to "osint",
         "vk" to "Иван Иванов",
@@ -67,6 +68,7 @@ object DiagSamples {
     val accepted: Map<String, String> = mapOf(
         "hibp" to "только email",
         "leakcheck" to "email, телефон, ник или домен",
+        "faceapi" to "фотография лица (JPG/PNG), ключ и адрес API",
         "hunter" to "только домен",
         "ipinfo" to "только IP или домен",
         "abuseipdb" to "только IP",

@@ -46,6 +46,7 @@ import ru.jbosint.osint.data.DiagReport
 import ru.jbosint.osint.data.DiagSamples
 import ru.jbosint.osint.data.JsonShape
 import ru.jbosint.osint.data.DataMerge
+import ru.jbosint.osint.data.FaceSearch
 import ru.jbosint.osint.data.PhotoAnalysis
 import ru.jbosint.osint.data.PhotoAnalyzer
 import ru.jbosint.osint.data.QueryDetector
@@ -160,6 +161,8 @@ data class UiState(
     /** Поставщики, у которых уже сохранён ключ (точки на переключателе). */
     val assistantKeyed: Set<String> = emptySet(),
     val assistantModel: String = AssistantCatalog.DEFAULT_MODEL,
+    /** Уровень усилий Agent API (low/medium/high). */
+    val assistantPreset: String = "medium",
     val assistantState: KeyState = KeyState.UNCHECKED,
     val assistantCheckedAt: Long = 0L,
     val assistantChecking: Boolean = false,
@@ -226,6 +229,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             assistantBaseUrl = assistantStore.customBaseUrl,
             assistantKeyed = keyedProviders(),
             assistantModel = assistantStore.model,
+            assistantPreset = assistantStore.preset,
             assistantState = assistantStore.state(),
             assistantCheckedAt = assistantStore.checkedAt(),
             assistantAutoAnalyze = assistantStore.autoAnalyze,
@@ -442,7 +446,35 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         sourceUrl = hit.url
                     )
                 }
-                val handles = PhotoAnalyzer.handlesFrom(hits.map { it.url }).take(3)
+
+                // Поиск по лицу: отдельный сервис, адрес эндпоинта и ключ задаёт пользователь.
+                _state.update { it.copy(stage = "Поиск по лицу", progress = 36) }
+                val faceKey = keys.key("faceapi")
+                val faceEndpoint = keys.secondField("faceapi")
+                val faceReady = faceKey.isNotBlank() && faceEndpoint.isNotBlank()
+                val faceHits = if (faceReady) {
+                    runCatching { FaceSearch.search(faceEndpoint, faceKey, photo) }.getOrElse { emptyList() }
+                } else emptyList()
+                val knownHosts = hits.map { it.url.substringAfter("://").substringBefore('/') }.toSet()
+                faceHits.forEach { hit ->
+                    val host = hit.url.substringAfter("://").substringBefore('/')
+                    val confirmed = knownHosts.any { it.equals(host, ignoreCase = true) }
+                    photoFacts += RawFact(
+                        category = FactCategory.DOCUMENT,
+                        kind = "Совпадение по фото",
+                        value = hit.url,
+                        subject = photo.fileName,
+                        attributes = mapOf(
+                            "схожесть" to "${hit.similarity}%",
+                            "ресурс" to hit.provider,
+                            "статус" to FaceSearch.statusFor(hit.similarity, confirmed),
+                            "название" to hit.title
+                        ),
+                        sourceId = "faceapi",
+                        sourceUrl = hit.url
+                    )
+                }
+                val handles = PhotoAnalyzer.handlesFrom((hits.map { it.url } + faceHits.map { it.url })).take(3)
                 val parts = mutableListOf<AggregatedData>()
                 handles.forEachIndexed { index, handle ->
                     _state.update {
@@ -457,7 +489,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     extra = photoFacts,
                     durationMs = System.currentTimeMillis() - started
                 )
-                val note = buildPhotoNote(photo, hits.size, handles, key.isNotBlank())
+                val note = buildPhotoNote(photo, hits.size, handles, key.isNotBlank(), faceHits.size, faceReady)
                 _state.update { s ->
                     s.copy(photo = s.photo?.copy(hits = hits.size) ?: PhotoCard(photo.fileName, photo.summary(), photo.faces, photo.sha256, hits.size))
                 }
@@ -500,7 +532,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         photo: PhotoAnalysis,
         hits: Int,
         handles: List<String>,
-        providerReady: Boolean
+        providerReady: Boolean,
+        faceHits: Int = 0,
+        faceReady: Boolean = false
     ): String {
         val parts = mutableListOf<String>()
         parts += "Снимок: ${photo.summary()}."
@@ -509,6 +543,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             !providerReady -> "Обратный поиск по изображению не выполнялся: не добавлен ключ модуля SauceNAO."
             hits == 0 -> "Обратный поиск выполнен, совпадений выше порога не найдено."
             else -> "Обратный поиск: $hits совпадений, ссылки добавлены в доказательную базу."
+        }
+        if (faceReady) {
+            parts += if (faceHits == 0) "Поиск по лицу выполнен, совпадений не найдено."
+            else "Поиск по лицу: $faceHits совпадений, у каждой находки указаны схожесть и статус проверки."
+        } else {
+            parts += "Поиск по лицу не выполнялся: в «Модули» не заданы ключ и адрес API сервиса."
         }
         if (handles.isNotEmpty()) {
             parts += "По найденным ссылкам дополнительно проверены профили: ${handles.joinToString(", ")}."
@@ -810,6 +850,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 assistantBaseUrl = assistantStore.customBaseUrl,
                 assistantKeyed = keyedProviders(),
                 assistantModel = assistantStore.model,
+                assistantPreset = assistantStore.preset,
                 assistantConfigured = assistantStore.configured(),
                 assistantState = assistantStore.state(),
                 assistantCheckedAt = assistantStore.checkedAt()
@@ -1395,6 +1436,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(assistantBaseUrl = normalised, assistantError = null) }
     }
 
+    fun setAssistantPreset(value: String) {
+        assistantStore.preset = value
+        _state.update { it.copy(assistantPreset = assistantStore.preset) }
+    }
+
     fun setAssistantModel(id: String) {
         assistantStore.model = id.trim().ifBlank { AssistantCatalog.DEFAULT_MODEL }
         _state.update { it.copy(assistantModel = assistantStore.model) }
@@ -1547,7 +1593,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun doResearch(entry: HistoryEntry): Result<String> {
-        val context = entry.data.facts.take(6).joinToString("; ") { "${it.kind}: ${it.value}" }
+        val context = entry.data.facts.take(8).joinToString("; ") { "${it.kind}: ${it.value}" }
+        // Agent API сам выполняет веб-поиск и возвращает источники — промежуточные
+        // запросы и разбор HTML-выдачи не нужны.
+        val agentProvider = ru.jbosint.osint.data.AssistantCatalog
+            .provider(assistantStore.provider).agent
+        if (agentProvider) {
+            val report = assistantService.agentReport(entry.query, context).getOrThrow()
+            val text = report.asText()
+            if (text.isBlank()) throw IllegalStateException("Модель не вернула сведений")
+            return Result.success(text)
+        }
         val plan = assistantService.chat(
             AssistantRole.RESEARCHER,
             AssistantPrompts.researchQueries(entry.query, context)
