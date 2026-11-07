@@ -13,6 +13,11 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.jbosint.osint.core.model.AggregatedData
+import ru.jbosint.osint.data.CustomAuth
+import ru.jbosint.osint.data.CustomModule
+import ru.jbosint.osint.data.CustomModuleChecker
+import ru.jbosint.osint.data.CustomModuleSpec
+import ru.jbosint.osint.data.CustomModuleStore
 import ru.jbosint.osint.data.HistoryEntry
 import ru.jbosint.osint.data.HistoryStore
 import ru.jbosint.osint.data.KeyRepository
@@ -51,6 +56,8 @@ data class UiState(
     val resultEntry: HistoryEntry? = null,
     val history: List<HistoryEntry> = emptyList(),
     val providers: List<ProviderUi> = emptyList(),
+    val customModules: List<CustomModule> = emptyList(),
+    val customChecking: Set<String> = emptySet(),
     val analyst: String = "",
     val demoMode: Boolean = false,
     val secureScreen: Boolean = true,
@@ -58,7 +65,8 @@ data class UiState(
     val exporting: Boolean = false,
     val toast: String? = null
 ) {
-    val activeModules: Int get() = providers.count { it.enabled && it.hasKey }
+    val activeModules: Int
+        get() = providers.count { it.enabled && it.hasKey } + customModules.count { it.enabled && (it.hasKey || it.auth == CustomAuth.NONE) }
 }
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -68,6 +76,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val historyStore = HistoryStore(app)
     private val exporter = ReportExporter(app)
     private val validator = KeyValidator(keys)
+    private val customStore = CustomModuleStore(app)
+    private val customChecker = CustomModuleChecker(customStore)
     private val engine = SearchEngine(keys, settings)
 
     private val _state = MutableStateFlow(UiState())
@@ -92,7 +102,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             secureScreen = settings.secureScreen,
             autoWipeDays = settings.autoWipeDays,
             history = historyStore.list(),
-            providers = buildProviders()
+            providers = buildProviders(),
+            customModules = customStore.list()
         )
     }
 
@@ -108,6 +119,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun refreshProviders() = _state.update { it.copy(providers = buildProviders()) }
+
+    private fun refreshCustom() = _state.update { it.copy(customModules = customStore.list()) }
 
     // ---------------------------------------------------------------- навигация
 
@@ -141,7 +154,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(searchError = "Введите запрос: имя, адрес почты, телефон, домен, IP или никнейм") }
             return
         }
-        if (keys.activeCount() == 0 && !settings.demoMode) {
+        if (keys.activeCount() == 0 && customStore.activeModules().isEmpty() && !settings.demoMode) {
             _state.update {
                 it.copy(
                     searchError = "Нет активных модулей. Добавьте хотя бы один API-ключ или включите демо-режим."
@@ -157,9 +170,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             val outcome = runCatching {
-                engine.search(query) { stage, progress ->
+                engine.search(query, { stage, progress ->
                     _state.update { s -> s.copy(stage = stage, progress = progress.coerceIn(0, 100)) }
-                }
+                }, customStore.activeModules())
             }
             outcome.onSuccess { data ->
                 val entry = HistoryEntry(
@@ -264,6 +277,65 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // --------------------------------------------------- пользовательские модули
+
+    fun saveCustomModule(
+        id: String,
+        title: String,
+        urlTemplate: String,
+        auth: CustomAuth,
+        headerName: String,
+        paramName: String,
+        key: String?
+    ) {
+        val error = CustomModuleSpec.validate(title, urlTemplate)
+        if (error != null) {
+            _state.update { it.copy(toast = error) }
+            return
+        }
+        val existing = if (id.isNotBlank()) customStore.get(id) else null
+        val module = CustomModule(
+            id = id.ifBlank { java.util.UUID.randomUUID().toString() },
+            title = title.trim(),
+            urlTemplate = urlTemplate.trim(),
+            auth = auth,
+            headerName = headerName.trim(),
+            paramName = paramName.trim(),
+            enabled = existing?.enabled ?: true,
+            createdAt = existing?.createdAt ?: System.currentTimeMillis()
+        )
+        customStore.save(module, key)
+        refreshCustom()
+        _state.update { it.copy(toast = if (existing == null) "Модуль добавлен" else "Модуль обновлён") }
+    }
+
+    fun setCustomModuleEnabled(id: String, enabled: Boolean) {
+        customStore.setEnabled(id, enabled)
+        refreshCustom()
+    }
+
+    fun deleteCustomModule(id: String) {
+        customStore.delete(id)
+        refreshCustom()
+        _state.update { it.copy(toast = "Модуль удалён") }
+    }
+
+    fun checkCustomModule(id: String) {
+        val module = customStore.get(id) ?: return
+        if (_state.value.customChecking.contains(id)) return
+        _state.update { it.copy(customChecking = it.customChecking + id) }
+        viewModelScope.launch {
+            val result = customChecker.check(module)
+            _state.update {
+                it.copy(
+                    customChecking = it.customChecking - id,
+                    customModules = customStore.list(),
+                    toast = result.detail
+                )
+            }
+        }
+    }
+
     // -------------------------------------------------------------- настройки
 
     fun setAnalyst(value: String) {
@@ -297,11 +369,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 keys.wipeKeys()
+                customStore.wipe()
                 historyStore.clear()
             }
             _state.update {
                 it.copy(
                     providers = buildProviders(),
+                    customModules = emptyList(),
                     history = emptyList(),
                     result = null,
                     resultEntry = null,

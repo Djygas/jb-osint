@@ -575,7 +575,8 @@ class SearchEngine(
 
     suspend fun search(
         query: String,
-        onStage: (String, Int) -> Unit = { _, _ -> }
+        onStage: (String, Int) -> Unit = { _, _ -> },
+        customModules: List<Pair<CustomModule, String>> = emptyList()
     ): AggregatedData = withContext(Dispatchers.IO) {
         val started = System.currentTimeMillis()
         val cleanQuery = query.trim()
@@ -585,6 +586,9 @@ class SearchEngine(
         if (rdap) modules += RdapConnector
         ProviderCatalog.all.forEach { spec ->
             if (active.containsKey(spec.id)) Connectors.byId(spec.id)?.let { modules += it }
+        }
+        customModules.forEachIndexed { index, (module, key) ->
+            modules += CustomConnector(module, key, "custom${index + 1}")
         }
         val demo = settings.demoMode
         if (demo) modules += DemoConnector

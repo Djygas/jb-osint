@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,15 +18,21 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -49,12 +56,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import ru.jbosint.osint.data.CustomAuth
+import ru.jbosint.osint.data.CustomModule
+import ru.jbosint.osint.data.CustomModuleSpec
 import ru.jbosint.osint.data.KeyState
 import ru.jbosint.osint.data.ProviderGroup
 
 @Composable
 fun KeysScreen(state: UiState, vm: AppViewModel) {
     val context = LocalContext.current
+    var editorOpen by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<CustomModule?>(null) }
     LazyColumn(
         modifier = Modifier.fillMaxSize().imePadding().padding(horizontal = 20.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 12.dp, bottom = 28.dp),
@@ -125,14 +137,87 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
             }
         }
 
+        item(key = "custom_header") {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "СВОИ МОДУЛИ",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = JbFaint
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "Любой сервис с JSON-ответом: свой адрес, ключ и название",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = JbMuted
+                    )
+                }
+                TextButton(onClick = {
+                    editing = null
+                    editorOpen = true
+                }) {
+                    Icon(Icons.Filled.Add, contentDescription = null, tint = JbAccent2, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Добавить", style = MaterialTheme.typography.labelMedium, color = JbAccent2)
+                }
+            }
+        }
+
+        if (state.customModules.isEmpty()) {
+            item(key = "custom_empty") {
+                Text(
+                    "Пока нет своих модулей. Добавьте адрес API и ключ — модуль появится в поиске наравне со встроенными.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = JbFaint,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
+            }
+        } else {
+            items(state.customModules, key = { "cm_${it.id}" }) { module ->
+                CustomModuleCard(
+                    module = module,
+                    checking = state.customChecking.contains(module.id),
+                    onToggle = { vm.setCustomModuleEnabled(module.id, it) },
+                    onCheck = { vm.checkCustomModule(module.id) },
+                    onEdit = {
+                        editing = module
+                        editorOpen = true
+                    },
+                    onDelete = { vm.deleteCustomModule(module.id) }
+                )
+            }
+        }
+
         item {
             Text(
-                "Подключение модуля не раскрывает его название в отчётах: в документах указывается только марка «Поиск JB OSINT».",
+                "Названия ваших модулей видны только на этом экране. В отчётах PDF, Excel и JSON источник не раскрывается: в документах указывается только марка «Поиск JB OSINT».",
                 style = MaterialTheme.typography.labelSmall,
                 color = JbFaint,
                 modifier = Modifier.padding(top = 12.dp)
             )
         }
+    }
+
+    if (editorOpen) {
+        CustomModuleDialog(
+            initial = editing,
+            onDismiss = { editorOpen = false },
+            onSave = { title, url, auth, header, param, key ->
+                vm.saveCustomModule(
+                    id = editing?.id.orEmpty(),
+                    title = title,
+                    urlTemplate = url,
+                    auth = auth,
+                    headerName = header,
+                    paramName = param,
+                    key = key
+                )
+                editorOpen = false
+            }
+        )
     }
 }
 
@@ -294,3 +379,250 @@ private fun ProviderCard(
 
 private fun dateShort(timestamp: Long): String =
     java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale("ru")).format(java.util.Date(timestamp))
+
+@Composable
+private fun CustomModuleCard(
+    module: CustomModule,
+    checking: Boolean,
+    onToggle: (Boolean) -> Unit,
+    onCheck: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
+) {
+    GlowCard(modifier = Modifier.fillMaxWidth(), padding = 16) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(module.title, style = MaterialTheme.typography.titleMedium, color = JbText)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    CustomModuleSpec.hostOf(module.urlTemplate),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = JbMuted,
+                    maxLines = 1
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Switch(
+                checked = module.enabled,
+                onCheckedChange = onToggle,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = JbAccent,
+                    uncheckedThumbColor = JbMuted,
+                    uncheckedTrackColor = JbSurfaceHigh,
+                    uncheckedBorderColor = JbBorder
+                )
+            )
+        }
+
+        Spacer(Modifier.height(9.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (module.auth == CustomAuth.NONE) {
+                Pill("без ключа", JbSlate)
+            } else if (module.hasKey) {
+                Pill("ключ сохранён", JbGreen)
+            } else {
+                Pill("ключ не задан", JbAmber)
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                module.auth.title,
+                style = MaterialTheme.typography.labelSmall,
+                color = JbFaint,
+                maxLines = 1
+            )
+            Spacer(Modifier.weight(1f))
+            if (checking) {
+                CircularProgressIndicator(modifier = Modifier.size(14.dp), color = JbAccent, strokeWidth = 1.6.dp)
+            }
+        }
+
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onCheck, enabled = !checking) {
+                Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = JbAccent2, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Проверить", style = MaterialTheme.typography.labelMedium, color = JbAccent2)
+            }
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick = onEdit) {
+                Icon(Icons.Filled.Edit, contentDescription = "Изменить модуль", tint = JbMuted, modifier = Modifier.size(17.dp))
+            }
+            IconButton(onClick = onDelete) {
+                Icon(Icons.Filled.Delete, contentDescription = "Удалить модуль", tint = JbFaint, modifier = Modifier.size(18.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun CustomModuleDialog(
+    initial: CustomModule?,
+    onDismiss: () -> Unit,
+    onSave: (String, String, CustomAuth, String, String, String?) -> Unit
+) {
+    var title by remember { mutableStateOf(initial?.title.orEmpty()) }
+    var url by remember { mutableStateOf(initial?.urlTemplate.orEmpty()) }
+    var auth by remember { mutableStateOf(initial?.auth ?: CustomAuth.BEARER) }
+    var header by remember { mutableStateOf(initial?.headerName ?: "X-API-Key") }
+    var param by remember { mutableStateOf(initial?.paramName ?: "api_key") }
+    var key by remember { mutableStateOf("") }
+    var revealed by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val hasStoredKey = initial?.hasKey == true
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = JbSurface,
+        title = {
+            Text(
+                if (initial == null) "Новый модуль" else "Модуль: ${initial.title}",
+                style = MaterialTheme.typography.titleMedium,
+                color = JbText,
+                maxLines = 1
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it.take(CustomModuleSpec.MAX_TITLE) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Название сервиса", color = JbFaint) },
+                    shape = RoundedCornerShape(12.dp),
+                    colors = fieldColors(),
+                    textStyle = MaterialTheme.typography.bodyMedium
+                )
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("URL-шаблон с {query}", color = JbFaint) },
+                    placeholder = { Text("https://api.example.com/search?q={query}", color = JbFaint, style = MaterialTheme.typography.labelSmall) },
+                    shape = RoundedCornerShape(12.dp),
+                    colors = fieldColors(),
+                    textStyle = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    "Маркер {query} заменяется на запрос. Только HTTPS.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = JbFaint
+                )
+
+                Text("Как передавать ключ", style = MaterialTheme.typography.labelMedium, color = JbMuted)
+                CustomAuth.entries.forEach { option ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { auth = option }
+                            .padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        androidx.compose.material3.RadioButton(
+                            selected = auth == option,
+                            onClick = { auth = option },
+                            colors = androidx.compose.material3.RadioButtonDefaults.colors(
+                                selectedColor = JbAccent,
+                                unselectedColor = JbFaint
+                            )
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(option.title, style = MaterialTheme.typography.bodySmall, color = JbText)
+                            Text(option.hint, style = MaterialTheme.typography.labelSmall, color = JbFaint)
+                        }
+                    }
+                }
+
+                when (auth) {
+                    CustomAuth.HEADER -> OutlinedTextField(
+                        value = header,
+                        onValueChange = { header = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Имя заголовка", color = JbFaint) },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = fieldColors(),
+                        textStyle = MaterialTheme.typography.bodyMedium
+                    )
+                    CustomAuth.PARAM -> OutlinedTextField(
+                        value = param,
+                        onValueChange = { param = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Имя параметра", color = JbFaint) },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = fieldColors(),
+                        textStyle = MaterialTheme.typography.bodyMedium
+                    )
+                    else -> Unit
+                }
+
+                if (auth != CustomAuth.NONE) {
+                    OutlinedTextField(
+                        value = key,
+                        onValueChange = { key = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("API-ключ", color = JbFaint) },
+                        placeholder = {
+                            Text(
+                                if (hasStoredKey) "Ключ сохранён — введите новый, чтобы заменить" else "вставьте ключ сервиса",
+                                color = JbFaint,
+                                maxLines = 1,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        },
+                        visualTransformation = if (revealed) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { revealed = !revealed }) {
+                                Icon(
+                                    if (revealed) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                    contentDescription = null,
+                                    tint = JbFaint
+                                )
+                            }
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = fieldColors(),
+                        textStyle = MaterialTheme.typography.bodyMedium
+                    )
+                }
+
+                Text(
+                    "Название модуля видно только вам и никогда не попадает в отчёты — в документах источник не раскрывается.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = JbFaint
+                )
+                error?.let {
+                    Text(it, style = MaterialTheme.typography.labelSmall, color = JbRed)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val problem = CustomModuleSpec.validate(title, url)
+                when {
+                    problem != null -> error = problem
+                    auth != CustomAuth.NONE && key.isBlank() && !hasStoredKey -> error = "Укажите API-ключ"
+                    else -> {
+                        error = null
+                        onSave(title, url, auth, header, param, key.ifBlank { null })
+                    }
+                }
+            }) {
+                Text("Сохранить", color = JbAccent2)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Отмена", color = JbMuted)
+            }
+        }
+    )
+}
