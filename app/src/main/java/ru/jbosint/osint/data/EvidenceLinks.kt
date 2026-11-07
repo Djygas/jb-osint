@@ -18,6 +18,7 @@ object EvidenceLinks {
             "github" -> if (v.matches(Regex("^[A-Za-z0-9-]{1,39}$"))) "https://github.com/$v" else "https://github.com/search?q=${enc(query)}&type=users"
             "gitlab" -> if (v.matches(Regex("^[A-Za-z0-9_.-]{1,64}$"))) "https://gitlab.com/$v" else "https://gitlab.com/search?search=${enc(query)}"
             "hibp" -> "https://haveibeenpwned.com/account/${enc(query)}"
+            "leakcheck" -> "https://leakcheck.io/"
             "virustotal" -> "https://www.virustotal.com/gui/search/${enc(query)}"
             "shodan" -> if (v.isIp()) "https://www.shodan.io/host/$v" else "https://www.shodan.io/search?query=${enc(query)}"
             "numverify" -> "https://numverify.com/"

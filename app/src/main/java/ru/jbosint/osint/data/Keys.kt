@@ -42,6 +42,10 @@ object ProviderCatalog {
             "hibp-api-key", "https://haveibeenpwned.com/API/Key", ProviderGroup.LEAKS
         ),
         ProviderSpec(
+            "leakcheck", "LeakCheck", "Утечки по email, телефону, нику и домену",
+            "API-ключ (32 символа)", "https://leakcheck.io/api", ProviderGroup.LEAKS
+        ),
+        ProviderSpec(
             "virustotal", "VirusTotal", "Репутация доменов и IP",
             "x-apikey", "https://www.virustotal.com/gui/my-apikey", ProviderGroup.LEAKS
         ),
@@ -227,6 +231,26 @@ class KeyValidator(private val repo: KeyRepository) {
                         "https://haveibeenpwned.com/api/v3/breachedaccount/test%40example.com?truncateResponse=true",
                         mapOf("hibp-api-key" to key)
                     )
+                }
+            }
+            "leakcheck" -> {
+                {
+                    // Валидный ключ отвечает 200 и JSON с полем success; неверный — 401/403
+                    // либо 200 с success=false, поэтому тело проверяется отдельно.
+                    val probe = Net.fetch(
+                        "https://leakcheck.io/api/public?key=${Net.urlEncode(key)}&check=test%40example.com"
+                    )
+                    when {
+                        probe.code == 401 || probe.code == 403 ->
+                            KeyCheck(KeyState.INVALID, "Сервис отклонил ключ (${probe.code})")
+                        probe.code == 429 ->
+                            KeyCheck(KeyState.VALID, "Ключ активен, превышен лимит запросов")
+                        probe.code in 200..299 && probe.body.contains("\"success\":true") ->
+                            KeyCheck(KeyState.VALID, "Ключ принят сервисом")
+                        probe.code in 200..299 ->
+                            KeyCheck(KeyState.INVALID, "Сервис ответил, но ключ не принят")
+                        else -> KeyCheck(KeyState.INVALID, "Ответ сервиса ${probe.code}")
+                    }
                 }
             }
             "virustotal" -> {

@@ -95,6 +95,8 @@ class DiagnosticsTest {
         assertEquals("8.8.8.8", DiagSamples.forProvider("ipinfo"))
         assertEquals("example.com", DiagSamples.forProvider("urlscan"))
         assertTrue(DiagSamples.acceptedFor("hibp")!!.contains("email"))
+        assertEquals("diag-check-zz@example.invalid", DiagSamples.forProvider("leakcheck"))
+        assertTrue(DiagSamples.acceptedFor("leakcheck")!!.contains("домен"))
         assertNull(DiagSamples.forProvider("unknown-provider"))
     }
 }

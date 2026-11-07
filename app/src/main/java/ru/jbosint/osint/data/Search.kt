@@ -74,7 +74,7 @@ internal fun JSONArray?.joined(separator: String = ", "): String {
 object Connectors {
 
     val all: List<Connector> = listOf(
-        GithubConnector, HibpConnector, VirusTotalConnector, ShodanConnector,
+        GithubConnector, HibpConnector, LeakCheckConnector, VirusTotalConnector, ShodanConnector,
         NumverifyConnector, HunterConnector, IpinfoConnector, TgstatConnector,
         VkConnector, DyxlessConnector, OpenCorporatesConnector, GoogleConnector, YandexConnector,
         BraveConnector, SerpApiConnector, DdgConnector, WikipediaConnector,
@@ -163,6 +163,91 @@ private object HibpConnector : Connector {
                 ).filterValues { it.isNotBlank() }
             )
         }
+    }
+}
+
+/**
+ * LeakCheck: участие адреса, телефона, ника или домена в утечках.
+ * Публичный API отдаёт сводку — сколько записей, какие наборы данных и какие типы полей.
+ * Сами записи и пароли модуль не забирает и в отчёт не выводит.
+ */
+internal object LeakCheckApi {
+
+    const val BASE = "https://leakcheck.io/api/public"
+    private const val MAX_SOURCES = 12
+
+    private val typeByKind = mapOf(
+        QueryKind.EMAIL to "email",
+        QueryKind.PHONE to "phone",
+        QueryKind.USERNAME to "username",
+        QueryKind.DOMAIN to "domain"
+    )
+
+    private val fieldTitles = mapOf(
+        "email" to "почта", "phone" to "телефон", "name" to "имя", "first_name" to "имя",
+        "last_name" to "фамилия", "middle_name" to "отчество", "dob" to "дата рождения",
+        "address" to "адрес", "city" to "город", "state" to "регион", "zip" to "индекс",
+        "country" to "страна", "ip" to "IP", "ip1" to "IP", "ip2" to "IP",
+        "username" to "ник", "password" to "пароль", "gender" to "пол",
+        "company_name" to "компания", "origin" to "источник", "profile_name" to "профиль",
+        "ssn" to "SSN", "id" to "ID"
+    )
+
+    /** Адрес запроса или null, если такой тип значения сервис не проверяет. */
+    fun url(query: String, kind: QueryKind, key: String): String? {
+        val type = typeByKind[kind] ?: return null
+        return "$BASE?key=${Net.urlEncode(key)}&check=${Net.urlEncode(query)}&type=$type"
+    }
+
+    fun parse(body: String, query: String, moduleId: String = "leakcheck"): List<RawFact> {
+        val json = runCatching { JSONObject(body) }.getOrNull() ?: return emptyList()
+        if (!json.optBoolean("success")) return emptyList()
+        val found = json.optInt("found", 0)
+        if (found <= 0) return emptyList()
+
+        val facts = ArrayList<RawFact>()
+        val names = ArrayList<String>()
+        val sources = json.optJSONArray("sources")
+        if (sources != null) {
+            for (i in 0 until minOf(sources.length(), MAX_SOURCES)) {
+                val source = sources.optJSONObject(i) ?: continue
+                val name = source.optString("name").trim()
+                if (name.isBlank() || names.contains(name)) continue
+                names += name
+                facts += fact(
+                    FactCategory.OTHER, "Утечка", name, query, moduleId,
+                    mapOf("Дата" to source.optString("date").trim()).filterValues { it.isNotBlank() }
+                )
+            }
+        }
+        facts += fact(
+            FactCategory.OTHER, "Записей в утечках", found.toString(), query, moduleId,
+            buildMap {
+                if (names.isNotEmpty()) put("Наборы данных", names.joinToString(", "))
+                if (sources != null && sources.length() > MAX_SOURCES) {
+                    put("Показано наборов", "$MAX_SOURCES из ${sources.length()}")
+                }
+            }
+        )
+        val fields = json.optJSONArray("fields").joined()
+        if (fields.isNotBlank()) {
+            val titles = fields.split(", ").map { it.trim() }.filter { it.isNotBlank() }
+                .map { fieldTitles[it] ?: it }.distinct().joinToString(", ")
+            if (titles.isNotBlank()) facts += fact(FactCategory.OTHER, "Типы данных", titles, query, moduleId)
+        }
+        return facts
+    }
+}
+
+private object LeakCheckConnector : Connector {
+    override val id = "leakcheck"
+    override suspend fun collect(query: String, key: KeyRepository): List<RawFact> {
+        val subject = query.trim()
+        val url = LeakCheckApi.url(subject, QueryDetector.detect(subject), key.key(id))
+            ?: return emptyList()
+        val response = Net.fetch(url)
+        if (!response.ok) return emptyList()
+        return LeakCheckApi.parse(response.body, subject, id)
     }
 }
 

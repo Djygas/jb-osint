@@ -49,6 +49,7 @@ object DiagSamples {
         "urlscan" to "example.com",
         "securitytrails" to "example.com",
         "dyxless" to "diag-check-zz@example.invalid",
+        "leakcheck" to "diag-check-zz@example.invalid",
         "opencorporates" to "tesla",
         "tgstat" to "osint",
         "vk" to "Иван Иванов",
@@ -65,6 +66,7 @@ object DiagSamples {
     /** Что модуль реально принимает — показывается, если фактов ноль. */
     val accepted: Map<String, String> = mapOf(
         "hibp" to "только email",
+        "leakcheck" to "email, телефон, ник или домен",
         "hunter" to "только домен",
         "ipinfo" to "только IP или домен",
         "abuseipdb" to "только IP",

@@ -87,6 +87,7 @@ object ProviderGuess {
         "github.com" to "github", "api.github.com" to "github",
         "gitlab.com" to "gitlab",
         "haveibeenpwned.com" to "hibp", "api.pwnedpasswords.com" to "hibp",
+        "leakcheck.io" to "leakcheck",
         "virustotal.com" to "virustotal",
         "shodan.io" to "shodan",
         "numverify.com" to "numverify", "apilayer.com" to "numverify",
@@ -109,6 +110,7 @@ object ProviderGuess {
     private val byWord: Map<String, String> = mapOf(
         "github" to "github", "гитхаб" to "github", "гитхабе" to "github",
         "gitlab" to "gitlab", "гитлаб" to "gitlab",
+        "leakcheck" to "leakcheck", "ликчек" to "leakcheck",
         "hibp" to "hibp", "haveibeenpwned" to "hibp", "утечк" to "hibp",
         "virustotal" to "virustotal", "вирустотал" to "virustotal",
         "shodan" to "shodan", "шодан" to "shodan",

@@ -65,6 +65,8 @@ class ProviderGuessTest {
         assertEquals("github", ProviderGuess.byHost("https://api.github.com/user"))
         assertEquals("vk", ProviderGuess.byHost("https://api.vk.com/method/users.get"))
         assertEquals("hibp", ProviderGuess.byHost("https://haveibeenpwned.com/api/v3"))
+        assertEquals("leakcheck", ProviderGuess.byHost("https://leakcheck.io/api/public"))
+        assertEquals("leakcheck", ProviderGuess.byText("LeakCheck — утечки"))
         assertNull(ProviderGuess.byHost("https://example.org/api"))
     }
 
