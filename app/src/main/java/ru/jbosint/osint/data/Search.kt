@@ -79,7 +79,7 @@ object Connectors {
         VkConnector, DyxlessConnector, OpenCorporatesConnector, GoogleConnector, YandexConnector,
         BraveConnector, SerpApiConnector, DdgConnector, WikipediaConnector,
         UrlscanConnector, SecurityTrailsConnector, AbuseIpdbConnector, GitlabConnector,
-        TeleSintConnector
+        TeleSintConnector, TronkConnector
     )
 
     fun byId(id: String): Connector? = all.firstOrNull { it.id == id }

@@ -83,6 +83,10 @@ object ProviderCatalog {
             "Api-Key (32 символа)", "https://docs.telesint.dev/en/api/", ProviderGroup.SOCIAL
         ),
         ProviderSpec(
+            "tronk", "TRONK.PRO (проверка авто)", "ДТП, залоги, пробег, владельцы, цена, фото",
+            "Bearer-токен", "https://tronk.pro", ProviderGroup.REGISTRY
+        ),
+        ProviderSpec(
             "opencorporates", "OpenCorporates", "Юридические лица",
             "api_token", "https://opencorporates.com/api_accounts/new", ProviderGroup.REGISTRY
         ),
@@ -391,6 +395,21 @@ class KeyValidator(private val repo: KeyRepository) {
             }
             "urlscan" -> { { probeHttp("https://urlscan.io/api/v1/search/?q=example.com&size=1") } }
             "gitlab" -> { { probeHttp("https://gitlab.com/api/v4/users?username=root") } }
+            "tronk" -> {
+                {
+                    val probe = Net.fetch(
+                        "https://api.tronk.pro/v1/me",
+                        headers = mapOf("Authorization" to "Bearer $key", "Accept" to "application/json"),
+                        attempts = 1
+                    )
+                    when {
+                        probe.code in 200..299 -> KeyCheck(KeyState.VALID, "Ключ принят")
+                        probe.code == 401 || probe.code == 403 -> KeyCheck(KeyState.INVALID, "Ключ отклонён (${probe.code})")
+                        probe.code == 404 -> KeyCheck(KeyState.VALID, "Ключ принят")
+                        else -> KeyCheck(KeyState.UNCHECKED, "HTTP ${probe.code}")
+                    }
+                }
+            }
             else -> { { KeyCheck(KeyState.UNCHECKED, "Проверка не поддерживается") } }
         }
         val result = runCatching { probe() }.getOrElse {

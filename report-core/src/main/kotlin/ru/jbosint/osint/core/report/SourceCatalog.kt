@@ -38,6 +38,9 @@ object SourceCatalog {
         SourceRef("photo", "Обратный поиск изображения (SauceNAO)", "https://saucenao.com"),
         SourceRef("faceapi", "Поиск по лицу (ProFaceFinder)", "https://profacefinder.com"),
         SourceRef("leakcheck", "LeakCheck", "https://leakcheck.io"),
+        SourceRef("tronk", "TRONK.PRO (проверка авто)", "https://tronk.pro"),
+        SourceRef("vin", "Разбор VIN (локально)", "https://jbosint.ru"),
+        SourceRef("photo_search", "Поиск по фото", "https://saucenao.com"),
         SourceRef("custom", "Свой модуль", "https://jbosint.ru")
     ).associateBy { it.id }
 

@@ -87,8 +87,23 @@ import ru.jbosint.osint.profile.ProfileExport
 import ru.jbosint.osint.profile.ProfileExporter
 import ru.jbosint.osint.profile.ProfileMessages
 import ru.jbosint.osint.profile.ProfileStore
+import ru.jbosint.osint.agent.AgentFinding
+import ru.jbosint.osint.agent.AgentNarrator
+import ru.jbosint.osint.agent.AgentPlanner
+import ru.jbosint.osint.agent.AgentReport
+import ru.jbosint.osint.agent.AgentRunner
+import ru.jbosint.osint.agent.AgentTarget
+import ru.jbosint.osint.agent.AgentUi
+import ru.jbosint.osint.agent.AutoReport
+import ru.jbosint.osint.agent.AutoUi
+import ru.jbosint.osint.agent.PhotoUi
+import ru.jbosint.osint.agent.WatchItem
+import ru.jbosint.osint.data.AutoCheck
+import ru.jbosint.osint.data.PhotoSearch
+import ru.jbosint.osint.data.PhotoSearchResult
+import ru.jbosint.osint.data.WatchStore
 
-enum class Screen { HOME, RESULTS, TELEGRAM, KEYS, SETTINGS, PROFILE }
+enum class Screen { HOME, RESULTS, TELEGRAM, KEYS, SETTINGS, PROFILE, AGENT }
 
 /** Состояние быстрой настройки модуля: прогресс или предложение ручной настройки. */
 data class AutoSetupUi(
@@ -226,7 +241,13 @@ data class UiState(
     val profileDossier: String = "",
     val profileAnonymize: Boolean = false,
     val compareText: String = "",
-    val profileBriefs: List<ProfileBrief> = emptyList()
+    val profileBriefs: List<ProfileBrief> = emptyList(),
+    // ------------------------------------------------------------ автономные агенты
+    val agent: AgentUi = AgentUi(),
+    val auto: AutoUi = AutoUi(),
+    val photoSearch: PhotoUi = PhotoUi(),
+    val watches: List<WatchItem> = emptyList(),
+    val watchNotes: Map<String, String> = emptyMap()
 ) {
     val activeModules: Int
         get() = providers.count { it.enabled && it.hasKey } + customModules.count { it.enabled && (it.hasKey || it.auth == CustomAuth.NONE) }
@@ -245,6 +266,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val assistantStore = AssistantStore(app)
     private val assistantService = AssistantService(assistantStore)
     private val profileStore = ProfileStore(app)
+    private val agentRunner = AgentRunner(keys)
+    private val watchStore = WatchStore(app)
     /** Сообщения, импортированные пользователем для профиля (живут до пересборки). */
     private var importedMessages: List<ru.jbosint.osint.profile.ProfileMessage> = emptyList()
 
@@ -291,7 +314,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             autoResearch = assistantStore.autoResearch,
             profilePinSet = settings.profilePin.isNotBlank(),
             profileUnlocked = settings.profilePin.isBlank(),
-            profileBriefs = profileStore.brief()
+            profileBriefs = profileStore.brief(),
+            watches = watchStore.list()
         )
     }
 
@@ -2192,5 +2216,301 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return digest.digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
     }
 
+
+    // ------------------------------------------------------- автономный агент
+
+    fun setAgentQuery(value: String) = _state.update {
+        it.copy(agent = it.agent.copy(query = value, target = AgentPlanner.detect(value), error = null))
+    }
+
+    /** Запуск каскада: бесплатные модули → по ключу → платные (с лимитом). */
+    fun runAgent() {
+        val current = _state.value.agent
+        val query = current.query.trim()
+        if (query.isBlank()) {
+            _state.update { it.copy(toast = "Введите ФИО, телефон, почту, VIN, домен или ник") }
+            return
+        }
+        if (current.running) return
+        _state.update {
+            it.copy(agent = it.agent.copy(running = true, error = null, report = null, stage = "Планирование", progress = 2))
+        }
+        viewModelScope.launch {
+            val outcome = runCatching {
+                agentRunner.run(query) { stage, progress ->
+                    _state.update { state -> state.copy(agent = state.agent.copy(stage = stage, progress = progress)) }
+                }
+            }
+            outcome.onSuccess { report ->
+                _state.update {
+                    it.copy(
+                        agent = it.agent.copy(
+                            running = false,
+                            report = report,
+                            stage = "",
+                            progress = 100,
+                            history = (listOf(query) + it.agent.history).distinct().take(8)
+                        ),
+                        toast = if (report.hasResults) "Готово: ${report.findings.size} фактов"
+                        else "Данные не найдены — попробуйте другой запрос"
+                    )
+                }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(agent = it.agent.copy(running = false, error = error.message ?: "Не удалось выполнить поиск", stage = ""))
+                }
+            }
+        }
+    }
+
+    fun clearAgent() = _state.update { it.copy(agent = AgentUi(query = it.agent.query)) }
+
+    /** Профиль из результатов агента — тот же экран, что и для обычного поиска. */
+    fun openAgentProfile() {
+        val report = _state.value.agent.report ?: return
+        val entry = HistoryEntry(
+            id = "agent_" + System.currentTimeMillis(),
+            query = report.query,
+            createdAt = System.currentTimeMillis(),
+            analyst = _state.value.analyst,
+            data = report.data,
+            demo = false,
+            queryType = report.target.title
+        )
+        viewModelScope.launch {
+            val profile = withContext(Dispatchers.Default) { ProfileBuilder.build(entry, null, emptyList()) }
+            profileStore.save(profile)
+            _state.update {
+                it.copy(profile = profile, screen = Screen.PROFILE, profileBriefs = profileStore.brief())
+            }
+        }
+    }
+
+    /** Экспорт отчёта агента: модули в документе анонимны, ссылки — в приложении B. */
+    fun exportAgent(format: ReportExporter.Format) {
+        val report = _state.value.agent.report ?: run {
+            _state.update { it.copy(toast = "Сначала запустите агента") }
+            return
+        }
+        if (_state.value.exporting) return
+        _state.update { it.copy(exporting = true) }
+        viewModelScope.launch {
+            val entry = HistoryEntry(
+                id = "agent_" + report.durationMs,
+                query = report.query,
+                createdAt = System.currentTimeMillis(),
+                analyst = _state.value.analyst,
+                data = report.anonymousData,
+                demo = false,
+                aiAnalysis = buildString {
+                    appendLine("Агент: ${report.target.title}. ${report.note}")
+                    appendLine("Утверждения:")
+                    report.findings.take(40).forEach { appendLine("- ${it.text} [${it.status.title}]") }
+                    if (report.assumptions.isNotEmpty()) {
+                        appendLine("Предположения:")
+                        report.assumptions.forEach { appendLine("- ${it.text}") }
+                    }
+                    appendLine("Приложение B (реальные источники):")
+                    report.modules.forEach { appendLine("- ${it.label}: ${it.realName} — ${it.url}") }
+                },
+                queryType = report.target.title
+            )
+            val outcome = runCatching { exporter.export(entry, format) }
+            _state.update { it.copy(exporting = false) }
+            outcome.onSuccess { exported ->
+                _state.update { it.copy(toast = "${format.label} готов") }
+                _shareEvents.emit(ShareRequest(exported.uri, exported.mime, exported.fileName))
+            }.onFailure { error ->
+                _state.update { it.copy(toast = "Ошибка экспорта: ${error.message ?: "неизвестная"}") }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ проверка авто
+
+    fun setAutoQuery(value: String) = _state.update {
+        it.copy(auto = it.auto.copy(query = value, error = null))
+    }
+
+    fun runAutoCheck() {
+        val query = _state.value.auto.query.trim()
+        if (query.isBlank()) {
+            _state.update { it.copy(toast = "Введите VIN, номер кузова или госномер") }
+            return
+        }
+        if (_state.value.auto.running) return
+        _state.update { it.copy(auto = it.auto.copy(running = true, error = null, report = null)) }
+        viewModelScope.launch {
+            val outcome = runCatching {
+                withContext(Dispatchers.IO) {
+                    val compact = query.filter { it.isLetterOrDigit() }.uppercase()
+                    val isVin = compact.length == 17
+                    val raw = ArrayList<ru.jbosint.osint.core.model.RawFact>()
+                    raw += AutoCheck.decodeVin(if (isVin) compact else "")
+                    val key = keys.key("tronk")
+                    var paid = 0
+                    if (key.isNotBlank()) {
+                        raw += AutoCheck.tronk(
+                            key = key,
+                            vin = if (isVin) compact else "",
+                            plate = if (isVin) "" else query.uppercase()
+                        )
+                        paid = 1
+                    }
+                    val stats = ru.jbosint.osint.core.model.SearchStats(
+                        sourcesAttempted = 2,
+                        sourcesResponded = if (raw.isEmpty()) 0 else 1,
+                        sourcesFailed = if (raw.isEmpty()) 1 else 0,
+                        rawFacts = raw.size,
+                        duplicatesRemoved = 0,
+                        durationMs = 0
+                    )
+                    val data = ru.jbosint.osint.core.aggregate.Aggregator.aggregate(query, raw, stats)
+                        .copy(sources = listOf(ru.jbosint.osint.core.report.SourceCatalog.ref("tronk"), ru.jbosint.osint.core.report.SourceCatalog.ref("vin")))
+                    val anonymized = ru.jbosint.osint.agent.AgentAnonymizer.apply(data)
+                    val summary = raw.map { it.kind to it.value }.distinct().take(20)
+                    AutoReport(
+                        query = query,
+                        vin = if (isVin) compact else "",
+                        plate = if (isVin) "" else query.uppercase(),
+                        summary = summary,
+                        findings = AgentNarrator.findings(anonymized.data),
+                        assumptions = AgentNarrator.assumptions(anonymized.data, AgentTarget.VIN),
+                        manualLinks = AutoCheck.manualLinks(vin = if (isVin) compact else "", plate = if (isVin) "" else query.uppercase()),
+                        modules = anonymized.modules,
+                        ok = raw.isNotEmpty(),
+                        error = if (key.isBlank()) "Ключ TRONK не задан — показаны локальный разбор VIN и ссылки для ручной проверки" else null
+                    )
+                }
+            }
+            outcome.onSuccess { report ->
+                _state.update { it.copy(auto = it.auto.copy(running = false, report = report)) }
+            }.onFailure { error ->
+                _state.update { it.copy(auto = it.auto.copy(running = false, error = error.message ?: "Ошибка проверки")) }
+            }
+        }
+    }
+
+    // --------------------------------------------------------- поиск по фото
+
+    fun setPhotoPlatform(platform: String?) = _state.update {
+        it.copy(photoSearch = it.photoSearch.copy(platform = platform))
+    }
+
+    fun runPhotoSearch(uri: Uri) {
+        if (_state.value.photoSearch.running) return
+        _state.update {
+            it.copy(photoSearch = PhotoUi(running = true, stage = "Анализ фотографии", progress = 5))
+        }
+        viewModelScope.launch {
+            val outcome = runCatching {
+                val photo = PhotoAnalyzer.analyze(getApplication(), uri)
+                _state.update {
+                    it.copy(photoSearch = it.photoSearch.copy(stage = "Обратный поиск", progress = 35))
+                }
+                PhotoSearch.run(photo, keys) { stage, progress ->
+                    _state.update { state -> state.copy(photoSearch = state.photoSearch.copy(stage = stage, progress = progress)) }
+                }
+            }
+            outcome.onSuccess { result ->
+                _state.update {
+                    it.copy(
+                        photoSearch = PhotoUi(running = false, result = result, progress = 100),
+                        toast = if (result.hasResults) "Совпадений: ${result.found.size}" else "Совпадений не найдено"
+                    )
+                }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(photoSearch = it.photoSearch.copy(running = false, error = error.message ?: "Не удалось обработать фото", stage = ""))
+                }
+            }
+        }
+    }
+
+    /** «Добавить в досье»: факты фото → профиль объекта. */
+    fun addPhotoToDossier() {
+        val result = _state.value.photoSearch.result ?: return
+        val raw = PhotoAnalyzer.facts(result.photo) + PhotoSearch.toFacts(result)
+        val stats = ru.jbosint.osint.core.model.SearchStats(
+            sourcesAttempted = 1,
+            sourcesResponded = 1,
+            sourcesFailed = 0,
+            rawFacts = raw.size,
+            duplicatesRemoved = 0,
+            durationMs = result.durationMs
+        )
+        val data = ru.jbosint.osint.core.aggregate.Aggregator.aggregate(result.photo.fileName, raw, stats)
+            .copy(sources = listOf(ru.jbosint.osint.core.report.SourceCatalog.ref("photo")))
+        val entry = HistoryEntry(
+            id = "photo_" + System.currentTimeMillis(),
+            query = result.photo.fileName,
+            createdAt = System.currentTimeMillis(),
+            analyst = _state.value.analyst,
+            data = data,
+            demo = false,
+            queryType = "фотография",
+            photoNote = PhotoSearch.summary(result)
+        )
+        viewModelScope.launch {
+            val profile = withContext(Dispatchers.Default) { ProfileBuilder.build(entry, null, emptyList()) }
+            profileStore.save(profile)
+            _state.update {
+                it.copy(profile = profile, screen = Screen.PROFILE, profileBriefs = profileStore.brief(), toast = "Совпадения добавлены в досье")
+            }
+        }
+    }
+
+    // ------------------------------------------------------ мониторинг объявлений
+
+    fun refreshWatches() {
+        viewModelScope.launch {
+            val items = withContext(Dispatchers.IO) { watchStore.list() }
+            _state.update { it.copy(watches = items) }
+        }
+    }
+
+    fun addWatch(title: String, query: String, priceMax: Int) {
+        if (query.isBlank()) {
+            _state.update { it.copy(toast = "Укажите критерий мониторинга") }
+            return
+        }
+        viewModelScope.launch {
+            val item = withContext(Dispatchers.IO) { watchStore.add(title, query, priceMax) }
+            _state.update { it.copy(watches = it.watches + item, toast = "Мониторинг добавлен") }
+        }
+    }
+
+    fun removeWatch(id: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { watchStore.remove(id) }
+            _state.update {
+                it.copy(watches = it.watches.filterNot { watch -> watch.id == id }, watchNotes = it.watchNotes - id)
+            }
+        }
+    }
+
+    fun checkWatch(id: String) {
+        val item = _state.value.watches.firstOrNull { it.id == id } ?: return
+        viewModelScope.launch {
+            _state.update { it.copy(watchNotes = it.watchNotes + (id to "Проверяем…")) }
+            val outcome = runCatching { watchStore.check(item) }
+            outcome.onSuccess { check ->
+                _state.update {
+                    it.copy(
+                        watches = it.watches.map { watch -> if (watch.id == id) check.item else watch },
+                        watchNotes = it.watchNotes + (id to check.summary)
+                    )
+                }
+            }.onFailure { error ->
+                _state.update { it.copy(watchNotes = it.watchNotes + (id to "Ошибка: ${error.message ?: "неизвестная"}")) }
+            }
+        }
+    }
+
+    fun checkAllWatches() {
+        _state.value.watches.forEach { checkWatch(it.id) }
+    }
+
     fun consumeToast() = _state.update { it.copy(toast = null) }
+
 }
