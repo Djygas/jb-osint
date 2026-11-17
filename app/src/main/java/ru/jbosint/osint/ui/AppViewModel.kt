@@ -1,0 +1,2681 @@
+package ru.jbosint.osint.ui
+
+import android.app.Application
+import android.net.Uri
+import android.os.Build
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import ru.jbosint.osint.BuildConfig
+import ru.jbosint.osint.core.model.AggregatedData
+import ru.jbosint.osint.core.model.Fact
+import ru.jbosint.osint.core.model.FactCategory
+import ru.jbosint.osint.data.AssistantCatalog
+import ru.jbosint.osint.data.AssistantClassification
+import ru.jbosint.osint.data.AssistantParser
+import ru.jbosint.osint.data.AssistantPrompts
+import ru.jbosint.osint.data.AssistantRole
+import ru.jbosint.osint.data.AssistantService
+import ru.jbosint.osint.data.AssistantStore
+import ru.jbosint.osint.data.WebHit
+import ru.jbosint.osint.data.WebResearch
+import ru.jbosint.osint.data.CustomAuth
+import ru.jbosint.osint.data.CustomConnectionProbe
+import ru.jbosint.osint.data.CustomModule
+import ru.jbosint.osint.data.CustomModuleChecker
+import ru.jbosint.osint.data.AutoSetup
+import ru.jbosint.osint.data.Connectors
+import ru.jbosint.osint.data.DocHints
+import ru.jbosint.osint.data.SourceLink
+import ru.jbosint.osint.data.CustomModuleSpec
+import ru.jbosint.osint.data.CustomModuleStore
+import ru.jbosint.osint.data.CustomResponseParser
+import ru.jbosint.osint.data.DiagBlock
+import ru.jbosint.osint.data.DiagMask
+import ru.jbosint.osint.data.DiagReport
+import ru.jbosint.osint.data.DiagSamples
+import ru.jbosint.osint.data.JsonShape
+import ru.jbosint.osint.data.DataMerge
+import ru.jbosint.osint.data.FaceSearch
+import ru.jbosint.osint.data.PhotoAnalysis
+import ru.jbosint.osint.data.PhotoAnalyzer
+import ru.jbosint.osint.data.QueryDetector
+import ru.jbosint.osint.data.ReverseImage
+import ru.jbosint.osint.data.Net
+import ru.jbosint.osint.core.model.RawFact
+import ru.jbosint.osint.data.FieldRule
+import ru.jbosint.osint.data.KeyCheck
+import ru.jbosint.osint.data.HistoryEntry
+import ru.jbosint.osint.data.HistoryStore
+import ru.jbosint.osint.data.KeyRepository
+import ru.jbosint.osint.data.ConnectionUi
+import ru.jbosint.osint.data.KeyIntake
+import ru.jbosint.osint.data.KeyState
+import ru.jbosint.osint.data.ProviderGuess
+import ru.jbosint.osint.data.RepairPlan
+import ru.jbosint.osint.data.RepairStep
+import ru.jbosint.osint.data.SetupRoute
+import ru.jbosint.osint.data.KeyValidator
+import ru.jbosint.osint.data.ProviderCatalog
+import ru.jbosint.osint.data.ProviderSpec
+import ru.jbosint.osint.data.SearchEngine
+import ru.jbosint.osint.data.SettingsStore
+import ru.jbosint.osint.core.model.ReportMeta
+import ru.jbosint.osint.core.report.HtmlReport
+import ru.jbosint.osint.core.report.XlsxReport
+import ru.jbosint.osint.data.TgDossier
+import ru.jbosint.osint.data.TgExport
+import ru.jbosint.osint.data.TgParser
+import ru.jbosint.osint.report.ReportExporter
+import ru.jbosint.osint.profile.DossierTemplate
+import ru.jbosint.osint.profile.ProfileBrief
+import ru.jbosint.osint.profile.ProfileBuilder
+import ru.jbosint.osint.profile.ProfileCompare
+import ru.jbosint.osint.profile.ProfileData
+import ru.jbosint.osint.profile.ProfileDiff
+import ru.jbosint.osint.profile.ProfileExport
+import ru.jbosint.osint.profile.ProfileExporter
+import ru.jbosint.osint.profile.ProfileMessages
+import ru.jbosint.osint.profile.ProfileStore
+import ru.jbosint.osint.agent.AgentFinding
+import ru.jbosint.osint.agent.AgentNarrator
+import ru.jbosint.osint.agent.AgentPlanner
+import ru.jbosint.osint.agent.AgentReport
+import ru.jbosint.osint.agent.AgentRunner
+import ru.jbosint.osint.agent.AgentTemplate
+import ru.jbosint.osint.agent.AgentTemplates
+import ru.jbosint.osint.data.Notify
+import ru.jbosint.osint.data.JournalEntry
+import ru.jbosint.osint.data.SearchJournal
+import ru.jbosint.osint.data.TelegramRules
+import ru.jbosint.osint.agent.AgentTarget
+import ru.jbosint.osint.agent.AgentUi
+import ru.jbosint.osint.agent.AutoReport
+import ru.jbosint.osint.agent.AutoUi
+import ru.jbosint.osint.agent.PhotoUi
+import ru.jbosint.osint.agent.WatchItem
+import ru.jbosint.osint.data.AutoCheck
+import ru.jbosint.osint.data.PhotoSearch
+import ru.jbosint.osint.data.PhotoSearchResult
+import ru.jbosint.osint.data.WatchStore
+
+enum class Screen { HOME, RESULTS, TELEGRAM, KEYS, SETTINGS, PROFILE, AGENT }
+
+/** Состояние быстрой настройки модуля: прогресс или предложение ручной настройки. */
+data class AutoSetupUi(
+    val running: Boolean,
+    val stage: String,
+    val failed: Boolean,
+    val title: String,
+    val key: String,
+    val link: String,
+    val skip: Int = 0,
+    val suggested: CustomModule? = null,
+    val hints: DocHints = DocHints(),
+    val exhausted: Boolean = false
+)
+
+data class ProviderUi(
+    val spec: ProviderSpec,
+    val enabled: Boolean,
+    val hasKey: Boolean,
+    val hasSecond: Boolean,
+    val state: KeyState,
+    val checkedAt: Long,
+    val checking: Boolean = false
+)
+
+data class ShareRequest(val uri: Uri, val mime: String, val fileName: String)
+
+/** Формат выгрузки Telegram-парсера. */
+enum class TgFormat(val extension: String, val mime: String, val label: String) {
+    HTML("html", "text/html", "HTML-отчёт"),
+    CSV("csv", "text/csv", "CSV"),
+    XLSX(
+        "xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Excel"
+    )
+}
+
+/** Краткая карточка снимка, по которому выполняется или выполнен поиск. */
+data class PhotoCard(
+    val fileName: String,
+    val summary: String,
+    val faces: Int,
+    val sha256: String,
+    val hits: Int = 0
+)
+
+/** Предварительная выборка: факты без сохранения истории и без отчёта. */
+data class PreviewState(
+    val running: Boolean = false,
+    val facts: List<Fact> = emptyList(),
+    val rawFacts: Int = 0,
+    val sourcesAttempted: Int = 0,
+    val sourcesResponded: Int = 0,
+    val error: String? = null
+) {
+    val isEmpty: Boolean get() = facts.isEmpty()
+}
+
+/** Состояние Telegram-парсера: ввод канала, прогресс сбора и готовый список аудитории. */
+data class TgUi(
+    val channel: String = "",
+    val pages: Int = TgParser.DEFAULT_MAX_PAGES,
+    val running: Boolean = false,
+    val exporting: Boolean = false,
+    val stage: String = "",
+    val error: String? = null,
+    val dossier: TgDossier? = null
+)
+
+data class UiState(
+    val ready: Boolean = false,
+    val screen: Screen = Screen.HOME,
+    val onboarding: Boolean = false,
+    val query: String = "",
+    val searching: Boolean = false,
+    val stage: String = "",
+    val progress: Int = 0,
+    val searchError: String? = null,
+    val result: AggregatedData? = null,
+    val resultEntry: HistoryEntry? = null,
+    val photo: PhotoCard? = null,
+    val history: List<HistoryEntry> = emptyList(),
+    val providers: List<ProviderUi> = emptyList(),
+    val customModules: List<CustomModule> = emptyList(),
+    val customChecking: Set<String> = emptySet(),
+    val customChecks: Map<String, KeyCheck> = emptyMap(),
+    val preview: PreviewState? = null,
+    val analyst: String = "",
+    val demoMode: Boolean = false,
+    val secureScreen: Boolean = true,
+    val autoWipeDays: Int = 30,
+    val exporting: Boolean = false,
+    val diagRunning: Boolean = false,
+    val diagReport: String? = null,
+    val diagBlocks: List<DiagBlock> = emptyList(),
+    val repairing: Boolean = false,
+    val repairLog: List<String> = emptyList(),
+    val connection: ConnectionUi? = null,
+    val autoSetup: AutoSetupUi? = null,
+    val manualDraft: CustomModule? = null,
+    val manualKey: String = "",
+    val toast: String? = null,
+    val tg: TgUi = TgUi(),
+    // ---------------------------------------------- интеллектуальный ассистент
+    val assistantConfigured: Boolean = false,
+    val assistantProvider: String = AssistantCatalog.DEFAULT_PROVIDER,
+    val assistantBaseUrl: String = "",
+    /** Поставщики, у которых уже сохранён ключ (точки на переключателе). */
+    val assistantKeyed: Set<String> = emptySet(),
+    val assistantModel: String = AssistantCatalog.DEFAULT_MODEL,
+    /** Уровень усилий Agent API (low/medium/high). */
+    val assistantPreset: String = "medium",
+    val assistantState: KeyState = KeyState.UNCHECKED,
+    val assistantCheckedAt: Long = 0L,
+    val assistantChecking: Boolean = false,
+    val assistantBusy: String = "",
+    val assistantError: String? = null,
+    val assistantAutoAnalyze: Boolean = false,
+    val assistantAutoClassify: Boolean = false,
+    val assistantAutoQueries: Boolean = false,
+    val assistantPolish: Boolean = false,
+    val autoResearch: Boolean = false,
+    val analysisRunning: Boolean = false,
+    val researchRunning: Boolean = false,
+    val research: String = "",
+    val researchError: String? = null,
+    val classifications: Map<String, AssistantClassification> = emptyMap(),
+    // ------------------------------------------------------------ профиль объекта
+    val profile: ProfileData? = null,
+    val profileBusy: Boolean = false,
+    val profileChanges: List<String> = emptyList(),
+    val profilePinSet: Boolean = false,
+    val profileUnlocked: Boolean = true,
+    val profileDossier: String = "",
+    val profileAnonymize: Boolean = false,
+    val compareText: String = "",
+    val profileBriefs: List<ProfileBrief> = emptyList(),
+    // ------------------------------------------------------------ автономные агенты
+    val agent: AgentUi = AgentUi(),
+    val auto: AutoUi = AutoUi(),
+    val photoSearch: PhotoUi = PhotoUi(),
+    val watches: List<WatchItem> = emptyList(),
+    val watchNotes: Map<String, String> = emptyMap(),
+    val journal: List<JournalEntry> = emptyList()
+) {
+    val activeModules: Int
+        get() = providers.count { it.enabled && it.hasKey } + customModules.count { it.enabled && (it.hasKey || it.auth == CustomAuth.NONE) }
+}
+
+class AppViewModel(app: Application) : AndroidViewModel(app) {
+
+    private val settings = SettingsStore(app)
+    private val keys = KeyRepository(app)
+    private val historyStore = HistoryStore(app)
+    private val exporter = ReportExporter(app)
+    private val validator = KeyValidator(keys)
+    private val customStore = CustomModuleStore(app)
+    private val customChecker = CustomModuleChecker(customStore)
+    private val engine = SearchEngine(keys, settings)
+    private val assistantStore = AssistantStore(app)
+    private val assistantService = AssistantService(assistantStore)
+    private val profileStore = ProfileStore(app)
+    private val agentRunner = AgentRunner(keys)
+    private val watchStore = WatchStore(app)
+    /** Сообщения, импортированные пользователем для профиля (живут до пересборки). */
+    private var importedMessages: List<ru.jbosint.osint.profile.ProfileMessage> = emptyList()
+
+    private val _state = MutableStateFlow(UiState())
+    val state = _state.asStateFlow()
+
+    private val _shareEvents = MutableSharedFlow<ShareRequest>(extraBufferCapacity = 4)
+    val shareEvents = _shareEvents.asSharedFlow()
+
+    init {
+        // Автоудаление старых отчётов и загрузка истории — вне главного потока.
+        viewModelScope.launch(Dispatchers.IO) {
+            val keepDays = settings.autoWipeDays
+            if (keepDays > 0) {
+                val cutoff = System.currentTimeMillis() - keepDays * 86_400_000L
+                historyStore.list().filter { it.createdAt < cutoff }.forEach { historyStore.delete(it.id) }
+            }
+            val entries = historyStore.list()
+            _state.update { it.copy(history = entries) }
+        }
+        _state.value = UiState(
+            ready = true,
+            screen = Screen.HOME,
+            onboarding = settings.onboardingDone,
+            analyst = settings.analyst,
+            demoMode = settings.demoMode,
+            secureScreen = settings.secureScreen,
+            autoWipeDays = settings.autoWipeDays,
+            history = emptyList(),
+            providers = buildProviders(),
+            customModules = customStore.list(),
+            assistantConfigured = assistantStore.configured(),
+            assistantProvider = assistantStore.provider,
+            assistantBaseUrl = assistantStore.customBaseUrl,
+            assistantKeyed = keyedProviders(),
+            assistantModel = assistantStore.model,
+            assistantPreset = assistantStore.preset,
+            assistantState = assistantStore.state(),
+            assistantCheckedAt = assistantStore.checkedAt(),
+            assistantAutoAnalyze = assistantStore.autoAnalyze,
+            assistantAutoClassify = assistantStore.autoClassify,
+            assistantAutoQueries = assistantStore.autoQueries,
+            assistantPolish = assistantStore.polishReport,
+            autoResearch = assistantStore.autoResearch,
+            profilePinSet = settings.profilePin.isNotBlank(),
+            profileUnlocked = settings.profilePin.isBlank(),
+            profileBriefs = profileStore.brief(),
+            watches = watchStore.list()
+        )
+    }
+
+    private fun buildProviders(): List<ProviderUi> = ProviderCatalog.all.map { spec ->
+        ProviderUi(
+            spec = spec,
+            enabled = keys.isEnabled(spec.id),
+            hasKey = spec.keyless || keys.key(spec.id).isNotBlank(),
+            hasSecond = keys.secondField(spec.id).isNotBlank(),
+            state = keys.state(spec.id),
+            checkedAt = keys.checkedAt(spec.id)
+        )
+    }
+
+    private fun refreshProviders() = _state.update { it.copy(providers = buildProviders()) }
+
+    private fun refreshCustom() = _state.update { it.copy(customModules = customStore.list()) }
+
+    // ---------------------------------------------------------------- навигация
+
+    fun navigate(screen: Screen) = _state.update {
+        it.copy(screen = screen, searchError = null)
+    }
+
+    fun backHome() = _state.update { it.copy(screen = Screen.HOME) }
+
+    fun openHistory(entry: HistoryEntry) = _state.update {
+        it.copy(
+            screen = Screen.RESULTS,
+            result = entry.data,
+            resultEntry = entry,
+            searchError = null,
+            research = entry.aiResearch,
+            researchError = null
+        )
+    }
+
+    // ---------------------------------------------------------------- онбординг
+
+    fun completeOnboarding(analyst: String) {
+        settings.onboardingDone = true
+        settings.analyst = analyst.trim()
+        _state.update { it.copy(onboarding = true, analyst = analyst.trim(), screen = Screen.HOME) }
+    }
+
+    // ------------------------------------------------------------------- поиск
+
+    fun setQuery(value: String) = _state.update {
+        it.copy(query = value, searchError = null, preview = null)
+    }
+
+    /** «Тестировать поиск»: предварительный список фактов без отчёта и без сохранения. */
+    fun previewSearch() {
+        val current = _state.value
+        if (current.preview?.running == true || current.searching) return
+        val query = current.query.trim()
+        if (query.length < 2) {
+            _state.update { it.copy(preview = PreviewState(error = "Введите запрос длиной от 2 символов")) }
+            return
+        }
+        _state.update { it.copy(preview = PreviewState(running = true), searchError = null) }
+        viewModelScope.launch {
+            val modules = customStore.activeModules()
+            val outcome = runCatching {
+                engine.search(query, { _, _ -> }, modules)
+            }
+            outcome.onSuccess { data ->
+                _state.update {
+                    it.copy(
+                        preview = PreviewState(
+                            running = false,
+                            facts = data.facts,
+                            rawFacts = data.stats.rawFacts,
+                            sourcesAttempted = data.stats.sourcesAttempted,
+                            sourcesResponded = data.stats.sourcesResponded
+                        )
+                    )
+                }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        preview = PreviewState(
+                            running = false,
+                            error = "Предпросмотр не удался: ${error.message ?: "неизвестная ошибка"}"
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun clearPreview() = _state.update { it.copy(preview = null) }
+
+    fun startSearch() {
+        val current = _state.value
+        if (current.searching) return
+        val query = current.query.trim()
+        if (query.length < 2) {
+            _state.update { it.copy(searchError = "Введите запрос: имя, адрес почты, телефон, домен, IP или никнейм") }
+            return
+        }
+        if (keys.activeCount() == 0 && customStore.activeModules().isEmpty() && !settings.demoMode) {
+            _state.update {
+                it.copy(
+                    searchError = "Нет активных модулей. Добавьте хотя бы один API-ключ или включите демо-режим."
+                )
+            }
+            return
+        }
+        _state.update {
+            it.copy(
+                searching = true, stage = "Подготовка модулей", progress = 0,
+                searchError = null, result = null, resultEntry = null,
+                research = "", researchError = null, classifications = emptyMap()
+            )
+        }
+        viewModelScope.launch {
+            var effective = query
+            if (assistantStore.autoQueries && assistantStore.configured()) {
+                _state.update { it.copy(stage = "Ассистент: подготовка запросов") }
+                effective = refineQuery(query) ?: query
+            }
+            val outcome = runCatching {
+                engine.search(effective, { stage, progress ->
+                    _state.update { s -> s.copy(stage = stage, progress = progress.coerceIn(0, 100)) }
+                }, customStore.activeModules())
+            }
+            outcome.onSuccess { data ->
+                val entry = HistoryEntry(
+                    id = historyStore.newId(),
+                    query = data.query,
+                    createdAt = System.currentTimeMillis(),
+                    analyst = settings.analyst,
+                    data = data,
+                    demo = settings.demoMode,
+                    queryType = QueryDetector.detect(effective).title
+                )
+                val entries = withContext(Dispatchers.IO) {
+                    historyStore.save(entry)
+                    historyStore.list()
+                }
+                _state.update {
+                    it.copy(
+                        searching = false,
+                        progress = 100,
+                        stage = "Готово",
+                        result = data,
+                        resultEntry = entry,
+                        screen = Screen.RESULTS,
+                        history = entries
+                    )
+                }
+                autoEnrich(entry)
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        searching = false,
+                        progress = 0,
+                        stage = "",
+                        searchError = "Поиск прерван: ${error.message ?: "неизвестная ошибка"}"
+                    )
+                }
+            }
+        }
+    }
+
+    /** «Поиск по фото»: разбор снимка, обратный поиск и уточнение найденных профилей. */
+    fun startPhotoSearch(uri: Uri) {
+        val current = _state.value
+        if (current.searching || current.preview?.running == true) return
+        _state.update {
+            it.copy(
+                searching = true, stage = "Анализ фотографии", progress = 3,
+                searchError = null, result = null, resultEntry = null, photo = null,
+                research = "", researchError = null, classifications = emptyMap()
+            )
+        }
+        viewModelScope.launch {
+            val started = System.currentTimeMillis()
+            val outcome = runCatching {
+                val app = getApplication<Application>()
+                val photo = PhotoAnalyzer.analyze(app, uri)
+                _state.update {
+                    it.copy(
+                        stage = "Обратный поиск по изображению", progress = 30,
+                        photo = PhotoCard(photo.fileName, photo.summary(), photo.faces, photo.sha256, 0)
+                    )
+                }
+                val photoFacts = PhotoAnalyzer.facts(photo).toMutableList()
+                val key = keys.key("saucenao")
+                val hits = if (key.isNotBlank()) {
+                    runCatching { ReverseImage.sauceNao(key, photo) }.getOrElse { emptyList() }
+                } else emptyList()
+
+                hits.forEach { hit ->
+                    photoFacts += RawFact(
+                        category = FactCategory.DOCUMENT,
+                        kind = "Совпадение изображения",
+                        value = hit.url,
+                        subject = photo.fileName,
+                        attributes = mapOf(
+                            "совпадение" to "${hit.similarity}%",
+                            "ресурс" to hit.provider,
+                            "название" to hit.title
+                        ),
+                        sourceId = "photo",
+                        sourceUrl = hit.url
+                    )
+                }
+
+                // Поиск по лицу: отдельный сервис, адрес эндпоинта и ключ задаёт пользователь.
+                _state.update { it.copy(stage = "Поиск по лицу", progress = 36) }
+                val faceKey = keys.key("faceapi")
+                val faceEndpoint = keys.secondField("faceapi")
+                val faceReady = faceKey.isNotBlank() && faceEndpoint.isNotBlank()
+                val faceHits = if (faceReady) {
+                    runCatching { FaceSearch.search(faceEndpoint, faceKey, photo) }.getOrElse { emptyList() }
+                } else emptyList()
+                val knownHosts = hits.map { it.url.substringAfter("://").substringBefore('/') }.toSet()
+                faceHits.forEach { hit ->
+                    val host = hit.url.substringAfter("://").substringBefore('/')
+                    val confirmed = knownHosts.any { it.equals(host, ignoreCase = true) }
+                    photoFacts += RawFact(
+                        category = FactCategory.DOCUMENT,
+                        kind = "Совпадение по фото",
+                        value = hit.url,
+                        subject = photo.fileName,
+                        attributes = mapOf(
+                            "схожесть" to "${hit.similarity}%",
+                            "ресурс" to hit.provider,
+                            "статус" to FaceSearch.statusFor(hit.similarity, confirmed),
+                            "название" to hit.title
+                        ),
+                        sourceId = "faceapi",
+                        sourceUrl = hit.url
+                    )
+                }
+                val handles = PhotoAnalyzer.handlesFrom((hits.map { it.url } + faceHits.map { it.url })).take(3)
+                val parts = mutableListOf<AggregatedData>()
+                handles.forEachIndexed { index, handle ->
+                    _state.update {
+                        it.copy(stage = "Уточнение по найденному профилю: $handle", progress = 40 + index * 15)
+                    }
+                    runCatching { engine.search(handle, { _, _ -> }, customStore.activeModules()) }
+                        .getOrNull()?.let { parts += it }
+                }
+                val merged = DataMerge.merge(
+                    query = "Фото ${photo.fileName}",
+                    parts = parts,
+                    extra = photoFacts,
+                    durationMs = System.currentTimeMillis() - started
+                )
+                val note = buildPhotoNote(photo, hits.size, handles, key.isNotBlank(), faceHits.size, faceReady)
+                _state.update { s ->
+                    s.copy(photo = s.photo?.copy(hits = hits.size) ?: PhotoCard(photo.fileName, photo.summary(), photo.faces, photo.sha256, hits.size))
+                }
+                merged to note
+            }
+            outcome.onSuccess { (data, note) ->
+                val entry = HistoryEntry(
+                    id = historyStore.newId(),
+                    query = data.query,
+                    createdAt = System.currentTimeMillis(),
+                    analyst = settings.analyst,
+                    data = data,
+                    demo = settings.demoMode,
+                    queryType = "Фотография",
+                    photoNote = note
+                )
+                val entries = withContext(Dispatchers.IO) {
+                    historyStore.save(entry)
+                    historyStore.list()
+                }
+                _state.update {
+                    it.copy(
+                        searching = false, progress = 100, stage = "Готово",
+                        result = data, resultEntry = entry, screen = Screen.RESULTS, history = entries
+                    )
+                }
+                autoEnrich(entry)
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        searching = false, progress = 0, stage = "", photo = null,
+                        searchError = "Поиск по фото прерван: ${error.message ?: "неизвестная ошибка"}"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun buildPhotoNote(
+        photo: PhotoAnalysis,
+        hits: Int,
+        handles: List<String>,
+        providerReady: Boolean,
+        faceHits: Int = 0,
+        faceReady: Boolean = false
+    ): String {
+        val parts = mutableListOf<String>()
+        parts += "Снимок: ${photo.summary()}."
+        if (photo.exif["Координаты"] != null) parts += "В файле сохранена геометка — она включена в отчёт."
+        parts += when {
+            !providerReady -> "Обратный поиск по изображению не выполнялся: не добавлен ключ модуля SauceNAO."
+            hits == 0 -> "Обратный поиск выполнен, совпадений выше порога не найдено."
+            else -> "Обратный поиск: $hits совпадений, ссылки добавлены в доказательную базу."
+        }
+        if (faceReady) {
+            parts += if (faceHits == 0) "Поиск по лицу выполнен, совпадений не найдено."
+            else "Поиск по лицу: $faceHits совпадений, у каждой находки указаны схожесть и статус проверки."
+        } else {
+            parts += "Поиск по лицу не выполнялся: в «Модули» не заданы ключ и адрес API сервиса."
+        }
+        if (handles.isNotEmpty()) {
+            parts += "По найденным ссылкам дополнительно проверены профили: ${handles.joinToString(", ")}."
+        }
+        parts += "Выводы по личности на снимке не делаются автоматически: совпадение изображения не подтверждает тождество."
+        return parts.joinToString(" ")
+    }
+
+    // ------------------------------------------------------------------ история
+
+    fun deleteHistory(id: String) {
+        viewModelScope.launch {
+            val entries = withContext(Dispatchers.IO) {
+                historyStore.delete(id)
+                historyStore.list()
+            }
+            _state.update { it.copy(history = entries) }
+        }
+    }
+
+    fun clearHistory() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { historyStore.clear() }
+            _state.update { it.copy(history = emptyList()) }
+        }
+    }
+
+    // ------------------------------------------------------------------- ключи
+
+    fun notify(message: String) = _state.update { it.copy(toast = message) }
+
+    fun toggleProvider(id: String, enabled: Boolean) {
+        keys.setEnabled(id, enabled)
+        refreshProviders()
+    }
+
+    fun saveKey(id: String, value: String) {
+        keys.saveKey(id, value)
+        refreshProviders()
+        _state.update { it.copy(toast = "Ключ сохранён в защищённом хранилище") }
+    }
+
+    fun saveSecondField(id: String, value: String) {
+        keys.saveSecondField(id, value)
+        refreshProviders()
+    }
+
+    fun clearKey(id: String) {
+        keys.saveKey(id, "")
+        keys.saveSecondField(id, "")
+        refreshProviders()
+        _state.update { it.copy(toast = "Ключ удалён") }
+    }
+
+    fun checkKey(id: String) {
+        val provider = _state.value.providers.firstOrNull { it.spec.id == id } ?: return
+        if (provider.checking) return
+        _state.update { s ->
+            s.copy(providers = s.providers.map { if (it.spec.id == id) it.copy(checking = true, state = KeyState.CHECKING) else it })
+        }
+        viewModelScope.launch {
+            val result = validator.check(id)
+            _state.update { s ->
+                s.copy(
+                    providers = s.providers.map {
+                        if (it.spec.id == id) it.copy(checking = false, state = result.state, checkedAt = keys.checkedAt(id), hasKey = keys.key(id).isNotBlank())
+                        else it
+                    },
+                    toast = result.detail
+                )
+            }
+        }
+    }
+
+    fun checkAll() {
+        viewModelScope.launch {
+            _state.value.providers.filter { it.hasKey && !it.checking }.forEach { provider ->
+                checkKey(provider.spec.id)
+            }
+        }
+    }
+
+    // ------------------------------------------------------- быстрая настройка
+
+    /** Фоновая задача автоподбора: отмена в диалоге должна действительно её останавливать. */
+    private var autoSetupJob: Job? = null
+
+    /** Быстрый режим: только название, ключ и ссылка на сервис — остальное подбирает приложение. */
+    fun createModuleQuick(title: String, key: String, link: String) {
+        if (_state.value.autoSetup?.running == true) return
+        val cleanTitle = title.trim()
+        if (cleanTitle.isBlank()) { notify("Укажите название модуля"); return }
+        if (cleanTitle.length > CustomModuleSpec.MAX_TITLE) { notify("Название длиннее ${CustomModuleSpec.MAX_TITLE} символов"); return }
+        if (key.isBlank()) { notify("Укажите API-ключ"); return }
+        val source = SourceLink.parse(link)
+        if (source == null) { notify("Укажите ссылку на сайт сервиса или его Telegram-бота"); return }
+        _state.update {
+            it.copy(
+                autoSetup = AutoSetupUi(
+                    running = true, stage = "Изучаем ${source.display}…",
+                    failed = false, title = cleanTitle, key = key, link = link.trim()
+                )
+            )
+        }
+        autoSetupJob = viewModelScope.launch {
+            val hints = runCatching { AutoSetup.fetchHints(source) }.getOrDefault(DocHints())
+            _state.update { it.copy(autoSetup = it.autoSetup?.copy(stage = "Подбираем способ подключения…", hints = hints)) }
+            val outcome = AutoSetup.detect(source, key, hints, skip = 0)
+            applyAutoOutcome(cleanTitle, key, outcome)
+        }
+    }
+
+    fun retryAutoSetup() {
+        val ui = _state.value.autoSetup ?: return
+        if (ui.exhausted) return
+        _state.update { it.copy(autoSetup = ui.copy(running = true, stage = "Пробуем оставшиеся варианты…", failed = false)) }
+        autoSetupJob = viewModelScope.launch {
+            val source = SourceLink.parse(ui.link) ?: return@launch
+            val outcome = AutoSetup.detect(source, ui.key, ui.hints, skip = ui.skip)
+            applyAutoOutcome(ui.title, ui.key, outcome)
+        }
+    }
+
+    fun openManualAfterAuto() {
+        val ui = _state.value.autoSetup ?: return
+        _state.update {
+            it.copy(
+                autoSetup = null,
+                manualKey = ui.key,
+                manualDraft = ui.suggested ?: CustomModule(
+                    id = "", title = ui.title, urlTemplate = "",
+                    auth = CustomAuth.AUTO, enabled = true, hasKey = false
+                )
+            )
+        }
+    }
+
+    fun clearManualDraft() = _state.update { it.copy(manualDraft = null, manualKey = "") }
+
+    fun cancelAutoSetup() {
+        autoSetupJob?.cancel()
+        autoSetupJob = null
+        _state.update { it.copy(autoSetup = null) }
+    }
+
+    private fun applyAutoOutcome(title: String, key: String, outcome: AutoSetup.Outcome) {
+        if (_state.value.autoSetup == null) return
+        val setup = outcome.setup
+        autoSetupJob = null
+        if (outcome.fixed && setup != null && !outcome.urlTemplate.isNullOrBlank()) {
+            val module = CustomModule(
+                id = java.util.UUID.randomUUID().toString(),
+                title = title,
+                urlTemplate = outcome.urlTemplate,
+                auth = setup.auth,
+                method = setup.method,
+                headerName = setup.headerName.ifBlank { "X-API-Key" },
+                paramName = setup.paramName.ifBlank { "api_key" },
+                enabled = true,
+                createdAt = System.currentTimeMillis(),
+                hasKey = true
+            )
+            customStore.save(module, key)
+            refreshCustom()
+            _state.update {
+                it.copy(
+                    autoSetup = null,
+                    toast = if (outcome.strict) "Модуль настроен! Можно начинать поиск"
+                    else "Адрес найден, но ключ отклонён (${outcome.code}) — проверьте ключ"
+                )
+            }
+            if (outcome.strict) checkCustomModule(module.id)
+        } else {
+            val host = SourceLink.parse(_state.value.autoSetup?.link.orEmpty())?.host ?: ""
+            val suggested = CustomModule(
+                id = "",
+                title = title,
+                urlTemplate = outcome.urlTemplate ?: "https://$host/search?q=${CustomModuleSpec.PLACEHOLDER}",
+                auth = setup?.auth ?: CustomAuth.AUTO,
+                method = setup?.method ?: "GET",
+                headerName = setup?.headerName?.ifBlank { "X-API-Key" } ?: "X-API-Key",
+                paramName = setup?.paramName?.ifBlank { "api_key" } ?: "api_key",
+                enabled = true,
+                hasKey = false
+            )
+            _state.update {
+                it.copy(
+                    autoSetup = it.autoSetup?.copy(
+                        running = false, failed = true, skip = outcome.attempts,
+                        stage = outcome.detail,
+                        suggested = suggested, exhausted = outcome.exhausted
+                    )
+                )
+            }
+        }
+    }
+
+    // ------------------------------------------------- подключение по ключу
+
+    /**
+     * Один ключ — один шаг: разбираем строку, определяем сервис, сохраняем
+     * ключ и проверяем его. Для незнакомого сервиса автоматически собирается
+     * свой модуль (адрес, метод и способ передачи ключа подбираются перебором).
+     */
+    fun connectByKey(raw: String) {
+        if (_state.value.connection?.running == true) return
+        val intake = KeyIntake.parse(raw)
+        if (intake == null || !intake.hasKey) {
+            _state.update {
+                it.copy(connection = ConnectionUi(
+                    done = true, ok = false, title = "Ключ не распознан",
+                    detail = "Вставьте ключ из кабинета сервиса — строку длиной от 8 символов. Можно вместе с адресом или названием сервиса."
+                ))
+            }
+            return
+        }
+        val route = ProviderGuess.route(intake)
+        _state.update {
+            it.copy(connection = ConnectionUi(running = true).step("Ключ найден: ${maskKey(intake.key)}"))
+        }
+        viewModelScope.launch {
+            val result = when (route) {
+                is SetupRoute.BuiltIn -> connectBuiltIn(route.id, intake.key, route.how)
+                is SetupRoute.Assistant -> connectAssistant(route.providerId, intake.key, route.how)
+                is SetupRoute.Custom -> connectCustom(route.url, route.title, intake.key, route.how)
+                is SetupRoute.Unknown -> ConnectionUi(
+                    done = true, ok = false, title = "Сервис не определён",
+                    detail = "Добавьте адрес API (например, https://api.example.com) рядом с ключом — тогда приложение подберёт запрос само.",
+                    lines = _state.value.connection?.lines.orEmpty()
+                )
+            }
+            _state.update { it.copy(connection = result) }
+        }
+    }
+
+    fun closeConnection() = _state.update { it.copy(connection = null) }
+
+    /** Поставщики с сохранённым ключом — для индикаторов на переключателе. */
+    private fun keyedProviders(): Set<String> =
+        AssistantCatalog.providers.filter { assistantStore.hasKey(it.id) }.map { it.id }.toSet()
+
+    private fun appendStep(text: String) {
+        _state.update { s -> s.copy(connection = s.connection?.step(text)) }
+    }
+
+    /** Маска ключа для журнала: видно только начало и конец. */
+    private fun maskKey(key: String): String =
+        if (key.length <= 10) "***"
+        else key.take(4) + "…" + key.takeLast(4)
+
+    private suspend fun connectBuiltIn(id: String, key: String, why: String): ConnectionUi {
+        val spec = ProviderCatalog.byId(id)
+            ?: return ConnectionUi(done = true, ok = false, title = "Нет такого модуля", detail = why)
+        appendStep("Сервис: ${spec.title} — $why")
+        keys.saveKey(id, key)
+        // Платному модулю нужен лимит расхода: без него проверка не пройдёт и поиск молчит.
+        if (spec.requiresSecondField != null && keys.secondField(id).isBlank() && id == "dyxless") {
+            keys.saveSecondField(id, "10")
+            appendStep("Лимит расхода: 10 ₽ на запрос — меняется в настройках модуля.")
+        }
+        keys.setEnabled(id, true)
+        refreshProviders()
+        appendStep("Ключ сохранён, модуль включён. Проверяем…")
+        val check = runCatching { validator.check(id) }
+            .getOrElse { KeyCheck(KeyState.INVALID, it.message ?: "ошибка проверки") }
+        refreshProviders()
+        return if (check.state == KeyState.VALID) {
+            ConnectionUi(
+                done = true, ok = true, title = "${spec.title} подключён",
+                detail = "${check.detail}. Модуль включён и участвует в поиске.",
+                lines = _state.value.connection?.lines.orEmpty() + "Проверка: ${check.detail}"
+            )
+        } else {
+            ConnectionUi(
+                done = true, ok = false, title = "${spec.title}: ключ не принят",
+                detail = "${check.detail}. Проверьте тип ключа в кабинете сервиса: ${spec.docsUrl}",
+                lines = _state.value.connection?.lines.orEmpty() + "Проверка: ${check.detail}"
+            )
+        }
+    }
+
+    private suspend fun connectAssistant(providerId: String, key: String, why: String): ConnectionUi {
+        val spec = AssistantCatalog.provider(providerId)
+        appendStep("Это ключ ИИ-ассистента (${spec.title}) — подключаю его в настройках ассистента")
+        assistantStore.provider = spec.id
+        assistantStore.saveKey(key, spec.id)
+        // Если сохранённая модель не из набора этого поставщика — берём его умолчание.
+        if (spec.defaultModel.isNotBlank()) {
+            val saved = assistantStore.model
+            if (spec.models.isNotEmpty() && spec.models.none { it.id == saved }) {
+                assistantStore.model = spec.defaultModel
+            }
+        }
+        val check = runCatching { assistantService.probe() }
+            .getOrElse { KeyCheck(KeyState.INVALID, it.message ?: "ошибка проверки") }
+        _state.update {
+            it.copy(
+                assistantProvider = assistantStore.provider,
+                assistantBaseUrl = assistantStore.customBaseUrl,
+                assistantKeyed = keyedProviders(),
+                assistantModel = assistantStore.model,
+                assistantPreset = assistantStore.preset,
+                assistantConfigured = assistantStore.configured(),
+                assistantState = assistantStore.state(),
+                assistantCheckedAt = assistantStore.checkedAt()
+            )
+        }
+        return if (check.state == KeyState.VALID) {
+            ConnectionUi(
+                done = true, ok = true, title = "Ассистент на ${spec.title} подключён",
+                detail = "${check.detail}. Модель: ${assistantStore.model}.",
+                lines = _state.value.connection?.lines.orEmpty()
+            )
+        } else {
+            ConnectionUi(
+                done = true, ok = false, title = "${spec.title}: ключ не принят",
+                detail = "${check.detail}. Ключ получить: ${spec.docsUrl}",
+                lines = _state.value.connection?.lines.orEmpty()
+            )
+        }
+    }
+
+    private suspend fun connectCustom(
+        url: String,
+        title: String,
+        key: String,
+        why: String
+    ): ConnectionUi {
+        appendStep("$why. Изучаю документацию и подбираю запрос…")
+        val link = SourceLink.parse(url)
+            ?: return ConnectionUi(done = true, ok = false, title = "Адрес не разобран", detail = url)
+        val hints = runCatching { AutoSetup.fetchHints(link) }.getOrDefault(DocHints())
+        val outcome = AutoSetup.detect(link, key, hints)
+        val setup = outcome.setup
+        if (outcome.fixed && setup != null && !outcome.urlTemplate.isNullOrBlank()) {
+            val module = CustomModule(
+                id = java.util.UUID.randomUUID().toString(),
+                title = title.take(CustomModuleSpec.MAX_TITLE),
+                urlTemplate = outcome.urlTemplate,
+                auth = setup.auth,
+                method = setup.method,
+                headerName = setup.headerName.ifBlank { "X-API-Key" },
+                paramName = setup.paramName.ifBlank { "api_key" },
+                enabled = true,
+                createdAt = System.currentTimeMillis(),
+                hasKey = true
+            )
+            customStore.save(module, key)
+            refreshCustom()
+            appendStep("Модуль создан: ${setup.method} ${outcome.urlTemplate}, ${AutoSetup.authTitle(setup)}")
+            val key2 = if (outcome.strict) "Ключ принят сервисом" else "Адрес найден, но ключ отклонён (${outcome.code})"
+            return ConnectionUi(
+                done = true, ok = outcome.strict,
+                title = if (outcome.strict) "«${module.title}» подключён" else "«${module.title}»: нужен рабочий ключ",
+                detail = "$key2. Модуль включён — ответы попадут в отчёт с пометкой источника.",
+                lines = _state.value.connection?.lines.orEmpty()
+            )
+        }
+        return ConnectionUi(
+            done = true, ok = false, title = "«$title» не подобрался автоматически",
+            detail = "${outcome.detail}. Добавьте модуль вручную в разделе «Свои модули»: адрес, ключ и правила разбора.",
+            lines = _state.value.connection?.lines.orEmpty()
+        )
+    }
+
+    // ------------------------------------------------------- починка модулей
+
+    /**
+     * Разбирает последний отчёт диагностики и лечит, что лечится без человека:
+     * переносит ключ из своего модуля-дубликата во встроенный, заново подбирает
+     * адрес и способ передачи ключа, перепроверяет отклонённые ключи.
+     * В конце собирает свежий отчёт — видно, что изменилось.
+     */
+    fun repairModules() {
+        val blocks = _state.value.diagBlocks
+        if (blocks.isEmpty()) {
+            notify("Сначала выполните диагностику — исправлять нечего")
+            return
+        }
+        if (_state.value.repairing) return
+        _state.update { it.copy(repairing = true, repairLog = emptyList()) }
+        viewModelScope.launch {
+            var fixed = 0
+            var checked = 0
+            for (block in blocks) {
+                runCatching {
+                    if (block.kind.startsWith("пользовательский")) {
+                        val module = customStore.list().firstOrNull { it.title == block.title }
+                            ?: return@runCatching
+                        when (val step = RepairPlan.forCustom(module, block.code)) {
+                            is RepairStep.Migrate -> {
+                                checked++
+                                if (migrateToBuiltIn(module, step.providerId, step.reason)) fixed++
+                            }
+                            is RepairStep.Rediscover -> {
+                                checked++
+                                if (rediscoverCustom(module, step.reason)) fixed++
+                            }
+                            else -> appendRepair("«${module.title}»: ${step.reason()}")
+                        }
+                    } else {
+                        val provider = _state.value.providers
+                            .firstOrNull { it.spec.title == block.title } ?: return@runCatching
+                        val id = provider.spec.id
+                        val state = keys.state(id)
+                        when (val step = RepairPlan.forBuiltIn(id, state, block.facts)) {
+                            is RepairStep.Recheck -> {
+                                checked++
+                                val check = validator.check(id)
+                                refreshProviders()
+                                if (check.state == KeyState.VALID) {
+                                    fixed++
+                                    appendRepair("«${provider.spec.title}»: ключ принят заново — ${check.detail}")
+                                } else {
+                                    appendRepair("«${provider.spec.title}»: ${check.detail}")
+                                }
+                            }
+                            is RepairStep.Manual -> appendRepair("«${provider.spec.title}»: ${step.reason}")
+                            else -> Unit
+                        }
+                    }
+                }.onFailure { appendRepair("${block.title}: ${it.message ?: "ошибка починки"}") }
+            }
+            _state.update {
+                it.copy(repairing = false, toast = "Проверено модулей: $checked, исправлено: $fixed")
+            }
+            runDiagnostics()
+        }
+    }
+
+    fun clearRepairLog() = _state.update { it.copy(repairLog = emptyList()) }
+
+    private fun appendRepair(line: String) {
+        _state.update { s -> s.copy(repairLog = s.repairLog + DiagMask.text(line)) }
+    }
+
+    private fun RepairStep.reason(): String = when (this) {
+        is RepairStep.Migrate -> reason
+        is RepairStep.Rediscover -> reason
+        is RepairStep.Recheck -> reason
+        is RepairStep.Manual -> reason
+    }
+
+    /** Ключ из своего модуля → встроенный; дубликат выключается только после успешной проверки. */
+    private suspend fun migrateToBuiltIn(module: CustomModule, providerId: String, reason: String): Boolean {
+        val spec = ProviderCatalog.byId(providerId) ?: return false
+        val key = customStore.key(module.id)
+        if (key.isBlank()) {
+            appendRepair("«${module.title}»: $reason, но ключ не сохранён — добавьте его в «${spec.title}» вручную")
+            return false
+        }
+        keys.saveKey(providerId, key)
+        keys.setEnabled(providerId, true)
+        refreshProviders()
+        val check = validator.check(providerId)
+        refreshProviders()
+        return if (check.state == KeyState.VALID) {
+            customStore.setEnabled(module.id, false)
+            refreshCustom()
+            appendRepair("«${module.title}» → встроенный «${spec.title}»: ключ перенесён и принят, дубликат выключен")
+            true
+        } else {
+            appendRepair("«${module.title}» → «${spec.title}»: ключ отклонён (${check.detail})")
+            false
+        }
+    }
+
+    /** Повторный автоподбор запроса для своего модуля с сохранением найденного варианта. */
+    private suspend fun rediscoverCustom(module: CustomModule, reason: String): Boolean {
+        val host = CustomModuleSpec.hostOf(module.urlTemplate)
+        val link = SourceLink.parse("https://$host") ?: return false
+        val key = customStore.key(module.id)
+        if (key.isBlank()) {
+            appendRepair("«${module.title}»: $reason, но ключ не сохранён — перенастроить нельзя")
+            return false
+        }
+        val hints = runCatching { AutoSetup.fetchHints(link) }.getOrDefault(DocHints())
+        val outcome = AutoSetup.detect(link, key, hints)
+        val setup = outcome.setup
+        if (outcome.fixed && setup != null && !outcome.urlTemplate.isNullOrBlank()) {
+            customStore.save(
+                module.copy(
+                    urlTemplate = outcome.urlTemplate,
+                    auth = setup.auth,
+                    method = setup.method,
+                    headerName = setup.headerName.ifBlank { module.headerName },
+                    paramName = setup.paramName.ifBlank { module.paramName },
+                    enabled = true
+                ),
+                key
+            )
+            refreshCustom()
+            appendRepair("«${module.title}»: $reason → найден рабочий вариант ${setup.method} ${outcome.urlTemplate} (${AutoSetup.authTitle(setup)})")
+            return true
+        }
+        appendRepair("«${module.title}»: $reason, но рабочий вариант не найден — ${outcome.detail}")
+        return false
+    }
+
+    // ------------------------------------------------------------- диагностика
+
+    /**
+     * Собирает отчёт по всем включённым модулям: что запрошено, что вернулось,
+     * как разобрано. Отчёт копируется в буфер и передаётся разработчику.
+     */
+    fun runDiagnostics(queryOverride: String? = null) {
+        if (_state.value.diagRunning) return
+        _state.update { it.copy(diagRunning = true, diagReport = null) }
+        viewModelScope.launch {
+            val query = queryOverride?.trim()?.takeIf { it.isNotBlank() }
+                ?: _state.value.query.trim().takeIf { it.isNotBlank() }
+                ?: "osint"
+            val blocks = ArrayList<DiagBlock>()
+            val startedAt = System.currentTimeMillis()
+            var index = 0
+
+            _state.value.providers.filter { it.enabled }.forEach { p ->
+                index++
+                val spec = p.spec
+                val hasKey = spec.keyless || keys.key(spec.id).isNotBlank()
+                val check = if (!hasKey) {
+                    KeyCheck(KeyState.EMPTY, "ключ не задан — модуль не сможет обратиться к сервису")
+                } else {
+                    runCatching { validator.check(spec.id) }
+                        .getOrElse { KeyCheck(KeyState.INVALID, "ошибка проверки: ${it.message ?: it.javaClass.simpleName}") }
+                }
+                // Каждому API — свой тип данных: общий запрос «osint» для половины
+                // модулей заведомо пуст и выглядит как поломка.
+                val probeQuery = DiagSamples.forProvider(spec.id) ?: query
+                val t0 = System.currentTimeMillis()
+                val facts = if (check.state == KeyState.VALID) {
+                    runCatching { Connectors.byId(spec.id)?.collect(probeQuery, keys) ?: emptyList() }
+                        .getOrElse { emptyList() }
+                } else emptyList()
+                val elapsed = System.currentTimeMillis() - t0
+                val first = facts.firstOrNull()
+                val sample = first?.let { f ->
+                    buildString {
+                        append("${f.kind}: ${f.value.take(120)}")
+                        if (f.attributes.isNotEmpty()) {
+                            append(" · ")
+                            append(f.attributes.entries.take(3).joinToString("; ") { "${it.key}: ${it.value.take(60)}" })
+                        }
+                    }
+                }.orEmpty()
+                val accepted = DiagSamples.acceptedFor(spec.id)
+                val advice = when {
+                    check.state == KeyState.VALID && facts.isNotEmpty() -> "работает"
+                    check.state == KeyState.VALID && accepted != null ->
+                        "ключ принят, фактов 0: по запросу «$probeQuery» ничего не найдено; модуль принимает $accepted"
+                    check.state == KeyState.VALID ->
+                        "ключ принят, но фактов 0: по запросу «$probeQuery» сервис ничего не вернул"
+                    check.state == KeyState.OFFLINE -> "нет связи с сервисом (сеть или блокировка)"
+                    check.state == KeyState.EMPTY -> "ключ не задан"
+                    else -> "не работает: ${check.detail}"
+                }
+                blocks += DiagBlock(
+                    index = index,
+                    title = spec.title,
+                    kind = "встроенный модуль",
+                    enabled = p.enabled,
+                    endpoint = "адрес задан в коде модуля",
+                    method = "GET",
+                    code = if (check.state == KeyState.VALID) 200 else 0,
+                    elapsedMs = elapsed,
+                    bytes = 0,
+                    checkDetail = "${check.state.title}: ${check.detail} · документация: ${spec.docsUrl}",
+                    structure = "",
+                    facts = facts.size,
+                    fields = first?.attributes?.keys?.joinToString(", ").orEmpty(),
+                    sample = sample,
+                    error = if (check.state == KeyState.VALID) null else check.detail,
+                    advice = advice,
+                    testQuery = probeQuery.takeIf { it != query }
+                )
+            }
+
+            _state.value.customModules.filter { it.enabled }.forEach { module ->
+                index++
+                val key = customStore.key(module.id)
+                val url = CustomModuleSpec.buildUrl(module, key, query)
+                val t0 = System.currentTimeMillis()
+                val response = runCatching {
+                    Net.fetch(
+                        url, CustomModuleSpec.headers(module, key), attempts = 1,
+                        method = module.method, body = CustomModuleSpec.body(module, key)
+                    )
+                }.getOrNull()
+                val elapsed = System.currentTimeMillis() - t0
+                val body = response?.body.orEmpty()
+                val parsed = if (response != null && response.ok) parseCustom(body, module, query) else null
+                val maskedSample = if (body.isBlank()) "" else DiagMask.json(body).let {
+                    if (it.length > 1400) it.take(1400) + "\n… обрезано (${body.length} байт)" else it
+                }
+                val advice = when {
+                    response == null -> "нет ответа: сеть, таймаут или неверный адрес"
+                    response.code !in 200..299 -> "эндпоинт ответил ${response.code}: проверьте адрес, ключ и способ передачи «${module.auth.title}»"
+                    parsed == null -> "ответ не JSON — модуль разбирает только JSON API"
+                    parsed.isEmpty() -> "ответ получен, но поля не распознаны: задайте правила «JSON-путь → поле» (структура выше подскажет путь)"
+                    else -> "работает"
+                }
+                blocks += DiagBlock(
+                    index = index,
+                    title = module.title,
+                    kind = "пользовательский модуль",
+                    enabled = module.enabled,
+                    endpoint = DiagMask.url(url),
+                    method = module.method,
+                    code = response?.code ?: 0,
+                    elapsedMs = elapsed,
+                    bytes = body.length,
+                    checkDetail = "авторизация: ${module.auth.title}",
+                    structure = if (body.isBlank()) "" else JsonShape.describe(body),
+                    facts = parsed?.size ?: 0,
+                    fields = module.fields.joinToString(", ") { if (it.path.isBlank()) it.field.kind else "${it.path} → ${it.field.kind}" },
+                    sample = maskedSample,
+                    error = when {
+                        response == null -> "запрос не выполнен"
+                        response.code !in 200..299 -> "HTTP ${response.code}"
+                        parsed == null -> "тело ответа не является JSON"
+                        else -> null
+                    },
+                    advice = advice
+                )
+            }
+
+            val report = if (blocks.isEmpty()) {
+                "JB OSINT · диагностика\nВключённых модулей нет: включите хотя бы один модуль и повторите."
+            } else {
+                DiagReport.render(
+                    appVersion = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                    android = "${Build.VERSION.RELEASE} · ${Build.MANUFACTURER} ${Build.MODEL}",
+                    query = query,
+                    blocks = blocks,
+                    startedAt = startedAt
+                )
+            }
+            _state.update { it.copy(diagRunning = false, diagReport = report, diagBlocks = blocks) }
+        }
+    }
+
+    fun clearDiagnostics() = _state.update { it.copy(diagReport = null) }
+
+    private fun parseCustom(body: String, module: CustomModule, query: String): List<RawFact>? {
+        val obj = runCatching { JSONObject(body) }.getOrNull()
+            ?: runCatching { JSONObject().put("items", JSONArray(body)) }.getOrNull()
+            ?: return null
+        return runCatching {
+            CustomResponseParser.parse(obj, query, CustomModuleSpec.SOURCE_ID, module.fields)
+        }.getOrNull()
+    }
+
+    // --------------------------------------------------- пользовательские модули
+
+    fun saveCustomModule(
+        id: String,
+        title: String,
+        urlTemplate: String,
+        auth: CustomAuth,
+        headerName: String,
+        paramName: String,
+        key: String?,
+        fields: List<FieldRule> = emptyList(),
+        method: String = "GET"
+    ) {
+        val error = CustomModuleSpec.validate(title, urlTemplate)
+            ?: CustomModuleSpec.validateRules(fields)
+        if (error != null) {
+            _state.update { it.copy(toast = error) }
+            return
+        }
+        val existing = if (id.isNotBlank()) customStore.get(id) else null
+        val module = CustomModule(
+            id = id.ifBlank { java.util.UUID.randomUUID().toString() },
+            title = title.trim(),
+            urlTemplate = urlTemplate.trim(),
+            auth = auth,
+            method = method.ifBlank { "GET" },
+            headerName = headerName.trim(),
+            paramName = paramName.trim(),
+            enabled = existing?.enabled ?: true,
+            createdAt = existing?.createdAt ?: System.currentTimeMillis(),
+            fields = fields
+        )
+        customStore.save(module, key)
+        refreshCustom()
+        _state.update {
+            it.copy(
+                toast = when {
+                    auth == CustomAuth.AUTO -> "Проверяется…"
+                    existing == null -> "Модуль добавлен"
+                    else -> "Модуль обновлён"
+                }
+            )
+        }
+        // ТЗ: при добавлении модуля сразу проверяем связь; при ошибке модуль отключается.
+        // Если способ подключения не выбран — сначала автоподбор метода и передачи ключа.
+        checkCustomModule(module.id)
+    }
+
+    fun setCustomModuleEnabled(id: String, enabled: Boolean) {
+        customStore.setEnabled(id, enabled)
+        refreshCustom()
+    }
+
+    fun deleteCustomModule(id: String) {
+        customStore.delete(id)
+        refreshCustom()
+        _state.update { it.copy(toast = "Модуль удалён") }
+    }
+
+    fun checkCustomModule(id: String) {
+        val module = customStore.get(id) ?: return
+        if (_state.value.customChecking.contains(id)) return
+        _state.update { it.copy(customChecking = it.customChecking + id, toast = "Проверяется…") }
+        viewModelScope.launch {
+            val pair: Pair<KeyCheck, CustomConnectionProbe.Setup?> = if (module.auth == CustomAuth.AUTO) {
+                autoConfigure(module)
+            } else {
+                customChecker.check(module) to null
+            }
+            val (result, resolved) = pair
+            val failed = result.state == KeyState.INVALID || result.state == KeyState.OFFLINE ||
+                result.state == KeyState.EMPTY
+            if (failed && module.enabled) customStore.setEnabled(id, false)
+            _state.update {
+                it.copy(
+                    customChecking = it.customChecking - id,
+                    customChecks = it.customChecks + (id to result),
+                    customModules = customStore.list(),
+                    toast = when {
+                        failed -> result.detail + " — модуль отключён"
+                        resolved != null -> "Модуль настроен успешно: ${resolved.method}, ${resolved.auth.title.lowercase()}"
+                        else -> result.detail
+                    }
+                )
+            }
+        }
+    }
+
+    /**
+     * Автоподбор параметров подключения: метод GET/POST и способ передачи ключа.
+     * Найденная комбинация сохраняется в модуль, чтобы поиск шёл уже без перебора.
+     */
+    private suspend fun autoConfigure(module: CustomModule): Pair<KeyCheck, CustomConnectionProbe.Setup?> {
+        val probe = CustomConnectionProbe().detect(module, customStore.key(module.id))
+        val setup = probe.setup
+        if (setup != null) {
+            customStore.save(
+                module.copy(
+                    auth = setup.auth,
+                    method = setup.method,
+                    headerName = setup.headerName,
+                    paramName = setup.paramName
+                ),
+                null
+            )
+        }
+        val state = when {
+            probe.ok -> KeyState.VALID
+            probe.detail == "Нет соединения" -> KeyState.OFFLINE
+            probe.setup == null -> KeyState.INVALID
+            else -> KeyState.INVALID
+        }
+        return KeyCheck(state, probe.detail) to setup
+    }
+
+    // -------------------------------------------------------------- настройки
+
+    fun setAnalyst(value: String) {
+        val trimmed = value.take(80)
+        settings.analyst = trimmed
+        _state.update { it.copy(analyst = trimmed) }
+    }
+
+    fun setDemoMode(value: Boolean) {
+        settings.demoMode = value
+        _state.update { it.copy(demoMode = value) }
+    }
+
+    fun setSecureScreen(value: Boolean) {
+        settings.secureScreen = value
+        _state.update { it.copy(secureScreen = value) }
+    }
+
+    fun setAutoWipeDays(days: Int) {
+        settings.autoWipeDays = days
+        _state.update { it.copy(autoWipeDays = days) }
+    }
+
+    fun wipeKeys() {
+        keys.wipeKeys()
+        refreshProviders()
+        _state.update { it.copy(toast = "Все ключи удалены") }
+    }
+
+    fun wipeEverything() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                keys.wipeKeys()
+                customStore.wipe()
+                historyStore.clear()
+            }
+            _state.update {
+                it.copy(
+                    providers = buildProviders(),
+                    customModules = emptyList(),
+                    history = emptyList(),
+                    result = null,
+                    resultEntry = null,
+                    screen = Screen.HOME,
+                    toast = "Ключи и история удалены"
+                )
+            }
+        }
+    }
+
+    // ------------------------------------------------ интеллектуальный ассистент
+
+    fun saveAssistantKey(value: String) {
+        assistantStore.saveKey(value, assistantStore.provider)
+        _state.update {
+            it.copy(
+                assistantConfigured = assistantStore.configured(),
+                assistantKeyed = keyedProviders(),
+                assistantState = if (assistantStore.configured()) KeyState.UNCHECKED else KeyState.EMPTY,
+                assistantError = null
+            )
+        }
+    }
+
+    fun clearAssistantKey() {
+        assistantStore.clearKey()
+        _state.update {
+            it.copy(
+                assistantConfigured = false,
+                assistantKeyed = keyedProviders(),
+                assistantState = KeyState.EMPTY,
+                assistantError = null,
+                classifications = emptyMap()
+            )
+        }
+    }
+
+    /** Смена поставщика ИИ: ключи хранятся раздельно, модель — своя у каждого. */
+    fun setAssistantProvider(id: String) {
+        val spec = AssistantCatalog.provider(id)
+        assistantStore.provider = spec.id
+        if (spec.custom && assistantStore.customBaseUrl.isBlank()) {
+            assistantStore.customBaseUrl = ""
+        }
+        _state.update {
+            it.copy(
+                assistantProvider = assistantStore.provider,
+                assistantBaseUrl = assistantStore.customBaseUrl,
+                assistantModel = assistantStore.model,
+                assistantConfigured = assistantStore.configured(),
+                assistantKeyed = keyedProviders(),
+                assistantState = if (assistantStore.configured()) KeyState.UNCHECKED else KeyState.EMPTY,
+                assistantCheckedAt = 0L,
+                assistantError = null
+            )
+        }
+    }
+
+    /** Базовый адрес для «своего сервера»: только https, без /chat/completions. */
+    fun setAssistantBaseUrl(raw: String) {
+        if (raw.isBlank()) {
+            assistantStore.customBaseUrl = ""
+            _state.update { it.copy(assistantBaseUrl = "", assistantError = null) }
+            return
+        }
+        val normalised = AssistantCatalog.normaliseBase(raw)
+        if (normalised == null) {
+            _state.update { it.copy(assistantError = "Нужен адрес вида https://api.example.com/v1") }
+            return
+        }
+        assistantStore.customBaseUrl = normalised
+        val known = AssistantCatalog.byBaseUrl(normalised)
+        if (known != null && known.id != "custom") {
+            // Адрес совпал с известным поставщиком — переключаемся на него.
+            setAssistantProvider(known.id)
+            return
+        }
+        _state.update { it.copy(assistantBaseUrl = normalised, assistantError = null) }
+    }
+
+    fun setAssistantPreset(value: String) {
+        assistantStore.preset = value
+        _state.update { it.copy(assistantPreset = assistantStore.preset) }
+    }
+
+    fun setAssistantModel(id: String) {
+        assistantStore.model = id.trim().ifBlank { AssistantCatalog.DEFAULT_MODEL }
+        _state.update { it.copy(assistantModel = assistantStore.model) }
+    }
+
+    fun checkAssistantKey() {
+        if (!assistantStore.configured()) {
+            val title = AssistantCatalog.provider(assistantStore.provider).title
+            _state.update { it.copy(assistantError = "Сначала вставьте ключ $title") }
+            return
+        }
+        if (_state.value.assistantChecking) return
+        _state.update { it.copy(assistantChecking = true, assistantError = null) }
+        viewModelScope.launch {
+            val check = assistantService.probe()
+            _state.update {
+                it.copy(
+                    assistantChecking = false,
+                    assistantState = check.state,
+                    assistantCheckedAt = assistantStore.checkedAt(),
+                    assistantError = if (check.state == KeyState.VALID) null else check.detail
+                )
+            }
+        }
+    }
+
+    fun setAssistantAutoAnalyze(value: Boolean) {
+        assistantStore.autoAnalyze = value
+        _state.update { it.copy(assistantAutoAnalyze = value) }
+    }
+
+    fun setAssistantAutoClassify(value: Boolean) {
+        assistantStore.autoClassify = value
+        _state.update { it.copy(assistantAutoClassify = value) }
+    }
+
+    fun setAssistantAutoQueries(value: Boolean) {
+        assistantStore.autoQueries = value
+        _state.update { it.copy(assistantAutoQueries = value) }
+    }
+
+    fun setAssistantPolish(value: Boolean) {
+        assistantStore.polishReport = value
+        _state.update { it.copy(assistantPolish = value) }
+    }
+
+    fun setAutoResearch(value: Boolean) {
+        assistantStore.autoResearch = value
+        _state.update { it.copy(autoResearch = value) }
+    }
+
+    /** Кнопка «Проанализировать»: вывод аналитика по цифровым следам. */
+    fun analyzeResult() {
+        val entry = _state.value.resultEntry
+        if (entry == null) {
+            _state.update { it.copy(toast = "Сначала выполните поиск") }
+            return
+        }
+        if (!requireKey() || _state.value.analysisRunning) return
+        _state.update {
+            it.copy(analysisRunning = true, assistantBusy = AssistantRole.ANALYST.title, assistantError = null)
+        }
+        viewModelScope.launch {
+            val outcome = doAnalysis(entry)
+            _state.update { it.copy(analysisRunning = false, assistantBusy = "") }
+            outcome.onSuccess { text ->
+                persistEntry(entry.copy(aiAnalysis = text))
+                _state.update { it.copy(toast = "Аналитический вывод готов") }
+            }.onFailure { error ->
+                _state.update { it.copy(assistantError = error.message ?: "Не удалось получить ответ") }
+            }
+        }
+    }
+
+    /** Кнопка «Оформить отчёт»: синтез резюме по готовому исследованию. */
+    fun synthesizeReport() {
+        val entry = _state.value.resultEntry
+        if (entry == null) {
+            _state.update { it.copy(toast = "Сначала выполните поиск") }
+            return
+        }
+        if (!requireKey() || _state.value.analysisRunning) return
+        _state.update {
+            it.copy(analysisRunning = true, assistantBusy = AssistantRole.SYNTHESIS.title, assistantError = null)
+        }
+        viewModelScope.launch {
+            val outcome = doNarrative(entry)
+            _state.update { it.copy(analysisRunning = false, assistantBusy = "") }
+            outcome.onSuccess { text ->
+                persistEntry(entry.copy(aiNarrative = text))
+                _state.update { it.copy(toast = "Резюме для отчёта готово") }
+            }.onFailure { error ->
+                _state.update { it.copy(assistantError = error.message ?: "Не удалось оформить отчёт") }
+            }
+        }
+    }
+
+    /** Кнопка «Интернет-поиск»: запросы модели → DuckDuckGo → выжимка модели. */
+    fun researchWeb() {
+        val entry = _state.value.resultEntry
+        if (entry == null) {
+            _state.update { it.copy(toast = "Сначала выполните поиск") }
+            return
+        }
+        if (!requireKey() || _state.value.researchRunning) return
+        _state.update { it.copy(researchRunning = true, researchError = null, assistantError = null) }
+        viewModelScope.launch {
+            val outcome = doResearch(entry)
+            _state.update { it.copy(researchRunning = false) }
+            outcome.onSuccess { text ->
+                persistEntry(entry.copy(aiResearch = text))
+                _state.update { it.copy(research = text, researchError = null, toast = "Интернет-исследование завершено") }
+            }.onFailure { error ->
+                _state.update { it.copy(researchError = error.message ?: "Не удалось получить выжимку") }
+            }
+        }
+    }
+
+    fun clearResearch() {
+        val entry = _state.value.resultEntry ?: return
+        _state.update { it.copy(research = "", researchError = null) }
+        viewModelScope.launch { persistEntry(entry.copy(aiResearch = "")) }
+    }
+
+    private fun requireKey(): Boolean {
+        if (assistantStore.configured()) return true
+        _state.update {
+            it.copy(
+                assistantError = "Ключ ассистента не задан",
+                toast = "Добавьте ключ в «Настройки → Интеллектуальный ассистент»"
+            )
+        }
+        return false
+    }
+
+    // ------------------------------------------------- пошаговые операции ассистента
+
+    private suspend fun doAnalysis(entry: HistoryEntry): Result<String> {
+        val prompt = AssistantPrompts.analyze(entry.query, entry.data.facts, entry.data.links)
+        return assistantService.chat(AssistantRole.ANALYST, prompt).mapCatching { raw ->
+            AssistantParser.analysis(raw) ?: throw IllegalStateException("Модель вернула слишком короткий ответ")
+        }
+    }
+
+    private suspend fun doNarrative(entry: HistoryEntry): Result<String> {
+        val prompt = AssistantPrompts.synthesize(entry.query, entry.data, entry.aiAnalysis)
+        return assistantService.chat(AssistantRole.SYNTHESIS, prompt).mapCatching { raw ->
+            AssistantParser.analysis(raw) ?: throw IllegalStateException("Модель вернула слишком короткий ответ")
+        }
+    }
+
+    private suspend fun doResearch(entry: HistoryEntry): Result<String> {
+        val context = entry.data.facts.take(8).joinToString("; ") { "${it.kind}: ${it.value}" }
+        // Agent API сам выполняет веб-поиск и возвращает источники — промежуточные
+        // запросы и разбор HTML-выдачи не нужны.
+        val agentProvider = ru.jbosint.osint.data.AssistantCatalog
+            .provider(assistantStore.provider).agent
+        if (agentProvider) {
+            val report = assistantService.agentReport(entry.query, context).getOrThrow()
+            val text = report.asText()
+            if (text.isBlank()) throw IllegalStateException("Модель не вернула сведений")
+            return Result.success(text)
+        }
+        val plan = assistantService.chat(
+            AssistantRole.RESEARCHER,
+            AssistantPrompts.researchQueries(entry.query, context)
+        )
+        val queries = plan.getOrNull()?.let { AssistantParser.searchStrings(it) }
+            ?.takeIf { it.isNotEmpty() } ?: listOf(entry.query)
+
+        val hits = ArrayList<WebHit>()
+        for (query in queries.take(2)) {
+            hits += WebResearch.search(query, 4)
+            if (hits.size >= 8) break
+        }
+        val unique = hits.distinctBy { it.url }.take(8)
+        if (unique.isEmpty()) {
+            return Result.failure(
+                IllegalStateException("Поиск не дал результатов: сервис недоступен или запрос слишком узкий")
+            )
+        }
+        val summary = assistantService.chat(
+            AssistantRole.RESEARCHER,
+            AssistantPrompts.researchSummary(entry.query, WebResearch.digest(unique))
+        ).getOrThrow()
+        val text = AssistantParser.analysis(summary) ?: summary.trim().take(6000)
+        val sources = unique.joinToString("\n") { "- ${it.title} — ${it.url}" }
+        return Result.success(text + "\n\nИсточники:\n" + sources)
+    }
+
+    /** Разметка типов значений моделью: подсказки в результатах, сами факты не меняются. */
+    private suspend fun doClassification(entry: HistoryEntry): Map<String, AssistantClassification> {
+        val values = entry.data.facts.map { it.value }.filter { it.isNotBlank() }.distinct().take(12)
+        if (values.isEmpty()) return emptyMap()
+        val prompt = if (values.size == 1) AssistantPrompts.classify(values.first())
+        else AssistantPrompts.classifyBatch(values)
+        val raw = assistantService.chat(AssistantRole.CLASSIFIER, prompt).getOrNull() ?: return emptyMap()
+        val parsed = AssistantParser.classifications(raw)
+        if (parsed.isEmpty()) return emptyMap()
+        val map = LinkedHashMap<String, AssistantClassification>()
+        if (values.size == 1) {
+            map[values.first()] = parsed.first()
+        } else if (parsed.size >= values.size) {
+            values.forEachIndexed { index, value -> map[value] = parsed[index] }
+        }
+        return map
+    }
+
+    /** Планировщик запросов: модель подбирает формулировку до запуска модулей. */
+    private suspend fun refineQuery(input: String): String? {
+        val modules = listOf(
+            "профили" to "социальные сети и публичные профили",
+            "контакты" to "почта, телефон, мессенджеры",
+            "домены" to "домены, IP, сертификаты",
+            "утечки" to "публичные базы компрометации"
+        )
+        val prompt = AssistantPrompts.queries(input, modules, "")
+        val raw = assistantService.chat(AssistantRole.QUERY_PLANNER, prompt).getOrNull() ?: return null
+        return AssistantParser.queries(raw).map { it.query }
+            .firstOrNull { it.length in 2..120 && !it.equals(input, ignoreCase = true) }
+    }
+
+    /** Последовательное обогащение результата по включённым сценариям. */
+    private fun autoEnrich(entry: HistoryEntry) {
+        if (!assistantStore.configured()) return
+        if (!assistantStore.autoClassify && !assistantStore.autoAnalyze &&
+            !assistantStore.autoResearch && !assistantStore.polishReport
+        ) return
+        viewModelScope.launch {
+            var current = entry
+            if (assistantStore.autoClassify) {
+                val map = doClassification(current)
+                if (map.isNotEmpty()) {
+                    _state.update { it.copy(classifications = it.classifications + map) }
+                    current = current.copy(
+                        aiNotes = current.aiNotes + map.mapValues { (_, v) -> "${v.typeLabel} · значимость ${v.relevanceLabel}" }
+                    )
+                    persistEntry(current)
+                }
+            }
+            if (assistantStore.autoAnalyze) {
+                doAnalysis(current).onSuccess { text ->
+                    current = current.copy(aiAnalysis = text)
+                    persistEntry(current)
+                }
+            }
+            if (assistantStore.autoResearch) {
+                doResearch(current).onSuccess { text ->
+                    current = current.copy(aiResearch = text)
+                    persistEntry(current)
+                    _state.update { it.copy(research = text, researchError = null) }
+                }.onFailure { error ->
+                    _state.update { it.copy(researchError = error.message) }
+                }
+            }
+            if (assistantStore.polishReport && current.aiAnalysis.isNotBlank()) {
+                doNarrative(current).onSuccess { text ->
+                    current = current.copy(aiNarrative = text)
+                    persistEntry(current)
+                    _state.update { it.copy(toast = "Ассистент оформил резюме отчёта") }
+                }
+            }
+        }
+    }
+
+    private suspend fun persistEntry(entry: HistoryEntry) {
+        val entries = withContext(Dispatchers.IO) {
+            historyStore.save(entry)
+            historyStore.list()
+        }
+        _state.update { s ->
+            s.copy(
+                resultEntry = if (s.resultEntry?.id == entry.id) entry else s.resultEntry,
+                result = if (s.resultEntry?.id == entry.id) entry.data else s.result,
+                research = if (s.resultEntry?.id == entry.id) entry.aiResearch else s.research,
+                history = entries
+            )
+        }
+    }
+
+    // -------------------------------------------------------- telegram-парсер
+
+    fun setTgChannel(value: String) = _state.update { it.copy(tg = it.tg.copy(channel = value, error = null)) }
+
+    fun setTgPages(pages: Int) = _state.update {
+        it.copy(tg = it.tg.copy(pages = pages.coerceIn(1, 20)))
+    }
+
+    fun runTelegramParse() {
+        val current = _state.value.tg
+        if (current.running) return
+        val channel = current.channel.trim()
+        if (channel.isBlank()) {
+            _state.update { it.copy(tg = it.tg.copy(error = "Укажите канал: @name или ссылку t.me/name")) }
+            return
+        }
+        val parsed = TelegramRules.parse(channel)
+        if (!parsed.valid) {
+            _state.update { it.copy(tg = it.tg.copy(error = parsed.error)) }
+            return
+        }
+        if (keys.key("telesint").isBlank()) {
+            _state.update {
+                it.copy(tg = it.tg.copy(error = "Сначала добавьте ключ TeleSINT в разделе «Модули»"))
+            }
+            return
+        }
+        _state.update { it.copy(tg = it.tg.copy(running = true, stage = "Подготовка…", error = null, dossier = null)) }
+        viewModelScope.launch {
+            val outcome = runCatching {
+                TgParser.collect(
+                    key = keys.key("telesint"),
+                    channel = channel,
+                    maxPages = current.pages
+                ) { stage -> _state.update { it.copy(tg = it.tg.copy(stage = stage)) } }
+            }
+            outcome.onSuccess { dossier ->
+                _state.update {
+                    it.copy(
+                        tg = it.tg.copy(running = false, stage = "", dossier = dossier),
+                        toast = "Собрано ${dossier.members.size} участников"
+                    )
+                }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        tg = it.tg.copy(running = false, stage = "", error = error.message ?: "Не удалось собрать данные")
+                    )
+                }
+            }
+        }
+    }
+
+    /** Выгрузка результата парсера: HTML-отчёт, CSV или Excel. */
+    fun exportTelegram(format: TgFormat) {
+        val dossier = _state.value.tg.dossier ?: run {
+            _state.update { it.copy(toast = "Сначала соберите аудиторию канала") }
+            return
+        }
+        if (_state.value.tg.exporting) return
+        _state.update { it.copy(tg = it.tg.copy(exporting = true)) }
+        viewModelScope.launch {
+            val meta = ReportMeta(
+                analyst = _state.value.analyst,
+                reportId = "TG-" + java.text.SimpleDateFormat("yyMMdd-HHmm", java.util.Locale.US)
+                    .format(java.util.Date(dossier.collectedAt)),
+                createdAt = dossier.collectedAt,
+                appVersion = BuildConfig.VERSION_NAME,
+                queryType = "Telegram-канал",
+                classification = "КОНФИДЕНЦИАЛЬНО · ДЛЯ ВНУТРЕННЕГО ИСПОЛЬЗОВАНИЯ"
+            )
+            val bytes = runCatching {
+                when (format) {
+                    TgFormat.HTML -> {
+                        val intro = "Канал ${dossier.title} (${dossier.link}): " +
+                            "загружено ${dossier.members.size} участников за ${dossier.pagesLoaded} стр." +
+                            if (dossier.hasMore) ", выгрузка неполная — увеличьте число страниц." else "."
+                        HtmlReport(meta, TgExport.data(dossier), intro = intro, factsTitle = "Профиль канала и аудитория")
+                            .build().toByteArray(Charsets.UTF_8)
+                    }
+                    TgFormat.CSV -> TgExport.csv(dossier).toByteArray(Charsets.UTF_8)
+                    TgFormat.XLSX -> XlsxReport(meta, TgExport.data(dossier)).build()
+                }
+            }
+            _state.update { it.copy(tg = it.tg.copy(exporting = false)) }
+            bytes.onSuccess { data ->
+                val outcome = runCatching {
+                    exporter.save(TgExport.fileName(dossier, format.extension), data, format.mime)
+                }
+                outcome.onSuccess { exported ->
+                    val where = exported.publicFolder
+                    _state.update {
+                        it.copy(
+                            toast = if (where != null) "${format.label} сохранён: $where"
+                            else "${format.label} готов — используйте «Поделиться»"
+                        )
+                    }
+                    _shareEvents.emit(ShareRequest(exported.uri, exported.mime, exported.fileName))
+                }.onFailure { error ->
+                    _state.update { it.copy(toast = "Ошибка выгрузки: ${error.message ?: "неизвестная"}") }
+                }
+            }.onFailure { error ->
+                _state.update { it.copy(toast = "Ошибка выгрузки: ${error.message ?: "неизвестная"}") }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ экспорт
+
+    fun export(format: ReportExporter.Format) {
+        val current = _state.value
+        val entry = current.resultEntry
+        if (entry == null) {
+            _state.update { it.copy(toast = "Сначала выполните поиск") }
+            return
+        }
+        if (current.exporting) return
+        _state.update { it.copy(exporting = true) }
+        viewModelScope.launch {
+            val outcome = runCatching { exporter.export(entry, format) }
+            _state.update { it.copy(exporting = false) }
+            outcome.onSuccess { exported ->
+                val where = exported.publicFolder
+                _state.update {
+                    it.copy(
+                        toast = if (where != null)
+                            "${format.label} сохранён: $where"
+                        else
+                            "${format.label} готов — используйте «Поделиться»"
+                    )
+                }
+                _shareEvents.emit(ShareRequest(exported.uri, exported.mime, exported.fileName))
+            }.onFailure { error ->
+                _state.update { it.copy(toast = "Ошибка экспорта: ${error.message ?: "неизвестная"}") }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ профиль
+
+    /** Профиль из последнего поиска (факты всех модулей). */
+    fun openProfileFromLastResult() {
+        val entry = _state.value.resultEntry ?: _state.value.history.firstOrNull()
+        if (entry == null) {
+            _state.update { it.copy(toast = "Сначала выполните поиск") }
+            return
+        }
+        buildProfile(entry = entry, dossier = null)
+    }
+
+    /** Профиль канала/чата из результата Telegram-парсера. */
+    fun openProfileFromTelegram() {
+        val dossier = _state.value.tg.dossier
+        if (dossier == null) {
+            _state.update { it.copy(toast = "Сначала соберите аудиторию канала") }
+            return
+        }
+        buildProfile(entry = null, dossier = dossier)
+    }
+
+    /** Демонстрационный профиль: все блоки заполнены без ключей и сети. */
+    fun openDemoProfile() {
+        importedMessages = ProfileMessages.demo()
+        buildProfile(entry = null, dossier = null, messages = importedMessages, demo = true, query = "@demo_subject")
+    }
+
+    /** Пересборка профиля из тех же данных (после импорта сообщений или смены модулей). */
+    fun rebuildProfile() {
+        val current = _state.value.profile ?: return
+        val entry = _state.value.resultEntry
+        val dossier = _state.value.tg.dossier
+        buildProfile(entry, dossier, importedMessages.ifEmpty { current.messages }, demo = current.demo, query = current.query)
+    }
+
+    private fun buildProfile(
+        entry: HistoryEntry?,
+        dossier: TgDossier?,
+        messages: List<ru.jbosint.osint.profile.ProfileMessage> = importedMessages,
+        demo: Boolean = false,
+        query: String = ""
+    ) {
+        _state.update { it.copy(profileBusy = true) }
+        viewModelScope.launch {
+            val profile = withContext(Dispatchers.Default) {
+                ProfileBuilder.build(entry, dossier, messages, demo, query)
+            }
+            val previous = profileStore.load(profile.id) ?: previousProfileFor(profile)
+            val changes = ProfileDiff.diff(previous, profile)
+            withContext(Dispatchers.IO) { profileStore.save(profile) }
+            _state.update {
+                it.copy(
+                    profile = profile,
+                    profileChanges = changes,
+                    profileBusy = false,
+                    screen = Screen.PROFILE,
+                    profileBriefs = profileStore.brief(),
+                    profileDossier = "",
+                    compareText = "",
+                    assistantError = null
+                )
+            }
+        }
+    }
+
+    private fun previousProfileFor(profile: ProfileData): ProfileData? =
+        profileStore.ids().asSequence()
+            .mapNotNull { profileStore.load(it) }
+            .firstOrNull { candidate ->
+                candidate.id != profile.id &&
+                    (candidate.subject.username.isNotBlank() &&
+                        candidate.subject.username.equals(profile.subject.username, true) ||
+                        candidate.subject.id.isNotBlank() && candidate.subject.id == profile.subject.id)
+            }
+
+    /** Импорт выгрузки сообщений (CSV/JSON): дата, отправитель, текст, тип. */
+    fun importProfileMessages(uri: Uri) {
+        val profile = _state.value.profile
+        if (profile == null) {
+            _state.update { it.copy(toast = "Сначала откройте профиль") }
+            return
+        }
+        viewModelScope.launch {
+            val outcome = runCatching {
+                withContext(Dispatchers.IO) {
+                    val resolver = getApplication<Application>().contentResolver
+                    val name = uri.lastPathSegment.orEmpty()
+                    val raw = resolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                        ?: error("Не удалось открыть файл")
+                    ProfileMessages.parse(name, raw)
+                }
+            }
+            outcome.onSuccess { result ->
+                if (result.error != null || result.messages.isEmpty()) {
+                    _state.update { it.copy(toast = "Импорт не удался: ${result.error ?: "нет сообщений"}") }
+                    return@onSuccess
+                }
+                importedMessages = result.messages
+                _state.update {
+                    it.copy(
+                        toast = "Загружено ${result.messages.size} сообщений" +
+                            if (result.skipped > 0) ", пропущено ${result.skipped}" else ""
+                    )
+                }
+                rebuildProfile()
+            }.onFailure { error ->
+                _state.update { it.copy(toast = "Импорт не удался: ${error.message ?: "ошибка чтения"}") }
+            }
+        }
+    }
+
+    /** Выгрузка профиля: сообщения, аудитория, Excel, граф, досье. */
+    fun exportProfile(kind: ProfileExport) {
+        val profile = _state.value.profile ?: run {
+            _state.update { it.copy(toast = "Профиль не открыт") }
+            return
+        }
+        if (_state.value.exporting) return
+        _state.update { it.copy(exporting = true) }
+        viewModelScope.launch {
+            val anonymize = _state.value.profileAnonymize
+            val outcome = runCatching {
+                withContext(Dispatchers.Default) {
+                    val base = ProfileExporter.baseName(profile)
+                    when (kind) {
+                        ProfileExport.XLSX -> Triple(
+                            "$base.xlsx",
+                            ProfileExporter.xlsx(profile, anonymize),
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                        ProfileExport.MESSAGES_CSV -> Triple(
+                            ProfileExporter.messagesName(profile, "csv"),
+                            ProfileExporter.messagesCsv(profile, anonymize),
+                            "text/csv"
+                        )
+                        ProfileExport.AUDIENCE_CSV -> Triple(
+                            ProfileExporter.contactsName(profile, "csv"),
+                            ProfileExporter.contactsCsv(profile, anonymize),
+                            "text/csv"
+                        )
+                        ProfileExport.GRAPHML -> Triple(
+                            ProfileExporter.graphName(profile),
+                            ProfileExporter.graphMl(profile, anonymize),
+                            "application/graphml+xml"
+                        )
+                        ProfileExport.DOSSIER -> Triple(
+                            "$base.html",
+                            ProfileExporter.dossierHtml(profile, DossierTemplate.PERSON, anonymize),
+                            "text/html"
+                        )
+                    }
+                }
+            }
+            _state.update { it.copy(exporting = false) }
+            outcome.onSuccess { (fileName, bytes, mime) ->
+                val saved = runCatching { exporter.save(fileName, bytes, mime) }
+                saved.onSuccess { exported ->
+                    _state.update {
+                        it.copy(
+                            toast = if (exported.publicFolder != null)
+                                "${kind.label}: ${exported.publicFolder}"
+                            else "${kind.label} готов — «Поделиться»"
+                        )
+                    }
+                    _shareEvents.emit(ShareRequest(exported.uri, exported.mime, exported.fileName))
+                }.onFailure { error ->
+                    _state.update { it.copy(toast = "Ошибка сохранения: ${error.message ?: "неизвестная"}") }
+                }
+            }.onFailure { error ->
+                _state.update { it.copy(toast = "Ошибка выгрузки: ${error.message ?: "неизвестная"}") }
+            }
+        }
+    }
+
+    /** Кнопка «ИИ-досье»: аналитический отчёт по всем собранным данным. */
+    fun generateProfileReport() {
+        val profile = _state.value.profile ?: return
+        if (!requireKey() || _state.value.analysisRunning) return
+        _state.update {
+            it.copy(analysisRunning = true, assistantBusy = AssistantRole.ANALYST.title, assistantError = null)
+        }
+        viewModelScope.launch {
+            val prompt = buildString {
+                appendLine("Ты аналитик OSINT. Составь досье по объекту на основе только этих данных.")
+                appendLine("Объект: ${profile.subject.title} (@${profile.subject.username}), " +
+                    "ID ${profile.subject.id}, статус ${profile.subject.status.title}.")
+                appendLine("Ссылки: ${profile.subject.link}.")
+                appendLine("Идентификаторы: " + profile.identifiers.take(20)
+                    .joinToString(", ") { "${it.kind}=${it.value}" })
+                appendLine("Группы: " + profile.groups.take(15).joinToString(", "))
+                appendLine("Контакты: " + profile.contacts.take(15)
+                    .joinToString(", ") { "${it.name}${if (it.username.isNotBlank()) " (@" + it.username + ")" else ""}" })
+                appendLine("Метрики: сообщений ${profile.summary.messages}, медиа ${profile.summary.media}, " +
+                    "реплаев ${profile.summary.replies}, период ${ProfileBuilder.dateText(profile.summary.from)}—" +
+                    "${ProfileBuilder.dateText(profile.summary.to)}.")
+                appendLine("Поведение: пик активности ${profile.behavior.heatmap.peakHour}:00, " +
+                    "ночью ${profile.behavior.heatmap.nightShare}%, тональность ${profile.behavior.sentiment.tone}.")
+                appendLine("Темы: " + profile.behavior.topics.joinToString(", ") { "${it.name} ${it.share}%" })
+                appendLine("Репутация: токсичность ${profile.reputation.toxicity}%, спам ${profile.reputation.spam}%, " +
+                    "доверие ${profile.reputation.trust}%.")
+                appendLine("Нет данных по: " + profile.missing.joinToString(", "))
+                appendLine("Структура: 1) Кто это; 2) Цифровые следы; 3) Круг общения; 4) Поведение и риски; " +
+                    "5) Что проверить дальше. Не выдумывай факты, ссылайся на перечисленное.")
+            }
+            val outcome = assistantService.chat(AssistantRole.ANALYST, prompt)
+            _state.update { it.copy(analysisRunning = false, assistantBusy = "") }
+            outcome.onSuccess { text ->
+                _state.update { it.copy(profileDossier = text, toast = "ИИ-досье готово") }
+            }.onFailure { error ->
+                _state.update { it.copy(assistantError = error.message ?: "Не удалось получить ответ") }
+            }
+        }
+    }
+
+    /** Сравнение текущего профиля с другим сохранённым. */
+    fun compareProfiles() {
+        val current = _state.value.profile ?: return
+        val other = profileStore.ids()
+            .filter { it != current.id }
+            .mapNotNull { profileStore.load(it) }
+            .firstOrNull()
+        if (other == null) {
+            _state.update { it.copy(toast = "Нужны два профиля: откройте второй объект и вернитесь") }
+            return
+        }
+        _state.update { it.copy(compareText = ProfileCompare.compare(current, other)) }
+    }
+
+    fun setProfileAnonymize(value: Boolean) = _state.update { it.copy(profileAnonymize = value) }
+
+    /** PIN на раздел анализа: хранится только SHA-256. */
+    fun setProfilePin(pin: String) {
+        val clean = pin.filter { it.isDigit() }
+        if (clean.length < 4) {
+            _state.update { it.copy(toast = "PIN должен быть не короче 4 цифр") }
+            return
+        }
+        settings.profilePin = sha256(clean)
+        _state.update { it.copy(profilePinSet = true, profileUnlocked = true, toast = "PIN установлен") }
+    }
+
+    fun clearProfilePin() {
+        settings.profilePin = ""
+        _state.update { it.copy(profilePinSet = false, profileUnlocked = true, toast = "PIN снят") }
+    }
+
+    fun unlockProfile(pin: String) {
+        val expected = settings.profilePin
+        if (expected.isBlank()) {
+            _state.update { it.copy(profileUnlocked = true) }
+            return
+        }
+        if (sha256(pin.filter { it.isDigit() }) == expected) {
+            _state.update { it.copy(profileUnlocked = true) }
+        } else {
+            _state.update { it.copy(toast = "Неверный PIN") }
+        }
+    }
+
+    /** «Очистить профиль»: удаляет кэш профиля и импортированные сообщения. */
+    fun clearProfile() {
+        val profile = _state.value.profile
+        if (profile != null) profileStore.delete(profile.id)
+        importedMessages = emptyList()
+        _state.update {
+            it.copy(
+                profile = null,
+                profileChanges = emptyList(),
+                profileDossier = "",
+                compareText = "",
+                profileBriefs = profileStore.brief(),
+                screen = Screen.HOME,
+                toast = "Профиль и кэш удалены"
+            )
+        }
+    }
+
+    private fun sha256(value: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        return digest.digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+    }
+
+
+    // ------------------------------------------------------- автономный агент
+
+    fun setAgentQuery(value: String) = _state.update {
+        it.copy(agent = it.agent.copy(query = value, target = AgentPlanner.detect(value), error = null))
+    }
+
+    /** Запуск каскада: бесплатные модули → по ключу → платные (с лимитом). */
+    fun runAgent() {
+        val current = _state.value.agent
+        val query = current.query.trim()
+        if (query.isBlank()) {
+            _state.update { it.copy(toast = "Введите ФИО, телефон, почту, VIN, домен или ник") }
+            return
+        }
+        if (current.running) return
+        // Telegram-ник проверяем до запроса: иначе платные модули тратятся впустую.
+        val override = current.targetOverride
+        val looksTelegram = query.startsWith("@") || override == AgentTarget.USERNAME
+        if (looksTelegram) {
+            val error = TelegramRules.error(query)
+            if (error != null) {
+                _state.update { it.copy(agent = it.agent.copy(error = error)) }
+                return
+            }
+        }
+        _state.update {
+            it.copy(agent = it.agent.copy(running = true, error = null, report = null, stage = "Планирование", progress = 2))
+        }
+        viewModelScope.launch {
+            val depth = _state.value.agent.depth
+            val outcome = runCatching {
+                agentRunner.run(query, depth, override) { stage, progress ->
+                    _state.update { state -> state.copy(agent = state.agent.copy(stage = stage, progress = progress)) }
+                }
+            }
+            outcome.onSuccess { report ->
+                _state.update {
+                    it.copy(
+                        agent = it.agent.copy(
+                            running = false,
+                            report = report,
+                            stage = "",
+                            progress = 100,
+                            history = (listOf(query) + it.agent.history).distinct().take(8)
+                        ),
+                        journal = SearchJournal.last(30),
+                        toast = if (report.hasResults) "Готово: ${report.findings.size} фактов"
+                        else "Данные не найдены — смотрите журнал модулей"
+                    )
+                }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        agent = it.agent.copy(running = false, error = error.message ?: "Не удалось выполнить поиск", stage = ""),
+                        journal = SearchJournal.last(30)
+                    )
+                }
+            }
+        }
+    }
+
+    fun clearAgent() = _state.update { it.copy(agent = AgentUi(query = it.agent.query)) }
+
+    /** Профиль из результатов агента — тот же экран, что и для обычного поиска. */
+    fun openAgentProfile() {
+        val report = _state.value.agent.report ?: return
+        val entry = HistoryEntry(
+            id = "agent_" + System.currentTimeMillis(),
+            query = report.query,
+            createdAt = System.currentTimeMillis(),
+            analyst = _state.value.analyst,
+            data = report.data,
+            demo = false,
+            queryType = report.target.title
+        )
+        viewModelScope.launch {
+            val profile = withContext(Dispatchers.Default) { ProfileBuilder.build(entry, null, emptyList()) }
+            profileStore.save(profile)
+            _state.update {
+                it.copy(profile = profile, screen = Screen.PROFILE, profileBriefs = profileStore.brief())
+            }
+        }
+    }
+
+    /** Экспорт отчёта агента: модули в документе анонимны, ссылки — в приложении B. */
+    fun exportAgent(format: ReportExporter.Format) {
+        val report = _state.value.agent.report ?: run {
+            _state.update { it.copy(toast = "Сначала запустите агента") }
+            return
+        }
+        if (_state.value.exporting) return
+        _state.update { it.copy(exporting = true) }
+        viewModelScope.launch {
+            val entry = HistoryEntry(
+                id = "agent_" + report.durationMs,
+                query = report.query,
+                createdAt = System.currentTimeMillis(),
+                analyst = _state.value.analyst,
+                data = report.anonymousData,
+                demo = false,
+                aiAnalysis = buildString {
+                    appendLine("Агент: ${report.target.title}. ${report.note}")
+                    appendLine("Утверждения:")
+                    report.findings.take(40).forEach { appendLine("- ${it.text} [${it.status.title}]") }
+                    if (report.assumptions.isNotEmpty()) {
+                        appendLine("Предположения:")
+                        report.assumptions.forEach { appendLine("- ${it.text}") }
+                    }
+                    appendLine("Приложение B (реальные источники):")
+                    report.modules.forEach { appendLine("- ${it.label}: ${it.realName} — ${it.url}") }
+                },
+                queryType = report.target.title
+            )
+            val outcome = runCatching { exporter.export(entry, format) }
+            _state.update { it.copy(exporting = false) }
+            outcome.onSuccess { exported ->
+                _state.update { it.copy(toast = "${format.label} готов") }
+                _shareEvents.emit(ShareRequest(exported.uri, exported.mime, exported.fileName))
+            }.onFailure { error ->
+                _state.update { it.copy(toast = "Ошибка экспорта: ${error.message ?: "неизвестная"}") }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ проверка авто
+
+    fun setAutoQuery(value: String) = _state.update {
+        it.copy(auto = it.auto.copy(query = value, error = null))
+    }
+
+    fun runAutoCheck() {
+        val query = _state.value.auto.query.trim()
+        if (query.isBlank()) {
+            _state.update { it.copy(toast = "Введите VIN, номер кузова или госномер") }
+            return
+        }
+        if (_state.value.auto.running) return
+        _state.update { it.copy(auto = it.auto.copy(running = true, error = null, report = null)) }
+        viewModelScope.launch {
+            val outcome = runCatching {
+                withContext(Dispatchers.IO) {
+                    val compact = query.filter { it.isLetterOrDigit() }.uppercase()
+                    val isVin = compact.length == 17
+                    val raw = ArrayList<ru.jbosint.osint.core.model.RawFact>()
+                    raw += AutoCheck.decodeVin(if (isVin) compact else "")
+                    if (isVin) raw += runCatching { ru.jbosint.osint.data.VinDecoder.decode(compact) }
+                        .getOrDefault(emptyList())
+                    val key = keys.key("tronk")
+                    var paid = 0
+                    val baseUrl = keys.secondField("tronk")
+                    if (key.isNotBlank() && baseUrl.startsWith("https://")) {
+                        raw += AutoCheck.tronk(
+                            key = key,
+                            vin = if (isVin) compact else "",
+                            plate = if (isVin) "" else query.uppercase(),
+                            baseUrl = baseUrl
+                        )
+                        paid = 1
+                    }
+                    val stats = ru.jbosint.osint.core.model.SearchStats(
+                        sourcesAttempted = 2,
+                        sourcesResponded = if (raw.isEmpty()) 0 else 1,
+                        sourcesFailed = if (raw.isEmpty()) 1 else 0,
+                        rawFacts = raw.size,
+                        duplicatesRemoved = 0,
+                        durationMs = 0
+                    )
+                    val data = ru.jbosint.osint.core.aggregate.Aggregator.aggregate(query, raw, stats)
+                        .copy(sources = listOf(ru.jbosint.osint.core.report.SourceCatalog.ref("tronk"), ru.jbosint.osint.core.report.SourceCatalog.ref("vin")))
+                    val anonymized = ru.jbosint.osint.agent.AgentAnonymizer.apply(data)
+                    val summary = raw.map { it.kind to it.value }.distinct().take(20)
+                    AutoReport(
+                        query = query,
+                        vin = if (isVin) compact else "",
+                        plate = if (isVin) "" else query.uppercase(),
+                        summary = summary,
+                        findings = AgentNarrator.findings(anonymized.data),
+                        assumptions = AgentNarrator.assumptions(anonymized.data, AgentTarget.VIN),
+                        manualLinks = AutoCheck.manualLinks(vin = if (isVin) compact else "", plate = if (isVin) "" else query.uppercase()),
+                        modules = anonymized.modules,
+                        ok = raw.isNotEmpty(),
+                        error = when {
+                            key.isBlank() -> "Ключ TRONK не задан — показаны локальный разбор VIN, NHTSA и ссылки для ручной проверки"
+                            !keys.secondField("tronk").startsWith("https://") ->
+                                "Укажите базовый URL API TRONK в «Ключи → Проверка авто» — без него платный модуль не работает"
+                            else -> null
+                        }
+                    )
+                }
+            }
+            outcome.onSuccess { report ->
+                _state.update { it.copy(auto = it.auto.copy(running = false, report = report)) }
+            }.onFailure { error ->
+                _state.update { it.copy(auto = it.auto.copy(running = false, error = error.message ?: "Ошибка проверки")) }
+            }
+        }
+    }
+
+    // --------------------------------------------------------- поиск по фото
+
+    fun setPhotoPlatform(platform: String?) = _state.update {
+        it.copy(photoSearch = it.photoSearch.copy(platform = platform))
+    }
+
+    fun runPhotoSearch(uri: Uri) {
+        if (_state.value.photoSearch.running) return
+        _state.update {
+            it.copy(
+                photoSearch = PhotoUi(
+                    running = true,
+                    stage = "Анализ фотографии",
+                    progress = 5,
+                    photoUri = uri.toString()
+                )
+            )
+        }
+        viewModelScope.launch {
+            val outcome = runCatching {
+                val photo = PhotoAnalyzer.analyze(getApplication(), uri)
+                _state.update {
+                    it.copy(photoSearch = it.photoSearch.copy(stage = "Обратный поиск", progress = 35))
+                }
+                PhotoSearch.run(photo, keys) { stage, progress ->
+                    _state.update { state -> state.copy(photoSearch = state.photoSearch.copy(stage = stage, progress = progress)) }
+                }
+            }
+            outcome.onSuccess { result ->
+                _state.update {
+                    it.copy(
+                        photoSearch = PhotoUi(running = false, result = result, progress = 100),
+                        toast = if (result.hasResults) "Совпадений: ${result.found.size}" else "Совпадений не найдено"
+                    )
+                }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(photoSearch = it.photoSearch.copy(running = false, error = error.message ?: "Не удалось обработать фото", stage = ""))
+                }
+            }
+        }
+    }
+
+    /** «Добавить в досье»: факты фото → профиль объекта. */
+    fun addPhotoToDossier() {
+        val result = _state.value.photoSearch.result ?: return
+        val raw = PhotoAnalyzer.facts(result.photo) + PhotoSearch.toFacts(result)
+        val stats = ru.jbosint.osint.core.model.SearchStats(
+            sourcesAttempted = 1,
+            sourcesResponded = 1,
+            sourcesFailed = 0,
+            rawFacts = raw.size,
+            duplicatesRemoved = 0,
+            durationMs = result.durationMs
+        )
+        val data = ru.jbosint.osint.core.aggregate.Aggregator.aggregate(result.photo.fileName, raw, stats)
+            .copy(sources = listOf(ru.jbosint.osint.core.report.SourceCatalog.ref("photo")))
+        val entry = HistoryEntry(
+            id = "photo_" + System.currentTimeMillis(),
+            query = result.photo.fileName,
+            createdAt = System.currentTimeMillis(),
+            analyst = _state.value.analyst,
+            data = data,
+            demo = false,
+            queryType = "фотография",
+            photoNote = PhotoSearch.summary(result)
+        )
+        viewModelScope.launch {
+            val profile = withContext(Dispatchers.Default) { ProfileBuilder.build(entry, null, emptyList()) }
+            profileStore.save(profile)
+            _state.update {
+                it.copy(profile = profile, screen = Screen.PROFILE, profileBriefs = profileStore.brief(), toast = "Совпадения добавлены в досье")
+            }
+        }
+    }
+
+    // ------------------------------------------------------ мониторинг объявлений
+
+    fun refreshWatches() {
+        viewModelScope.launch {
+            val items = withContext(Dispatchers.IO) { watchStore.list() }
+            _state.update { it.copy(watches = items) }
+        }
+    }
+
+    fun addWatch(title: String, query: String, priceMax: Int) {
+        if (query.isBlank()) {
+            _state.update { it.copy(toast = "Укажите критерий мониторинга") }
+            return
+        }
+        viewModelScope.launch {
+            val item = withContext(Dispatchers.IO) { watchStore.add(title, query, priceMax) }
+            _state.update { it.copy(watches = it.watches + item, toast = "Мониторинг добавлен") }
+        }
+    }
+
+    fun removeWatch(id: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { watchStore.remove(id) }
+            _state.update {
+                it.copy(watches = it.watches.filterNot { watch -> watch.id == id }, watchNotes = it.watchNotes - id)
+            }
+        }
+    }
+
+    fun checkWatch(id: String) {
+        val item = _state.value.watches.firstOrNull { it.id == id } ?: return
+        viewModelScope.launch {
+            _state.update { it.copy(watchNotes = it.watchNotes + (id to "Проверяем…")) }
+            val outcome = runCatching { watchStore.check(item) }
+            outcome.onSuccess { check ->
+                _state.update {
+                    it.copy(
+                        watches = it.watches.map { watch -> if (watch.id == id) check.item else watch },
+                        watchNotes = it.watchNotes + (id to check.summary)
+                    )
+                }
+                if (check.changed) {
+                    Notify.watch(
+                        getApplication(),
+                        check.item.title,
+                        "Новые объявления: ${check.fresh.size}. " + check.fresh.take(2).joinToString(", ")
+                    )
+                }
+            }.onFailure { error ->
+                _state.update { it.copy(watchNotes = it.watchNotes + (id to "Ошибка: ${error.message ?: "неизвестная"}")) }
+            }
+        }
+    }
+
+    fun checkAllWatches() {
+        _state.value.watches.forEach { checkWatch(it.id) }
+    }
+
+
+    fun setAgentTarget(target: AgentTarget?) = _state.update {
+        it.copy(agent = it.agent.copy(targetOverride = target, error = null))
+    }
+
+    fun refreshJournal() = _state.update { it.copy(journal = SearchJournal.last(30)) }
+
+    fun clearJournal() {
+        SearchJournal.clear()
+        _state.update { it.copy(journal = emptyList()) }
+    }
+
+    fun setAgentDepth(depth: Int) = _state.update {
+        it.copy(agent = it.agent.copy(depth = depth.coerceIn(1, 3)))
+    }
+
+    fun setAgentSection(section: Int) = _state.update {
+        it.copy(agent = it.agent.copy(section = section.coerceIn(0, 3)))
+    }
+
+    /** Экспорт отчёта агента по выбранному шаблону (HTML-досье). */
+    fun exportAgentHtml(template: AgentTemplate) {
+        val report = _state.value.agent.report ?: run {
+            _state.update { it.copy(toast = "Сначала запустите агента") }
+            return
+        }
+        if (_state.value.exporting) return
+        _state.update { it.copy(exporting = true) }
+        viewModelScope.launch {
+            val outcome = runCatching {
+                val bytes = withContext(Dispatchers.Default) { AgentTemplates.build(report, template) }
+                exporter.save(AgentTemplates.fileName(report, template), bytes, "text/html")
+            }
+            _state.update { it.copy(exporting = false) }
+            outcome.onSuccess { exported ->
+                _state.update { it.copy(toast = "«${template.title}» готов") }
+                _shareEvents.emit(ShareRequest(exported.uri, exported.mime, exported.fileName))
+            }.onFailure { error ->
+                _state.update { it.copy(toast = "Ошибка экспорта: ${error.message ?: "неизвестная"}") }
+            }
+        }
+    }
+
+    /** Связка «фото → агент»: никнейм из совпадения уходит в каскадный поиск. */
+    fun runAgentForHandle(handle: String) {
+        if (handle.isBlank()) {
+            _state.update { it.copy(toast = "В совпадениях нет никнеймов") }
+            return
+        }
+        _state.update {
+            it.copy(
+                agent = it.agent.copy(query = "@" + handle.trimStart('@'), target = AgentTarget.USERNAME, section = 0),
+                screen = Screen.AGENT
+            )
+        }
+        runAgent()
+    }
+
+    /** Анализ продавца по телефону: отдельный прогон агента. */
+    fun setSellerPhone(value: String) = _state.update {
+        it.copy(auto = it.auto.copy(sellerPhone = value, sellerError = null))
+    }
+
+    fun checkSeller() {
+        val raw = _state.value.auto.sellerPhone.trim()
+        if (raw.isBlank()) {
+            _state.update { it.copy(toast = "Введите телефон продавца") }
+            return
+        }
+        if (_state.value.auto.sellerRunning) return
+        _state.update { it.copy(auto = it.auto.copy(sellerRunning = true, sellerError = null, sellerReport = null)) }
+        viewModelScope.launch {
+            val outcome = runCatching { agentRunner.run(raw) }
+            outcome.onSuccess { report ->
+                _state.update { it.copy(auto = it.auto.copy(sellerRunning = false, sellerReport = report)) }
+            }.onFailure { error ->
+                _state.update { it.copy(auto = it.auto.copy(sellerRunning = false, sellerError = error.message ?: "Ошибка проверки")) }
+            }
+        }
+    }
+
+    /** Обратный поиск по публичной ссылке на изображение (Google Lens / Bing через SerpAPI). */
+    fun setPhotoUrlQuery(value: String) = _state.update {
+        it.copy(photoSearch = it.photoSearch.copy(urlQuery = value, urlError = null))
+    }
+
+    fun runPhotoUrlSearch() {
+        val url = _state.value.photoSearch.urlQuery.trim()
+        if (!url.startsWith("https://")) {
+            _state.update { it.copy(photoSearch = it.photoSearch.copy(urlError = "Нужна публичная ссылка https:// на изображение")) }
+            return
+        }
+        val key = keys.key("serpapi")
+        if (key.isBlank()) {
+            _state.update { it.copy(photoSearch = it.photoSearch.copy(urlError = "Для поиска по ссылке нужен ключ SerpAPI")) }
+            return
+        }
+        if (_state.value.photoSearch.urlBusy) return
+        _state.update { it.copy(photoSearch = it.photoSearch.copy(urlBusy = true, urlError = null, urlMatches = emptyList())) }
+        viewModelScope.launch {
+            val outcome = runCatching { PhotoSearch.reverseByUrl(url, key) }
+            outcome.onSuccess { matches ->
+                _state.update {
+                    it.copy(
+                        photoSearch = it.photoSearch.copy(urlBusy = false, urlMatches = matches),
+                        toast = if (matches.isEmpty()) "Совпадений по ссылке не найдено" else "Совпадений: ${matches.size}"
+                    )
+                }
+            }.onFailure { error ->
+                _state.update { it.copy(photoSearch = it.photoSearch.copy(urlBusy = false, urlError = error.message ?: "Ошибка запроса")) }
+            }
+        }
+    }
+
+    fun consumeToast() = _state.update { it.copy(toast = null) }
+
+
+}
