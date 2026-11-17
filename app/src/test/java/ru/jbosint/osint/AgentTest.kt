@@ -10,6 +10,11 @@ import ru.jbosint.osint.agent.AgentNarrator
 import ru.jbosint.osint.agent.AgentPlanner
 import ru.jbosint.osint.agent.AgentTarget
 import ru.jbosint.osint.agent.CostTier
+import ru.jbosint.osint.agent.AgentFinding
+import ru.jbosint.osint.agent.AgentReport
+import ru.jbosint.osint.agent.AgentTemplate
+import ru.jbosint.osint.agent.AgentTemplates
+import ru.jbosint.osint.agent.ModuleLabel
 import ru.jbosint.osint.agent.StepState
 import ru.jbosint.osint.core.model.AggregatedData
 import ru.jbosint.osint.core.model.Fact
@@ -154,6 +159,75 @@ class AgentTest {
         val paid = plan.filter { it.tier == CostTier.PAID }
         assertTrue(paid.size <= AgentPlanner.MAX_PAID_STEPS)
         assertTrue(plan.none { it.state == StepState.SKIPPED && it.tier != CostTier.PAID })
+    }
+
+
+    // ------------------------------------------------------------ шаблоны отчёта
+
+    private fun report(): AgentReport {
+        val data = data(listOf(fact("Телефон", "+79990001122", category = FactCategory.CONTACT)))
+        val anonymized = AgentAnonymizer.apply(data)
+        return AgentReport(
+            query = "Балахтина Юлия Вадимовна",
+            target = AgentTarget.PERSON,
+            plan = AgentPlanner.plan("Балахтина Юлия Вадимовна") { false },
+            findings = AgentNarrator.findings(anonymized.data),
+            assumptions = emptyList(),
+            modules = anonymized.modules,
+            data = data,
+            anonymousData = anonymized.data,
+            freeOnly = true,
+            paidRequests = 0,
+            skippedPaid = emptyList(),
+            durationMs = 1200
+        )
+    }
+
+    @Test
+    fun quickTemplateIsShortAndHasNoAppendix() {
+        val html = String(AgentTemplates.build(report(), AgentTemplate.QUICK), Charsets.UTF_8)
+        assertTrue(html.contains("Быстрый чек"))
+        assertTrue(html.contains("Балахтина Юлия Вадимовна"))
+        assertFalse(html.contains("Приложение B"))
+        assertTrue(html.contains("Данные собраны из открытых источников"))
+    }
+
+    @Test
+    fun deepTemplateHasAppendixWithRealSources() {
+        val html = String(AgentTemplates.build(report(), AgentTemplate.DEEP), Charsets.UTF_8)
+        assertTrue(html.contains("Приложение B"))
+        assertTrue(html.contains("TeleSINT"))
+        assertTrue(html.contains("Модуль 1"))
+    }
+
+    @Test
+    fun autoTemplateHasDealChecklist() {
+        val r = report().copy(
+            query = "XTA21150053912345",
+            target = AgentTarget.VIN,
+            findings = listOf(
+                AgentFinding(
+                    text = "У объекта «Автомобиль» выявлен Пробег: 87000 км.",
+                    kind = "Пробег",
+                    value = "87000 км",
+                    status = Confidence.PROBABLE,
+                    moduleLabel = "Модуль 1"
+                )
+            )
+        )
+        val html = String(AgentTemplates.build(r, AgentTemplate.AUTO), Charsets.UTF_8)
+        assertTrue(html.contains("Что проверить перед сделкой"))
+        assertTrue(html.contains("87000"))
+        assertTrue(html.contains("Приложение B"))
+    }
+
+    @Test
+    fun templateFileNamesAreSafe() {
+        val name = AgentTemplates.fileName(report(), AgentTemplate.QUICK)
+        assertTrue(name.startsWith("agent_"))
+        assertTrue(name.contains("_quick_"))
+        assertTrue(name.endsWith(".html"))
+        assertFalse(name.contains(" "))
     }
 
     // ------------------------------------------------------------ фото

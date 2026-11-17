@@ -92,6 +92,9 @@ import ru.jbosint.osint.agent.AgentNarrator
 import ru.jbosint.osint.agent.AgentPlanner
 import ru.jbosint.osint.agent.AgentReport
 import ru.jbosint.osint.agent.AgentRunner
+import ru.jbosint.osint.agent.AgentTemplate
+import ru.jbosint.osint.agent.AgentTemplates
+import ru.jbosint.osint.data.Notify
 import ru.jbosint.osint.agent.AgentTarget
 import ru.jbosint.osint.agent.AgentUi
 import ru.jbosint.osint.agent.AutoReport
@@ -2501,6 +2504,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         watchNotes = it.watchNotes + (id to check.summary)
                     )
                 }
+                if (check.changed) {
+                    Notify.watch(
+                        getApplication(),
+                        check.item.title,
+                        "Новые объявления: ${check.fresh.size}. " + check.fresh.take(2).joinToString(", ")
+                    )
+                }
             }.onFailure { error ->
                 _state.update { it.copy(watchNotes = it.watchNotes + (id to "Ошибка: ${error.message ?: "неизвестная"}")) }
             }
@@ -2511,6 +2521,73 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _state.value.watches.forEach { checkWatch(it.id) }
     }
 
+
+    fun setAgentSection(section: Int) = _state.update {
+        it.copy(agent = it.agent.copy(section = section.coerceIn(0, 3)))
+    }
+
+    /** Экспорт отчёта агента по выбранному шаблону (HTML-досье). */
+    fun exportAgentHtml(template: AgentTemplate) {
+        val report = _state.value.agent.report ?: run {
+            _state.update { it.copy(toast = "Сначала запустите агента") }
+            return
+        }
+        if (_state.value.exporting) return
+        _state.update { it.copy(exporting = true) }
+        viewModelScope.launch {
+            val outcome = runCatching {
+                val bytes = withContext(Dispatchers.Default) { AgentTemplates.build(report, template) }
+                exporter.save(AgentTemplates.fileName(report, template), bytes, "text/html")
+            }
+            _state.update { it.copy(exporting = false) }
+            outcome.onSuccess { exported ->
+                _state.update { it.copy(toast = "«${template.title}» готов") }
+                _shareEvents.emit(ShareRequest(exported.uri, exported.mime, exported.fileName))
+            }.onFailure { error ->
+                _state.update { it.copy(toast = "Ошибка экспорта: ${error.message ?: "неизвестная"}") }
+            }
+        }
+    }
+
+    /** Связка «фото → агент»: никнейм из совпадения уходит в каскадный поиск. */
+    fun runAgentForHandle(handle: String) {
+        if (handle.isBlank()) {
+            _state.update { it.copy(toast = "В совпадениях нет никнеймов") }
+            return
+        }
+        _state.update {
+            it.copy(
+                agent = it.agent.copy(query = "@" + handle.trimStart('@'), target = AgentTarget.USERNAME, section = 0),
+                screen = Screen.AGENT
+            )
+        }
+        runAgent()
+    }
+
+    /** Анализ продавца по телефону: отдельный прогон агента. */
+    fun setSellerPhone(value: String) = _state.update {
+        it.copy(auto = it.auto.copy(sellerPhone = value, sellerError = null))
+    }
+
+    fun checkSeller() {
+        val raw = _state.value.auto.sellerPhone.trim()
+        if (raw.isBlank()) {
+            _state.update { it.copy(toast = "Введите телефон продавца") }
+            return
+        }
+        if (_state.value.auto.sellerRunning) return
+        _state.update { it.copy(auto = it.auto.copy(sellerRunning = true, sellerError = null, sellerReport = null)) }
+        viewModelScope.launch {
+            val outcome = runCatching { agentRunner.run(raw) }
+            outcome.onSuccess { report ->
+                _state.update { it.copy(auto = it.auto.copy(sellerRunning = false, sellerReport = report)) }
+            }.onFailure { error ->
+                _state.update { it.copy(auto = it.auto.copy(sellerRunning = false, sellerError = error.message ?: "Ошибка проверки")) }
+            }
+        }
+    }
+
     fun consumeToast() = _state.update { it.copy(toast = null) }
+
 
 }

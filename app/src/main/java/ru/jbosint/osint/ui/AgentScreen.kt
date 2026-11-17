@@ -1,6 +1,8 @@
 package ru.jbosint.osint.ui
 
+import android.Manifest
 import android.content.Intent
+import android.os.Build
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -59,10 +61,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ru.jbosint.osint.agent.AgentReport
+import ru.jbosint.osint.agent.AgentTemplate
 import ru.jbosint.osint.agent.CostTier
 import ru.jbosint.osint.agent.StepState
 import ru.jbosint.osint.agent.WatchItem
 import ru.jbosint.osint.data.PhotoMatch
+import ru.jbosint.osint.data.Notify
 import ru.jbosint.osint.data.PhotoSearchResult
 import ru.jbosint.osint.report.ReportExporter
 
@@ -76,8 +80,8 @@ private enum class AgentTab(val title: String) {
 
 @Composable
 fun AgentScreen(state: UiState, vm: AppViewModel) {
-    var tab by remember { mutableStateOf(AgentTab.AGENT) }
     val context = LocalContext.current
+    val tab = AgentTab.entries[state.agent.section.coerceIn(0, 3)]
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -96,7 +100,7 @@ fun AgentScreen(state: UiState, vm: AppViewModel) {
             horizontalArrangement = Arrangement.spacedBy(7.dp)
         ) {
             AgentTab.entries.forEach { entry ->
-                SectionChip(entry.title, tab == entry) { tab = entry }
+                SectionChip(entry.title, tab == entry) { vm.setAgentSection(entry.ordinal) }
             }
         }
         Spacer(Modifier.height(12.dp))
@@ -214,7 +218,18 @@ private fun AgentTabContent(state: UiState, vm: AppViewModel, context: android.c
                 Text("JSON", fontSize = 12.sp)
             }
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(10.dp))
+        Text("Шаблон отчёта", style = MaterialTheme.typography.labelSmall, color = JbFaint)
+        Spacer(Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(7.dp)
+        ) {
+            AgentTemplate.entries.forEach { template ->
+                SectionChip(template.title, false) { vm.exportAgentHtml(template) }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
         Button(onClick = vm::openAgentProfile, modifier = Modifier.fillMaxWidth()) {
             Text("Открыть профиль объекта")
         }
@@ -505,6 +520,59 @@ private fun AutoTabContent(state: UiState, vm: AppViewModel, context: android.co
             color = JbFaint
         )
     }
+    Spacer(Modifier.height(12.dp))
+    SellerCard(state, vm)
+}
+
+/** Анализ продавца: телефон → каскадный поиск (Dyxless, TeleSINT, Numverify, Hunter). */
+@Composable
+private fun SellerCard(state: UiState, vm: AppViewModel) {
+    val auto = state.auto
+    GlowCard(modifier = Modifier.fillMaxWidth()) {
+        SectionHeader("Анализ продавца")
+        Text(
+            "Телефон уходит в общий каскад модулей: утечки, Telegram, оператор, корпоративные адреса.",
+            style = MaterialTheme.typography.labelSmall,
+            color = JbMuted
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = auto.sellerPhone,
+            onValueChange = vm::setSellerPhone,
+            label = { Text("Телефон продавца") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(Modifier.height(8.dp))
+        Button(onClick = vm::checkSeller, enabled = !auto.sellerRunning, modifier = Modifier.fillMaxWidth()) {
+            if (auto.sellerRunning) CircularProgressIndicator(Modifier.size(14.dp), color = Color.White, strokeWidth = 2.dp)
+            else Text("Проверить продавца")
+        }
+        auto.sellerError?.let {
+            Spacer(Modifier.height(6.dp))
+            Text(it, style = MaterialTheme.typography.labelSmall, color = JbRed)
+        }
+        val report = auto.sellerReport
+        if (report != null) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "${report.note} Фактов: ${report.findings.size}",
+                style = MaterialTheme.typography.labelSmall,
+                color = JbFaint
+            )
+            report.findings.take(10).forEach { finding ->
+                Column(Modifier.padding(vertical = 3.dp)) {
+                    Text(finding.text, style = MaterialTheme.typography.bodySmall, color = JbText)
+                    Text(
+                        "${finding.status.title} · ${finding.moduleLabel}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = JbFaint
+                    )
+                }
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------------ фото
@@ -585,6 +653,15 @@ private fun PhotoTabContent(state: UiState, vm: AppViewModel, context: android.c
             Spacer(Modifier.height(10.dp))
             Button(onClick = vm::addPhotoToDossier, modifier = Modifier.fillMaxWidth()) {
                 Text("Добавить в досье")
+            }
+            if (result.handles.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { vm.runAgentForHandle(result.handles.first()) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Передать @${result.handles.first()} агенту")
+                }
             }
         }
     }
@@ -705,6 +782,13 @@ private fun WatchTabContent(state: UiState, vm: AppViewModel) {
     var title by remember { mutableStateOf("") }
     var query by remember { mutableStateOf("") }
     var price by remember { mutableStateOf("") }
+    val context = LocalContext.current
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !Notify.permissionGranted(context)) {
+        TextButton(onClick = { permission.launch(Manifest.permission.POST_NOTIFICATIONS) }) {
+            Text("Включить уведомления о новых объявлениях", fontSize = 12.sp)
+        }
+    }
 
     GlowCard(modifier = Modifier.fillMaxWidth()) {
         SectionHeader("Новый критерий")

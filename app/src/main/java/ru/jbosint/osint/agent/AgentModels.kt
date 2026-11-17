@@ -96,6 +96,8 @@ data class AgentReport(
 data class AgentUi(
     val query: String = "",
     val target: AgentTarget = AgentTarget.OTHER,
+    /** Активная вкладка: 0 — агент, 1 — авто, 2 — фото, 3 — объявления. */
+    val section: Int = 0,
     val running: Boolean = false,
     val stage: String = "",
     val progress: Int = 0,
@@ -136,7 +138,12 @@ data class AutoUi(
     val query: String = "",
     val running: Boolean = false,
     val report: AutoReport? = null,
-    val error: String? = null
+    val error: String? = null,
+    /** Телефон продавца: отдельный прогон агента по номеру. */
+    val sellerPhone: String = "",
+    val sellerRunning: Boolean = false,
+    val sellerReport: AgentReport? = null,
+    val sellerError: String? = null
 )
 
 /** Состояние вкладки «Поиск по фото». */
