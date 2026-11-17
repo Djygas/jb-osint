@@ -74,9 +74,15 @@ class AgentRunner(private val keys: KeyRepository) {
             else {
                 val ids = if (step.id == "auto") setOf("nhtsa", "vin", "tronk")
                 else step.moduleIds.toSet()
-                step.copy(state = StepState.DONE, facts = raw.count { it.sourceId in ids })
+                val count = raw.count { it.sourceId in ids }
+                step.copy(
+                    state = if (count > 0) StepState.DONE else StepState.SKIPPED,
+                    facts = count,
+                    note = if (count > 0) step.note else "Модули не вернули данных"
+                )
             }
         }
+        // Платным считаем только шаг, который реально дал факты.
         val paidRequests = plan.count { it.tier == CostTier.PAID && it.state == StepState.DONE }
         onStage("Агрегация и анонимизация", 95)
 

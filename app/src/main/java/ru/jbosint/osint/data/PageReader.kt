@@ -19,6 +19,8 @@ data class PageContent(
     val description: String = "",
     val siteName: String = "",
     val text: String = "",
+    /** Абсолютные ссылки со страницы: нужны для поиска профилей и следующего шага. */
+    val links: List<String> = emptyList(),
     val ok: Boolean = false,
     val error: String = ""
 ) {
@@ -65,11 +67,17 @@ object PageReader {
         val title = Regex("<title[^>]*>(.*?)</title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
             .find(html)?.groupValues?.get(1)?.let(::cleanText).orEmpty()
         fun meta(name: String): String {
-            val pattern = Regex(
-                "<meta[^>]+(?:name|property)=[\"']$name[\"'][^>]*content=[\"']([^\"']*)[\"']",
-                RegexOption.IGNORE_CASE
-            )
-            return pattern.find(html)?.groupValues?.get(1)?.let(::cleanText).orEmpty()
+            // Порядок атрибутов в <meta> произвольный: content может стоять и до name.
+            Regex("<meta[^>]*>", RegexOption.IGNORE_CASE).findAll(html).forEach { match ->
+                val tag = match.value
+                val key = Regex("(?:name|property)=[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                    .find(tag)?.groupValues?.get(1).orEmpty()
+                if (!key.equals(name, ignoreCase = true)) return@forEach
+                val value = Regex("content=[\"']([^\"']*)[\"']", RegexOption.IGNORE_CASE)
+                    .find(tag)?.groupValues?.get(1).orEmpty()
+                if (value.isNotBlank()) return cleanText(value)
+            }
+            return ""
         }
         val description = meta("description").ifBlank { meta("og:description") }
         val siteName = meta("og:site_name")
@@ -78,12 +86,27 @@ object PageReader {
             .replace(Regex("<style[^>]*>.*?</style>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), " ")
             .replace(Regex("<noscript[^>]*>.*?</noscript>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), " ")
         val text = cleanText(withoutScripts.replace(Regex("<[^>]+>"), " ")).take(MAX_TEXT)
+        // Ссылки берём из атрибутов href: после вырезания тегов они теряются.
+        val links = Regex("href=[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+            .findAll(html)
+            .map { it.groupValues[1].trim() }
+            .mapNotNull { href ->
+                when {
+                    href.startsWith("https://") -> href
+                    href.startsWith("//") -> "https:$href"
+                    else -> null
+                }
+            }
+            .distinct()
+            .take(60)
+            .toList()
         return PageContent(
             url = url,
             title = title,
             description = description,
             siteName = siteName,
             text = text,
+            links = links,
             ok = text.length > 40 || title.isNotBlank()
         )
     }
@@ -113,9 +136,7 @@ object PageReader {
         phones(page.text + " " + page.description).forEach { phone ->
             out += RawFact(FactCategory.CONTACT, "Телефон", phone, subject, mapOf("Источник" to page.host), "page", 2, page.url)
         }
-        val links = Regex("https?://[^\\s\"'<>]+", RegexOption.IGNORE_CASE).findAll(page.text)
-            .map { it.value }.toList()
-        PhotoAnalyzer.handlesFrom(links).forEach { handle ->
+        PhotoAnalyzer.handlesFrom(page.links).forEach { handle ->
             out += RawFact(FactCategory.PERSON, "Никнейм", "@$handle", subject, mapOf("Источник" to page.host), "page", 1, page.url)
         }
         if (page.siteName.isNotBlank()) {
@@ -148,7 +169,9 @@ object PageReader {
         .take(5)
         .toList()
 
-    fun phones(text: String): List<String> = Regex("""\+?\d[\d\s()\-]{8,20}\d""")
+    fun phones(text: String): List<String> = Regex(
+        """(?:\+7|8)[\s\-(]*\d{3}[\s\-)]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}|\+\d{10,14}"""
+    )
         .findAll(text)
         .mapNotNull { EntityResolver.phone(it.value) }
         .distinct()

@@ -175,4 +175,62 @@ class SearchDepthTest {
         firstSeen = 0L,
         urls = emptySet()
     )
+
+    @Test
+    fun linksFromHrefGiveProfileHandles() {
+        // Регресс: раньше ссылки искались в тексте, а после вырезания тегов их там нет.
+        val html = """
+            <html><head><title>Команда</title></head><body>
+            <p>Наши соцсети:</p>
+            <a href="https://t.me/jb_team">Telegram</a>
+            <a href="https://github.com/jb-osint/app">GitHub</a>
+            <a href="/local/page">Локальная</a>
+            </body></html>
+        """.trimIndent()
+        val page = PageReader.parse(html, "https://example.org/team")
+        assertTrue(page.links.contains("https://t.me/jb_team"))
+        assertTrue(page.links.contains("https://github.com/jb-osint/app"))
+        assertFalse(page.links.any { it.startsWith("/") })
+
+        val facts = PageReader.facts(page)
+        assertTrue(facts.any { it.kind == "Никнейм" && it.value == "@jb_team" })
+        assertTrue(facts.any { it.kind == "Никнейм" && it.value == "@jb-osint" })
+    }
+
+    @Test
+    fun metaParsedWithContentBeforeName() {
+        val html = """
+            <html><head><title>Страница</title>
+            <meta content="Описание с обратным порядком" name="description">
+            </head><body>Текст страницы, достаточный для того, чтобы страница считалась прочитанной.</body></html>
+        """.trimIndent()
+        val page = PageReader.parse(html, "https://example.org/a")
+        assertEquals("Описание с обратным порядком", page.description)
+    }
+
+    @Test
+    fun datesAreNotMistakenForPhones() {
+        assertNull(EntityResolver.phone("17.11.2026"))
+        assertNull(EntityResolver.phone("202611170341"))
+        assertNull(EntityResolver.phone("171120261015"))
+        assertTrue(PageReader.phones("обновлено 17.11.2026 10:15, заказ 123456789012").isEmpty())
+        assertTrue(PageReader.phones("тел. 8 (999) 000-11-22").isNotEmpty())
+    }
+
+    @Test
+    fun pageHandlesBecomePivots() {
+        val html = """<html><head><title>Профиль</title></head><body>
+            <p>Свяжитесь со мной в телеграме.</p>
+            <a href="https://t.me/toxa">Telegram</a></body></html>"""
+        val page = PageReader.parse(html, "https://example.org/p")
+        val facts = PageReader.facts(page).map {
+            Fact(
+                category = it.category, kind = it.kind, value = it.value, subject = it.subject,
+                attributes = it.attributes, sourceIds = setOf(it.sourceId), observations = 1,
+                firstSeen = 0L, urls = setOfNotNull(it.sourceUrl.takeIf { v -> v.isNotBlank() })
+            )
+        }
+        val pivots = EntityResolver.pivots(facts)
+        assertTrue(pivots.any { it.kind == "USERNAME" && it.value == "toxa" })
+    }
 }

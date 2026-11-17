@@ -62,8 +62,11 @@ class DeepScan(
         val cleanSeed = seed.trim()
         val seenQueries = LinkedHashSet<String>()
         val seenPivots = LinkedHashSet<String>()
-        seenQueries += cleanSeed.lowercase()
+        // Исходный запрос сразу считаем пройденным во всех написаниях: иначе
+        // «toxa» и «@toxa» пойдут как два разных прохода.
+        normalizeQuery(cleanSeed).forEach { seenQueries += it }
         var queue = listOf(cleanSeed)
+        val readUrls = LinkedHashSet<String>()
         val hops = ArrayList<Hop>()
         val hopsCount = maxHops.coerceIn(1, 3)
 
@@ -91,7 +94,6 @@ class DeepScan(
                         }
                     }.awaitAll()
                 }
-                result.size
             }
 
             // Страницы из выдачи: читаем и разбираем только на первом и втором проходе.
@@ -99,7 +101,8 @@ class DeepScan(
                 val urls = allFacts.mapNotNull { fact ->
                     fact.value.takeIf { it.startsWith("http") } ?: fact.sourceUrl.takeIf { it.isNotBlank() }
                 }
-                val picked = PageReader.pickUrls(urls, pageLimit)
+                val picked = PageReader.pickUrls(urls, pageLimit).filter { it !in readUrls }
+                readUrls += picked
                 coroutineScope {
                     picked.map { url ->
                         async {
@@ -117,10 +120,13 @@ class DeepScan(
                 exclude = seenPivots,
                 limit = maxPivotsPerHop
             )
-            val next = pivots.filter { it.query.lowercase() !in seenQueries }
+            val next = pivots.filter { pivot ->
+                val variants = normalizeQuery(pivot.query) + normalizeQuery(pivot.value)
+                variants.none { it in seenQueries }
+            }
             hops += Hop(hop, queue, allFacts.size - before, pages.size, next.size)
             next.forEach {
-                seenQueries += it.query.lowercase()
+                normalizeQuery(it.query).forEach { value -> seenQueries += value }
                 seenPivots += it.key
             }
             queue = next.map { it.query }
@@ -135,6 +141,13 @@ class DeepScan(
             responded = responded,
             failed = failed
         )
+    }
+
+    /** Написания одного и того же запроса: с @, без @, в нижнем регистре. */
+    private fun normalizeQuery(raw: String): List<String> {
+        val clean = raw.trim().lowercase()
+        val bare = clean.trimStart('@')
+        return listOf(clean, bare, "@$bare").distinct()
     }
 
     /**

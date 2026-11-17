@@ -18,15 +18,19 @@ object EntityResolver {
         val key: String get() = "${kind.lowercase()}:${value.lowercase()}"
     }
 
-    /** Телефон в виде +7XXXXXXXXXX (для РФ), иначе + и только цифры. */
+    /**
+     * Телефон в виде +7XXXXXXXXXX (для РФ) или + и цифры для международных.
+     * Строгий разбор: даты (17.11.2026), номера заказов и ID сюда не проходят —
+     * иначе они становятся «зацепками» и жгут запросы.
+     */
     fun phone(raw: String): String? {
-        val digits = raw.filter { it.isDigit() }
-        if (digits.length < 7) return null
+        val trimmed = raw.trim()
+        val digits = trimmed.filter { it.isDigit() }
+        if (digits.length !in 10..15) return null
         return when {
             digits.length == 11 && (digits.startsWith("7") || digits.startsWith("8")) -> "+7" + digits.drop(1)
-            digits.length == 10 -> "+7$digits"
-            raw.trim().startsWith("+") -> "+$digits"
-            digits.length in 11..15 -> "+$digits"
+            digits.length == 10 && digits.startsWith("9") -> "+7$digits"
+            trimmed.startsWith("+") -> "+$digits"
             else -> null
         }
     }

@@ -43,6 +43,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.collectLatest
 
@@ -178,6 +180,7 @@ private fun JbBottomBar(current: Screen, onNavigate: (Screen) -> Unit) {
                     label = label,
                     icon = icon,
                     selected = current == screen,
+                    modifier = Modifier.weight(1f),
                     onClick = { onNavigate(screen) }
                 )
             }
@@ -191,13 +194,14 @@ private fun BottomItem(
     label: String,
     icon: ImageVector,
     selected: Boolean,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     Column(
-        modifier = Modifier
-            .clip(RoundedCornerShape(14.dp))
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 6.dp),
+            .padding(horizontal = 4.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Icon(
@@ -210,7 +214,10 @@ private fun BottomItem(
         Text(
             label,
             style = MaterialTheme.typography.labelSmall,
-            color = if (selected) JbAccent2 else JbFaint
+            color = if (selected) JbAccent2 else JbFaint,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center
         )
     }
 }
