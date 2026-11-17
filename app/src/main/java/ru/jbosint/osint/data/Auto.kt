@@ -260,3 +260,60 @@ object TronkConnector : Connector {
         }
     }
 }
+
+/**
+ * Бесплатная расшифровка VIN через NHTSA vPIC — открытый API без ключа.
+ * Отдаёт марку, модель, год, страну и завод сборки, тип кузова, двигатель.
+ * Используется вместе с локальным разбором VIN и TRONK.
+ */
+object VinDecoder {
+
+    private const val BASE = "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues"
+
+    suspend fun decode(vin: String): List<RawFact> = withContext(Dispatchers.IO) {
+        val clean = vin.trim().uppercase()
+        if (clean.length != 17) return@withContext emptyList()
+        val response = runCatching { Net.fetch("$BASE/$clean?format=json", attempts = 1) }
+            .getOrElse { return@withContext emptyList() }
+        if (response.code !in 200..299) return@withContext emptyList()
+        parse(response.body, clean)
+    }
+
+    /** Разбор ответа vPIC: Results[0] с полями Make, Model, ModelYear и т. д. */
+    fun parse(body: String, vin: String): List<RawFact> {
+        val root = runCatching { JSONObject(body) }.getOrNull() ?: return emptyList()
+        val results = root.optJSONArray("Results") ?: return emptyList()
+        val car = results.optJSONObject(0) ?: return emptyList()
+        fun field(name: String): String = car.optString(name).trim().takeIf { it.isNotBlank() && it != "0" }.orEmpty()
+
+        val make = field("Make")
+        val model = field("Model")
+        val year = field("ModelYear")
+        val plant = field("PlantCountry")
+        val bodyClass = field("BodyClass")
+        val engine = listOf(field("DisplacementCC"), field("EngineCylinders"), field("FuelTypePrimary"))
+            .filter { it.isNotBlank() }.joinToString(", ")
+        val subject = "Автомобиль $vin"
+        val facts = ArrayList<RawFact>()
+        fun add(kind: String, value: String, category: FactCategory = FactCategory.TECHNICAL, attrs: Map<String, String> = emptyMap()) {
+            if (value.isBlank()) return
+            facts += RawFact(category, kind, value, subject, attrs, sourceId = "nhtsa", weight = 3, sourceUrl = "$BASE/$vin?format=json")
+        }
+        add("Марка", make)
+        add("Модель", model)
+        add("Год выпуска", year)
+        add("Страна сборки", plant, FactCategory.LOCATION)
+        add("Тип кузова", bodyClass)
+        add("Двигатель", engine)
+        add("Производитель (NHTSA)", field("Manufacturer"))
+        add("Тип транспортного средства", field("VehicleType"))
+        if (facts.isNotEmpty()) {
+            facts += RawFact(
+                FactCategory.TECHNICAL, "VIN подтверждён", vin, subject,
+                mapOf("Источник" to "NHTSA vPIC (открытые данные)"),
+                sourceId = "nhtsa", weight = 3, sourceUrl = "$BASE/$vin?format=json"
+            )
+        }
+        return facts.distinctBy { it.kind to it.value }
+    }
+}

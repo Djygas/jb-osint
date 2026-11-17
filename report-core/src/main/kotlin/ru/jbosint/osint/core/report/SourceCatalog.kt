@@ -40,6 +40,9 @@ object SourceCatalog {
         SourceRef("leakcheck", "LeakCheck", "https://leakcheck.io"),
         SourceRef("tronk", "TRONK.PRO (проверка авто)", "https://tronk.pro"),
         SourceRef("vin", "Разбор VIN (локально)", "https://jbosint.ru"),
+        SourceRef("nhtsa", "NHTSA vPIC (расшифровка VIN)", "https://vpic.nhtsa.dot.gov"),
+        SourceRef("page", "Чтение найденных страниц", "https://jbosint.ru"),
+        SourceRef("reddit", "Reddit", "https://www.reddit.com"),
         SourceRef("photo_search", "Поиск по фото", "https://saucenao.com"),
         SourceRef("custom", "Свой модуль", "https://jbosint.ru")
     ).associateBy { it.id }

@@ -142,7 +142,16 @@ private fun AgentTabContent(state: UiState, vm: AppViewModel, context: android.c
                 )
             }
         }
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Глубина", style = MaterialTheme.typography.labelSmall, color = JbFaint)
+            Spacer(Modifier.width(8.dp))
+            listOf(1 to "1 проход", 2 to "2 прохода", 3 to "глубоко").forEach { (value, label) ->
+                SectionChip(label, agent.depth == value) { vm.setAgentDepth(value) }
+                Spacer(Modifier.width(6.dp))
+            }
+        }
+        Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = vm::runAgent,
@@ -686,6 +695,64 @@ private fun PhotoTabContent(state: UiState, vm: AppViewModel, context: android.c
                 runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(match.url))) }
             }
         }
+
+    Spacer(Modifier.height(12.dp))
+    GlowCard(modifier = Modifier.fillMaxWidth()) {
+        SectionHeader("Поиск по ссылке на изображение")
+        Text(
+            "Если фото уже есть в сети — аватар из профиля или картинка из объявления — вставьте ссылку: " +
+                "Google Lens и Bing Visual Search ищут по адресу и не требуют загрузки файла.",
+            style = MaterialTheme.typography.labelSmall,
+            color = JbMuted
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = photoUi.urlQuery,
+            onValueChange = vm::setPhotoUrlQuery,
+            label = { Text("https://… ссылка на изображение") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(Modifier.height(8.dp))
+        Button(onClick = vm::runPhotoUrlSearch, enabled = !photoUi.urlBusy, modifier = Modifier.fillMaxWidth()) {
+            if (photoUi.urlBusy) CircularProgressIndicator(Modifier.size(14.dp), color = Color.White, strokeWidth = 2.dp)
+            else Text("Искать по ссылке")
+        }
+        photoUi.urlError?.let {
+            Spacer(Modifier.height(6.dp))
+            Text(it, style = MaterialTheme.typography.labelSmall, color = JbRed)
+        }
+        if (photoUi.urlMatches.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            photoUi.urlMatches.forEach { match ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier.clip(RoundedCornerShape(7.dp)).background(JbAccent.copy(alpha = 0.16f))
+                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                    ) { Text(match.platform, style = MaterialTheme.typography.labelSmall, color = JbAccent2) }
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            match.title.ifBlank { match.url },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = JbText,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(match.url, style = MaterialTheme.typography.labelSmall, color = JbFaint, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Icon(
+                        Icons.Filled.OpenInNew,
+                        "Открыть",
+                        tint = JbMuted,
+                        modifier = Modifier.size(16.dp).clickable {
+                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(match.url))) }
+                        }
+                    )
+                }
+            }
+        }
+    }
 
     Spacer(Modifier.height(12.dp))
     GlowCard(modifier = Modifier.fillMaxWidth()) {

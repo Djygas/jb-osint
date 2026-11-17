@@ -79,7 +79,7 @@ object Connectors {
         VkConnector, DyxlessConnector, OpenCorporatesConnector, GoogleConnector, YandexConnector,
         BraveConnector, SerpApiConnector, DdgConnector, WikipediaConnector,
         UrlscanConnector, SecurityTrailsConnector, AbuseIpdbConnector, GitlabConnector,
-        TeleSintConnector, TronkConnector
+        TeleSintConnector, TronkConnector, RedditConnector
     )
 
     fun byId(id: String): Connector? = all.firstOrNull { it.id == id }
@@ -153,6 +153,31 @@ private object GithubConnector : Connector {
             }
             p.optString("twitter_username").takeIf { it.isNotBlank() }?.let {
                 facts += fact(FactCategory.PERSON, "Аккаунт X", "@$it", subject, id)
+            }
+        }
+        // Поиск по коду: токен даёт доступ к /search/code — упоминания глубже профиля.
+        if (token.isNotBlank()) {
+            runCatching {
+                val code = Net.json(
+                    "https://api.github.com/search/code?q=${Net.urlEncode("\"" + query.trim() + "\"")}&per_page=5",
+                    headers
+                ).getOrNull()
+                val items = code?.optJSONArray("items")
+                if (items != null) {
+                    for (i in 0 until minOf(items.length(), 5)) {
+                        val item = items.optJSONObject(i) ?: continue
+                        val url = item.optString("html_url")
+                        if (url.isBlank()) continue
+                        facts += fact(
+                            FactCategory.TECHNICAL, "Упоминание в коде GitHub", url, query, id,
+                            buildMap {
+                                item.optString("name").takeIf { it.isNotBlank() }?.let { put("Файл", it) }
+                                item.optJSONObject("repository")?.optString("full_name")
+                                    ?.takeIf { it.isNotBlank() }?.let { put("Репозиторий", it) }
+                            }
+                        )
+                    }
+                }
             }
         }
         return facts
@@ -463,6 +488,32 @@ private object TgstatConnector : Connector {
                 }
             )
         }
+        // Упоминания в постах каналов — то, чего не даёт поиск по карточкам.
+        runCatching {
+            val posts = Net.json(
+                "https://api.tgstat.ru/posts/search?token=${Net.urlEncode(key.key(id))}" +
+                    "&q=${Net.urlEncode(query)}&limit=10"
+            ).getOrNull()
+            val items = posts?.optJSONObject("response")?.optJSONArray("items")
+            if (items != null) {
+                for (i in 0 until minOf(items.length(), 10)) {
+                    val post = items.optJSONObject(i) ?: continue
+                    val link = post.optString("link")
+                    if (link.isBlank()) continue
+                    facts += fact(
+                        FactCategory.OTHER, "Упоминание в Telegram", link, query, id,
+                        buildMap {
+                            post.optString("channel_title").takeIf { it.isNotBlank() }
+                                ?.let { put("Канал", it) }
+                            post.optString("text").takeIf { it.isNotBlank() }
+                                ?.let { put("Текст", it.take(220)) }
+                            post.optLong("date", 0L).takeIf { it > 0 }
+                                ?.let { put("Дата", java.text.SimpleDateFormat("dd.MM.yyyy", java.util.Locale.US).format(java.util.Date(it * 1000))) }
+                        }
+                    )
+                }
+            }
+        }
         return facts
     }
 }
@@ -477,6 +528,36 @@ private object VkConnector : Connector {
         if (json.has("error")) return emptyList()
         val items = json.optJSONObject("response")?.optJSONArray("items") ?: return emptyList()
         val facts = ArrayList<RawFact>()
+        // Посты: пользовательский токен VK умеет искать по стене — это глубже карточки профиля.
+        runCatching {
+            val token = key.key(id)
+            if (token.isNotBlank()) {
+                val wall = Net.json(
+                    "https://api.vk.com/method/wall.search?q=${Net.urlEncode(query)}&count=10&extended=0" +
+                        "&access_token=${Net.urlEncode(token)}&v=5.199"
+                ).getOrNull()
+                val posts = wall?.optJSONObject("response")?.optJSONArray("items")
+                if (posts != null) {
+                    for (i in 0 until minOf(posts.length(), 10)) {
+                        val post = posts.optJSONObject(i) ?: continue
+                        val text = post.optString("text").take(200)
+                        if (text.isBlank()) continue
+                        facts += fact(
+                            FactCategory.OTHER, "Пост ВКонтакте", "vk.com/wall${post.optLong("owner_id")}_${post.optLong("id")}",
+                            query, id,
+                            buildMap {
+                                put("Текст", text)
+                                post.optInt("likes", 0).takeIf { it > 0 }?.let { put("Лайков", it.toString()) }
+                                post.optInt("date", 0).takeIf { it > 0 }?.let {
+                                    put("Дата", java.text.SimpleDateFormat("dd.MM.yyyy", java.util.Locale.US)
+                                        .format(java.util.Date(it * 1000L)))
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
         for (i in 0 until minOf(items.length(), 5)) {
             val user = items.getJSONObject(i)
             val name = listOf(user.optString("first_name"), user.optString("last_name"))
@@ -1128,6 +1209,44 @@ object DemoConnector : Connector {
         facts += fact(FactCategory.CONTACT, "Почта", "contact${seed % 1000}@mail.example", second, id)
         facts += fact(FactCategory.TECHNICAL, "Домен", sites[rnd(sites.size, 3)], second, id)
         facts
+    }
+}
+
+
+
+/** Reddit: публичный JSON-поиск без ключа — посты и обсуждения по запросу. */
+private object RedditConnector : Connector {
+    override val id = "reddit"
+
+    override suspend fun collect(query: String, key: KeyRepository): List<RawFact> {
+        val json = Net.json(
+            "https://www.reddit.com/search.json?q=${Net.urlEncode(query)}&limit=10&sort=relevance",
+            mapOf("User-Agent" to "JBOSINT/1.0 (osint research)")
+        ).getOrNull() ?: return emptyList()
+        val children = json.optJSONObject("data")?.optJSONArray("children") ?: return emptyList()
+        val facts = ArrayList<RawFact>()
+        for (i in 0 until minOf(children.length(), 10)) {
+            val post = children.optJSONObject(i)?.optJSONObject("data") ?: continue
+            val permalink = post.optString("permalink")
+            val title = post.optString("title")
+            if (permalink.isBlank() || title.isBlank()) continue
+            facts += fact(
+                FactCategory.OTHER, "Пост Reddit", "https://www.reddit.com$permalink", query, id,
+                buildMap {
+                    put("Заголовок", title.take(160))
+                    post.optString("subreddit").takeIf { it.isNotBlank() }?.let { put("Сабреддит", "r/$it") }
+                    post.optInt("num_comments", 0).takeIf { it > 0 }?.let { put("Комментариев", it.toString()) }
+                    post.optString("author").takeIf { it.isNotBlank() }?.let { put("Автор", "u/$it") }
+                    post.optLong("created_utc", 0L).takeIf { it > 0 }?.let {
+                        put("Дата", java.text.SimpleDateFormat("dd.MM.yyyy", java.util.Locale.US).format(java.util.Date(it * 1000)))
+                    }
+                }
+            )
+            post.optString("author").takeIf { it.isNotBlank() && it != "[deleted]" }?.let {
+                facts += fact(FactCategory.PERSON, "Никнейм", "@$it", title, id)
+            }
+        }
+        return facts.distinctBy { it.kind to it.value }
     }
 }
 

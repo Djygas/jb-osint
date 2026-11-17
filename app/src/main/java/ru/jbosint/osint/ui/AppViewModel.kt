@@ -2239,8 +2239,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(agent = it.agent.copy(running = true, error = null, report = null, stage = "Планирование", progress = 2))
         }
         viewModelScope.launch {
+            val depth = _state.value.agent.depth
             val outcome = runCatching {
-                agentRunner.run(query) { stage, progress ->
+                agentRunner.run(query, depth) { stage, progress ->
                     _state.update { state -> state.copy(agent = state.agent.copy(stage = stage, progress = progress)) }
                 }
             }
@@ -2350,6 +2351,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     val isVin = compact.length == 17
                     val raw = ArrayList<ru.jbosint.osint.core.model.RawFact>()
                     raw += AutoCheck.decodeVin(if (isVin) compact else "")
+                    if (isVin) raw += runCatching { ru.jbosint.osint.data.VinDecoder.decode(compact) }
+                        .getOrDefault(emptyList())
                     val key = keys.key("tronk")
                     var paid = 0
                     if (key.isNotBlank()) {
@@ -2522,6 +2525,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
 
+    fun setAgentDepth(depth: Int) = _state.update {
+        it.copy(agent = it.agent.copy(depth = depth.coerceIn(1, 3)))
+    }
+
     fun setAgentSection(section: Int) = _state.update {
         it.copy(agent = it.agent.copy(section = section.coerceIn(0, 3)))
     }
@@ -2583,6 +2590,39 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(auto = it.auto.copy(sellerRunning = false, sellerReport = report)) }
             }.onFailure { error ->
                 _state.update { it.copy(auto = it.auto.copy(sellerRunning = false, sellerError = error.message ?: "Ошибка проверки")) }
+            }
+        }
+    }
+
+    /** Обратный поиск по публичной ссылке на изображение (Google Lens / Bing через SerpAPI). */
+    fun setPhotoUrlQuery(value: String) = _state.update {
+        it.copy(photoSearch = it.photoSearch.copy(urlQuery = value, urlError = null))
+    }
+
+    fun runPhotoUrlSearch() {
+        val url = _state.value.photoSearch.urlQuery.trim()
+        if (!url.startsWith("https://")) {
+            _state.update { it.copy(photoSearch = it.photoSearch.copy(urlError = "Нужна публичная ссылка https:// на изображение")) }
+            return
+        }
+        val key = keys.key("serpapi")
+        if (key.isBlank()) {
+            _state.update { it.copy(photoSearch = it.photoSearch.copy(urlError = "Для поиска по ссылке нужен ключ SerpAPI")) }
+            return
+        }
+        if (_state.value.photoSearch.urlBusy) return
+        _state.update { it.copy(photoSearch = it.photoSearch.copy(urlBusy = true, urlError = null, urlMatches = emptyList())) }
+        viewModelScope.launch {
+            val outcome = runCatching { PhotoSearch.reverseByUrl(url, key) }
+            outcome.onSuccess { matches ->
+                _state.update {
+                    it.copy(
+                        photoSearch = it.photoSearch.copy(urlBusy = false, urlMatches = matches),
+                        toast = if (matches.isEmpty()) "Совпадений по ссылке не найдено" else "Совпадений: ${matches.size}"
+                    )
+                }
+            }.onFailure { error ->
+                _state.update { it.copy(photoSearch = it.photoSearch.copy(urlBusy = false, urlError = error.message ?: "Ошибка запроса")) }
             }
         }
     }

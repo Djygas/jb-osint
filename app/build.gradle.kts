@@ -12,8 +12,8 @@ android {
         applicationId = "ru.jbosint.osint"
         minSdk = 26
         targetSdk = 35
-        versionCode = 22
-        versionName = "1.16.0"
+        versionCode = 23
+        versionName = "1.17.0"
         resourceConfigurations += listOf("ru", "en")
     }
 

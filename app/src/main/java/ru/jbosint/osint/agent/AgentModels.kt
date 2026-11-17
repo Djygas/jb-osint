@@ -98,6 +98,8 @@ data class AgentUi(
     val target: AgentTarget = AgentTarget.OTHER,
     /** Активная вкладка: 0 — агент, 1 — авто, 2 — фото, 3 — объявления. */
     val section: Int = 0,
+    /** Глубина: 1 — один проход, 2–3 — с переходами по найденным зацепкам. */
+    val depth: Int = 2,
     val running: Boolean = false,
     val stage: String = "",
     val progress: Int = 0,
@@ -153,5 +155,10 @@ data class PhotoUi(
     val progress: Int = 0,
     val result: ru.jbosint.osint.data.PhotoSearchResult? = null,
     val error: String? = null,
-    val platform: String? = null
+    val platform: String? = null,
+    /** Обратный поиск по публичной ссылке на изображение. */
+    val urlQuery: String = "",
+    val urlMatches: List<ru.jbosint.osint.data.PhotoMatch> = emptyList(),
+    val urlBusy: Boolean = false,
+    val urlError: String? = null
 )

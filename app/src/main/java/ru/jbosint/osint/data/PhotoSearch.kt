@@ -210,6 +210,64 @@ object PhotoSearch {
         )
     }
 
+
+    // ---------------------------------------------------- обратный поиск по ссылке
+
+    /**
+     * Обратный поиск по публичной ссылке на изображение через SerpAPI.
+     *
+     * Локальный файл в такие API не отправить без публичного адреса, поэтому
+     * этот путь работает для ссылок: аватар из найденного профиля, картинка
+     * из объявления, фото с сайта. Движки: Google Lens и Bing Visual Search.
+     */
+    suspend fun reverseByUrl(
+        imageUrl: String,
+        key: String,
+        engine: String = "google_lens"
+    ): List<PhotoMatch> = withContext(Dispatchers.IO) {
+        if (key.isBlank() || !imageUrl.startsWith("https://")) return@withContext emptyList()
+        val param = if (engine == "bing_reverse_image") "image_url" else "url"
+        val url = "https://serpapi.com/search.json?engine=$engine&$param=${Net.urlEncode(imageUrl)}" +
+            "&api_key=${Net.urlEncode(key)}"
+        val body = runCatching { Net.fetch(url, attempts = 2) }.getOrNull() ?: return@withContext emptyList()
+        if (body.code !in 200..299) return@withContext emptyList()
+        parseSerp(body.body, engine)
+    }
+
+    /** Разбор ответа SerpAPI: visual_matches и organic_results в разных движках. */
+    fun parseSerp(body: String, engine: String = "google_lens"): List<PhotoMatch> {
+        val root = runCatching { org.json.JSONObject(body) }.getOrNull() ?: return emptyList()
+        if (root.has("error")) return emptyList()
+        val items = ArrayList<org.json.JSONObject>()
+        for (key in listOf("visual_matches", "organic_results", "image_results", "inline_images", "matches")) {
+            val array = root.optJSONArray(key) ?: continue
+            for (i in 0 until array.length()) array.optJSONObject(i)?.let { items += it }
+        }
+        val provider = if (engine == "bing_reverse_image") "Bing Visual Search" else "Google Lens"
+        return items.mapNotNull { item ->
+            val link = listOf("link", "url", "source", "page_url")
+                .firstNotNullOfOrNull { key -> item.optString(key).takeIf { it.startsWith("http") } }
+                ?: return@mapNotNull null
+            val title = item.optString("title").ifBlank {
+                item.optString("source").takeIf { !it.startsWith("http") }.orEmpty()
+            }
+            val similarity = listOf("similarity", "score", "match")
+                .firstNotNullOfOrNull { key -> item.optInt(key, 0).takeIf { it > 0 } }
+                ?: 60
+            PhotoMatch(
+                url = link,
+                platform = platformOf(link),
+                title = title.take(120),
+                similarity = similarity.coerceIn(0, 100),
+                status = statusFor(similarity, confirmed = false),
+                provider = provider,
+                handle = PhotoAnalyzer.handlesFrom(listOf(link)).firstOrNull().orEmpty()
+            )
+        }.distinctBy { normalize(it.url) }
+            .sortedByDescending { it.similarity }
+            .take(20)
+    }
+
     /** Превращение совпадений в факты: попадают в досье и общий граф. */
     fun toFacts(result: PhotoSearchResult): List<RawFact> {
         val out = ArrayList<RawFact>()

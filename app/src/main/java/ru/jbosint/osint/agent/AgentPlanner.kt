@@ -40,7 +40,7 @@ object AgentPlanner {
     }
 
     /** Бесплатные модули: работают без ключей, всегда доступны. */
-    private val freeModules = listOf("ddg", "wikipedia", "github", "gitlab")
+    private val freeModules = listOf("ddg", "wikipedia", "github", "gitlab", "reddit")
 
     private val infraFree = listOf("urlscan", "ipinfo")
 

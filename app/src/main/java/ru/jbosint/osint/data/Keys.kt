@@ -124,6 +124,10 @@ object ProviderCatalog {
             "Key", "https://www.abuseipdb.com/api", ProviderGroup.LEAKS
         ),
         ProviderSpec(
+            "reddit", "Reddit", "Посты и обсуждения по запросу",
+            "Ключ не требуется", "https://www.reddit.com/dev/api/", ProviderGroup.SOCIAL, keyless = true
+        ),
+        ProviderSpec(
             "gitlab", "GitLab", "Профили и публичные проекты",
             "Ключ не требуется", "https://docs.gitlab.com/ee/api/users.html", ProviderGroup.SOCIAL, keyless = true
         ),
