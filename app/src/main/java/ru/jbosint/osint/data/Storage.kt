@@ -34,6 +34,11 @@ class SettingsStore(context: Context) {
     var onboardingDone: Boolean
         get() = prefs.getBoolean("onboarding", false)
         set(value) = prefs.edit().putBoolean("onboarding", value).apply()
+
+    /** SHA-256 от PIN-кода доступа к разделу анализа; пусто — защиты нет. */
+    var profilePin: String
+        get() = prefs.getString("profile_pin", "").orEmpty()
+        set(value) = prefs.edit().putString("profile_pin", value).apply()
 }
 
 data class HistoryEntry(

@@ -88,7 +88,8 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
     }
 
     BackHandler(enabled = state.screen != Screen.HOME) {
-        if (state.screen == Screen.RESULTS) vm.backHome() else vm.navigate(Screen.HOME)
+        if (state.screen == Screen.RESULTS || state.screen == Screen.PROFILE) vm.backHome()
+        else vm.navigate(Screen.HOME)
     }
 
     Box(modifier = Modifier.fillMaxSize().background(backdropBrush())) {
@@ -115,7 +116,7 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
                 }
             },
             bottomBar = {
-                if (state.screen != Screen.RESULTS) {
+                if (state.screen != Screen.RESULTS && state.screen != Screen.PROFILE) {
                     JbBottomBar(current = state.screen, onNavigate = vm::navigate)
                 }
             }
@@ -132,6 +133,7 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
                     Screen.TELEGRAM -> TelegramScreen(state, vm)
                     Screen.KEYS -> KeysScreen(state, vm)
                     Screen.SETTINGS -> SettingsScreen(state, vm)
+                    Screen.PROFILE -> ProfileScreen(state, vm)
                 }
             }
         }

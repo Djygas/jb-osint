@@ -21,6 +21,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -145,6 +146,16 @@ fun TelegramScreen(state: UiState, vm: AppViewModel) {
                     ExportButton("HTML", tg.exporting) { vm.exportTelegram(TgFormat.HTML) }
                     ExportButton("CSV", tg.exporting) { vm.exportTelegram(TgFormat.CSV) }
                     ExportButton("Excel", tg.exporting) { vm.exportTelegram(TgFormat.XLSX) }
+                }
+            }
+            item {
+                OutlinedButton(
+                    onClick = { vm.openProfileFromTelegram() },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Filled.Person, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(7.dp))
+                    Text("Открыть профиль канала и аудитории")
                 }
             }
             item { AudienceHeader(dossier) }

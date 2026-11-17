@@ -12,3 +12,8 @@ captures/
 *.keystore
 secrets/
 _fonts/
+
+# локальные логи сборки
+*.log
+local.properties
+keys/

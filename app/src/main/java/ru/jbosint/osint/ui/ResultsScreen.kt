@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.DataObject
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Share
@@ -266,7 +267,7 @@ fun ResultsScreen(state: UiState, vm: AppViewModel) {
             item { LinksSection(data) }
         }
 
-        item { ExportCard(state.exporting, onExport = ::requestExport) }
+        item { ExportCard(state.exporting, onExport = ::requestExport, onProfile = vm::openProfileFromLastResult) }
 
         item {
             Row(
@@ -499,12 +500,28 @@ private fun LinksSection(data: AggregatedData) {
 }
 
 @Composable
-private fun ExportCard(exporting: Boolean, onExport: (ReportExporter.Format) -> Unit) {
+private fun ExportCard(
+    exporting: Boolean,
+    onExport: (ReportExporter.Format) -> Unit,
+    onProfile: () -> Unit = {}
+) {
     Column(modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
         SectionHeader("Экспорт")
         GlowCard(modifier = Modifier.fillMaxWidth(), padding = 16) {
             Text("Отчёт с оценкой достоверности, методологией и графом связей.", style = MaterialTheme.typography.bodySmall, color = JbMuted)
             Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = onProfile,
+                modifier = Modifier.fillMaxWidth(),
+                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                    containerColor = JbAccent2.copy(alpha = 0.9f)
+                )
+            ) {
+                Icon(Icons.Filled.Person, contentDescription = null, modifier = Modifier.size(17.dp))
+                Spacer(Modifier.width(7.dp))
+                Text("Открыть профиль объекта")
+            }
+            Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ExportButton("PDF", Icons.Filled.PictureAsPdf, Modifier.weight(1f), exporting) {
                     onExport(ReportExporter.Format.PDF)

@@ -77,8 +77,18 @@ import ru.jbosint.osint.data.TgDossier
 import ru.jbosint.osint.data.TgExport
 import ru.jbosint.osint.data.TgParser
 import ru.jbosint.osint.report.ReportExporter
+import ru.jbosint.osint.profile.DossierTemplate
+import ru.jbosint.osint.profile.ProfileBrief
+import ru.jbosint.osint.profile.ProfileBuilder
+import ru.jbosint.osint.profile.ProfileCompare
+import ru.jbosint.osint.profile.ProfileData
+import ru.jbosint.osint.profile.ProfileDiff
+import ru.jbosint.osint.profile.ProfileExport
+import ru.jbosint.osint.profile.ProfileExporter
+import ru.jbosint.osint.profile.ProfileMessages
+import ru.jbosint.osint.profile.ProfileStore
 
-enum class Screen { HOME, RESULTS, TELEGRAM, KEYS, SETTINGS }
+enum class Screen { HOME, RESULTS, TELEGRAM, KEYS, SETTINGS, PROFILE }
 
 /** Состояние быстрой настройки модуля: прогресс или предложение ручной настройки. */
 data class AutoSetupUi(
@@ -206,7 +216,17 @@ data class UiState(
     val researchRunning: Boolean = false,
     val research: String = "",
     val researchError: String? = null,
-    val classifications: Map<String, AssistantClassification> = emptyMap()
+    val classifications: Map<String, AssistantClassification> = emptyMap(),
+    // ------------------------------------------------------------ профиль объекта
+    val profile: ProfileData? = null,
+    val profileBusy: Boolean = false,
+    val profileChanges: List<String> = emptyList(),
+    val profilePinSet: Boolean = false,
+    val profileUnlocked: Boolean = true,
+    val profileDossier: String = "",
+    val profileAnonymize: Boolean = false,
+    val compareText: String = "",
+    val profileBriefs: List<ProfileBrief> = emptyList()
 ) {
     val activeModules: Int
         get() = providers.count { it.enabled && it.hasKey } + customModules.count { it.enabled && (it.hasKey || it.auth == CustomAuth.NONE) }
@@ -224,6 +244,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val engine = SearchEngine(keys, settings)
     private val assistantStore = AssistantStore(app)
     private val assistantService = AssistantService(assistantStore)
+    private val profileStore = ProfileStore(app)
+    /** Сообщения, импортированные пользователем для профиля (живут до пересборки). */
+    private var importedMessages: List<ru.jbosint.osint.profile.ProfileMessage> = emptyList()
 
     private val _state = MutableStateFlow(UiState())
     val state = _state.asStateFlow()
@@ -265,7 +288,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             assistantAutoClassify = assistantStore.autoClassify,
             assistantAutoQueries = assistantStore.autoQueries,
             assistantPolish = assistantStore.polishReport,
-            autoResearch = assistantStore.autoResearch
+            autoResearch = assistantStore.autoResearch,
+            profilePinSet = settings.profilePin.isNotBlank(),
+            profileUnlocked = settings.profilePin.isBlank(),
+            profileBriefs = profileStore.brief()
         )
     }
 
@@ -1881,6 +1907,289 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(toast = "Ошибка экспорта: ${error.message ?: "неизвестная"}") }
             }
         }
+    }
+
+    // ------------------------------------------------------------------ профиль
+
+    /** Профиль из последнего поиска (факты всех модулей). */
+    fun openProfileFromLastResult() {
+        val entry = _state.value.resultEntry ?: _state.value.history.firstOrNull()
+        if (entry == null) {
+            _state.update { it.copy(toast = "Сначала выполните поиск") }
+            return
+        }
+        buildProfile(entry = entry, dossier = null)
+    }
+
+    /** Профиль канала/чата из результата Telegram-парсера. */
+    fun openProfileFromTelegram() {
+        val dossier = _state.value.tg.dossier
+        if (dossier == null) {
+            _state.update { it.copy(toast = "Сначала соберите аудиторию канала") }
+            return
+        }
+        buildProfile(entry = null, dossier = dossier)
+    }
+
+    /** Демонстрационный профиль: все блоки заполнены без ключей и сети. */
+    fun openDemoProfile() {
+        importedMessages = ProfileMessages.demo()
+        buildProfile(entry = null, dossier = null, messages = importedMessages, demo = true, query = "@demo_subject")
+    }
+
+    /** Пересборка профиля из тех же данных (после импорта сообщений или смены модулей). */
+    fun rebuildProfile() {
+        val current = _state.value.profile ?: return
+        val entry = _state.value.resultEntry
+        val dossier = _state.value.tg.dossier
+        buildProfile(entry, dossier, importedMessages.ifEmpty { current.messages }, demo = current.demo, query = current.query)
+    }
+
+    private fun buildProfile(
+        entry: HistoryEntry?,
+        dossier: TgDossier?,
+        messages: List<ru.jbosint.osint.profile.ProfileMessage> = importedMessages,
+        demo: Boolean = false,
+        query: String = ""
+    ) {
+        _state.update { it.copy(profileBusy = true) }
+        viewModelScope.launch {
+            val profile = withContext(Dispatchers.Default) {
+                ProfileBuilder.build(entry, dossier, messages, demo, query)
+            }
+            val previous = profileStore.load(profile.id) ?: previousProfileFor(profile)
+            val changes = ProfileDiff.diff(previous, profile)
+            withContext(Dispatchers.IO) { profileStore.save(profile) }
+            _state.update {
+                it.copy(
+                    profile = profile,
+                    profileChanges = changes,
+                    profileBusy = false,
+                    screen = Screen.PROFILE,
+                    profileBriefs = profileStore.brief(),
+                    profileDossier = "",
+                    compareText = "",
+                    assistantError = null
+                )
+            }
+        }
+    }
+
+    private fun previousProfileFor(profile: ProfileData): ProfileData? =
+        profileStore.ids().asSequence()
+            .mapNotNull { profileStore.load(it) }
+            .firstOrNull { candidate ->
+                candidate.id != profile.id &&
+                    (candidate.subject.username.isNotBlank() &&
+                        candidate.subject.username.equals(profile.subject.username, true) ||
+                        candidate.subject.id.isNotBlank() && candidate.subject.id == profile.subject.id)
+            }
+
+    /** Импорт выгрузки сообщений (CSV/JSON): дата, отправитель, текст, тип. */
+    fun importProfileMessages(uri: Uri) {
+        val profile = _state.value.profile
+        if (profile == null) {
+            _state.update { it.copy(toast = "Сначала откройте профиль") }
+            return
+        }
+        viewModelScope.launch {
+            val outcome = runCatching {
+                withContext(Dispatchers.IO) {
+                    val resolver = getApplication<Application>().contentResolver
+                    val name = uri.lastPathSegment.orEmpty()
+                    val raw = resolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                        ?: error("Не удалось открыть файл")
+                    ProfileMessages.parse(name, raw)
+                }
+            }
+            outcome.onSuccess { result ->
+                if (result.error != null || result.messages.isEmpty()) {
+                    _state.update { it.copy(toast = "Импорт не удался: ${result.error ?: "нет сообщений"}") }
+                    return@onSuccess
+                }
+                importedMessages = result.messages
+                _state.update {
+                    it.copy(
+                        toast = "Загружено ${result.messages.size} сообщений" +
+                            if (result.skipped > 0) ", пропущено ${result.skipped}" else ""
+                    )
+                }
+                rebuildProfile()
+            }.onFailure { error ->
+                _state.update { it.copy(toast = "Импорт не удался: ${error.message ?: "ошибка чтения"}") }
+            }
+        }
+    }
+
+    /** Выгрузка профиля: сообщения, аудитория, Excel, граф, досье. */
+    fun exportProfile(kind: ProfileExport) {
+        val profile = _state.value.profile ?: run {
+            _state.update { it.copy(toast = "Профиль не открыт") }
+            return
+        }
+        if (_state.value.exporting) return
+        _state.update { it.copy(exporting = true) }
+        viewModelScope.launch {
+            val anonymize = _state.value.profileAnonymize
+            val outcome = runCatching {
+                withContext(Dispatchers.Default) {
+                    val base = ProfileExporter.baseName(profile)
+                    when (kind) {
+                        ProfileExport.XLSX -> Triple(
+                            "$base.xlsx",
+                            ProfileExporter.xlsx(profile, anonymize),
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                        ProfileExport.MESSAGES_CSV -> Triple(
+                            ProfileExporter.messagesName(profile, "csv"),
+                            ProfileExporter.messagesCsv(profile, anonymize),
+                            "text/csv"
+                        )
+                        ProfileExport.AUDIENCE_CSV -> Triple(
+                            ProfileExporter.contactsName(profile, "csv"),
+                            ProfileExporter.contactsCsv(profile, anonymize),
+                            "text/csv"
+                        )
+                        ProfileExport.GRAPHML -> Triple(
+                            ProfileExporter.graphName(profile),
+                            ProfileExporter.graphMl(profile, anonymize),
+                            "application/graphml+xml"
+                        )
+                        ProfileExport.DOSSIER -> Triple(
+                            "$base.html",
+                            ProfileExporter.dossierHtml(profile, DossierTemplate.PERSON, anonymize),
+                            "text/html"
+                        )
+                    }
+                }
+            }
+            _state.update { it.copy(exporting = false) }
+            outcome.onSuccess { (fileName, bytes, mime) ->
+                val saved = runCatching { exporter.save(fileName, bytes, mime) }
+                saved.onSuccess { exported ->
+                    _state.update {
+                        it.copy(
+                            toast = if (exported.publicFolder != null)
+                                "${kind.label}: ${exported.publicFolder}"
+                            else "${kind.label} готов — «Поделиться»"
+                        )
+                    }
+                    _shareEvents.emit(ShareRequest(exported.uri, exported.mime, exported.fileName))
+                }.onFailure { error ->
+                    _state.update { it.copy(toast = "Ошибка сохранения: ${error.message ?: "неизвестная"}") }
+                }
+            }.onFailure { error ->
+                _state.update { it.copy(toast = "Ошибка выгрузки: ${error.message ?: "неизвестная"}") }
+            }
+        }
+    }
+
+    /** Кнопка «ИИ-досье»: аналитический отчёт по всем собранным данным. */
+    fun generateProfileReport() {
+        val profile = _state.value.profile ?: return
+        if (!requireKey() || _state.value.analysisRunning) return
+        _state.update {
+            it.copy(analysisRunning = true, assistantBusy = AssistantRole.ANALYST.title, assistantError = null)
+        }
+        viewModelScope.launch {
+            val prompt = buildString {
+                appendLine("Ты аналитик OSINT. Составь досье по объекту на основе только этих данных.")
+                appendLine("Объект: ${profile.subject.title} (@${profile.subject.username}), " +
+                    "ID ${profile.subject.id}, статус ${profile.subject.status.title}.")
+                appendLine("Ссылки: ${profile.subject.link}.")
+                appendLine("Идентификаторы: " + profile.identifiers.take(20)
+                    .joinToString(", ") { "${it.kind}=${it.value}" })
+                appendLine("Группы: " + profile.groups.take(15).joinToString(", "))
+                appendLine("Контакты: " + profile.contacts.take(15)
+                    .joinToString(", ") { "${it.name}${if (it.username.isNotBlank()) " (@" + it.username + ")" else ""}" })
+                appendLine("Метрики: сообщений ${profile.summary.messages}, медиа ${profile.summary.media}, " +
+                    "реплаев ${profile.summary.replies}, период ${ProfileBuilder.dateText(profile.summary.from)}—" +
+                    "${ProfileBuilder.dateText(profile.summary.to)}.")
+                appendLine("Поведение: пик активности ${profile.behavior.heatmap.peakHour}:00, " +
+                    "ночью ${profile.behavior.heatmap.nightShare}%, тональность ${profile.behavior.sentiment.tone}.")
+                appendLine("Темы: " + profile.behavior.topics.joinToString(", ") { "${it.name} ${it.share}%" })
+                appendLine("Репутация: токсичность ${profile.reputation.toxicity}%, спам ${profile.reputation.spam}%, " +
+                    "доверие ${profile.reputation.trust}%.")
+                appendLine("Нет данных по: " + profile.missing.joinToString(", "))
+                appendLine("Структура: 1) Кто это; 2) Цифровые следы; 3) Круг общения; 4) Поведение и риски; " +
+                    "5) Что проверить дальше. Не выдумывай факты, ссылайся на перечисленное.")
+            }
+            val outcome = assistantService.chat(AssistantRole.ANALYST, prompt)
+            _state.update { it.copy(analysisRunning = false, assistantBusy = "") }
+            outcome.onSuccess { text ->
+                _state.update { it.copy(profileDossier = text, toast = "ИИ-досье готово") }
+            }.onFailure { error ->
+                _state.update { it.copy(assistantError = error.message ?: "Не удалось получить ответ") }
+            }
+        }
+    }
+
+    /** Сравнение текущего профиля с другим сохранённым. */
+    fun compareProfiles() {
+        val current = _state.value.profile ?: return
+        val other = profileStore.ids()
+            .filter { it != current.id }
+            .mapNotNull { profileStore.load(it) }
+            .firstOrNull()
+        if (other == null) {
+            _state.update { it.copy(toast = "Нужны два профиля: откройте второй объект и вернитесь") }
+            return
+        }
+        _state.update { it.copy(compareText = ProfileCompare.compare(current, other)) }
+    }
+
+    fun setProfileAnonymize(value: Boolean) = _state.update { it.copy(profileAnonymize = value) }
+
+    /** PIN на раздел анализа: хранится только SHA-256. */
+    fun setProfilePin(pin: String) {
+        val clean = pin.filter { it.isDigit() }
+        if (clean.length < 4) {
+            _state.update { it.copy(toast = "PIN должен быть не короче 4 цифр") }
+            return
+        }
+        settings.profilePin = sha256(clean)
+        _state.update { it.copy(profilePinSet = true, profileUnlocked = true, toast = "PIN установлен") }
+    }
+
+    fun clearProfilePin() {
+        settings.profilePin = ""
+        _state.update { it.copy(profilePinSet = false, profileUnlocked = true, toast = "PIN снят") }
+    }
+
+    fun unlockProfile(pin: String) {
+        val expected = settings.profilePin
+        if (expected.isBlank()) {
+            _state.update { it.copy(profileUnlocked = true) }
+            return
+        }
+        if (sha256(pin.filter { it.isDigit() }) == expected) {
+            _state.update { it.copy(profileUnlocked = true) }
+        } else {
+            _state.update { it.copy(toast = "Неверный PIN") }
+        }
+    }
+
+    /** «Очистить профиль»: удаляет кэш профиля и импортированные сообщения. */
+    fun clearProfile() {
+        val profile = _state.value.profile
+        if (profile != null) profileStore.delete(profile.id)
+        importedMessages = emptyList()
+        _state.update {
+            it.copy(
+                profile = null,
+                profileChanges = emptyList(),
+                profileDossier = "",
+                compareText = "",
+                profileBriefs = profileStore.brief(),
+                screen = Screen.HOME,
+                toast = "Профиль и кэш удалены"
+            )
+        }
+    }
+
+    private fun sha256(value: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        return digest.digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
     }
 
     fun consumeToast() = _state.update { it.copy(toast = null) }
