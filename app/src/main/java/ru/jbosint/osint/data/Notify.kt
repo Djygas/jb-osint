@@ -27,7 +27,7 @@ object Notify {
             PackageManager.PERMISSION_GRANTED
 
     fun ensureChannel(context: Context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        // minSdk = 26, поэтому проверка версии не нужна: каналы есть всегда.
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         if (manager.getNotificationChannel(CHANNEL_ID) != null) return
         val channel = NotificationChannel(

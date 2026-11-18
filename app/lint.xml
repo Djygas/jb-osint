@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- Адаптивные иконки (adaptive-icon) AAPT линкует только из mipmap-anydpi-v26:
+         перенос в mipmap-anydpi без квалификатора ломает сборку ресурсов
+         («resource mipmap/ic_launcher not found»). Поэтому папку оставляем как есть,
+         а предупреждение гасим точечно, не отключая проверку целиком. -->
+    <issue id="ObsoleteSdkInt">
+        <ignore path="src/main/res/mipmap-anydpi-v26" />
+    </issue>
+</lint>

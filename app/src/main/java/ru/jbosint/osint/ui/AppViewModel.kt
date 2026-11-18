@@ -106,8 +106,12 @@ import ru.jbosint.osint.agent.PhotoUi
 import ru.jbosint.osint.agent.WatchItem
 import ru.jbosint.osint.data.AutoCheck
 import ru.jbosint.osint.data.PhotoSearch
+import ru.jbosint.osint.data.PinHash
 import ru.jbosint.osint.data.PhotoSearchResult
 import ru.jbosint.osint.data.WatchStore
+
+/** Попыток ввода PIN до паузы. Дальше пауза удваивается: 30 с, 60 с, 120 с … */
+private const val MAX_PIN_FAILS = 5
 
 enum class Screen { HOME, RESULTS, TELEGRAM, KEYS, SETTINGS, PROFILE, AGENT }
 
@@ -2183,12 +2187,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(toast = "PIN должен быть не короче 4 цифр") }
             return
         }
-        settings.profilePin = sha256(clean)
+        settings.profilePin = PinHash.hash(clean)
+        settings.pinFails = 0
+        settings.pinLockUntil = 0L
         _state.update { it.copy(profilePinSet = true, profileUnlocked = true, toast = "PIN установлен") }
     }
 
     fun clearProfilePin() {
         settings.profilePin = ""
+        settings.pinFails = 0
+        settings.pinLockUntil = 0L
         _state.update { it.copy(profilePinSet = false, profileUnlocked = true, toast = "PIN снят") }
     }
 
@@ -2198,10 +2206,33 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(profileUnlocked = true) }
             return
         }
-        if (sha256(pin.filter { it.isDigit() }) == expected) {
+        val now = System.currentTimeMillis()
+        val lockUntil = settings.pinLockUntil
+        if (lockUntil > now) {
+            val left = ((lockUntil - now) / 1000L).coerceAtLeast(1L)
+            _state.update { it.copy(toast = "Слишком много попыток. Повторите через $left с") }
+            return
+        }
+        val clean = pin.filter { it.isDigit() }
+        if (PinHash.verify(clean, expected)) {
+            // Старый PIN, сохранённый как «голый» SHA-256, молча переписываем в PBKDF2.
+            if (PinHash.needsRehash(expected)) settings.profilePin = PinHash.hash(clean)
+            settings.pinFails = 0
+            settings.pinLockUntil = 0L
             _state.update { it.copy(profileUnlocked = true) }
+            return
+        }
+        val fails = settings.pinFails + 1
+        settings.pinFails = fails
+        if (fails % MAX_PIN_FAILS == 0) {
+            // Пауза растёт: 30 с, 60 с, 120 с … но не больше 10 минут.
+            val exponent = (fails / MAX_PIN_FAILS - 1).coerceIn(0, 4)
+            val lockSeconds = (30L shl exponent).coerceAtMost(600L)
+            settings.pinLockUntil = now + lockSeconds * 1000L
+            _state.update { it.copy(toast = "Неверный PIN. Ввод заблокирован на $lockSeconds с") }
         } else {
-            _state.update { it.copy(toast = "Неверный PIN") }
+            val left = MAX_PIN_FAILS - (fails % MAX_PIN_FAILS)
+            _state.update { it.copy(toast = "Неверный PIN. Осталось попыток: $left") }
         }
     }
 
@@ -2222,12 +2253,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
     }
-
-    private fun sha256(value: String): String {
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
-        return digest.digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
-    }
-
 
     // ------------------------------------------------------- автономный агент
 

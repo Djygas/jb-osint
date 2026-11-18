@@ -17,3 +17,6 @@ _fonts/
 *.log
 local.properties
 keys/
+
+# ключ подписи и его параметры (см. build.gradle.kts)
+keystore.properties

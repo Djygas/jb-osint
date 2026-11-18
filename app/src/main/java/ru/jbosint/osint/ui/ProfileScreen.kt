@@ -48,6 +48,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -103,7 +104,7 @@ fun ProfileScreen(state: UiState, vm: AppViewModel) {
     val listState = rememberLazyListState()
     var section by remember(profile.id) { mutableStateOf(ProfileSection.SUMMARY) }
     var filter by remember(profile.id) { mutableStateOf<MsgType?>(null) }
-    var visible by remember(profile.id) { mutableStateOf(60) }
+    var visible by remember(profile.id) { mutableIntStateOf(60) }
     var showImport by remember { mutableStateOf(false) }
 
     val importLauncher = rememberLauncherForActivityResult(

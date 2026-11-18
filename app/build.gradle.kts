@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -12,17 +14,51 @@ android {
         applicationId = "ru.jbosint.osint"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
-        versionName = "1.19.0"
+        versionCode = 26
+        versionName = "1.19.1"
         resourceConfigurations += listOf("ru", "en")
+
+        // ML Kit face-detection приносит нативные библиотеки под все ABI (33 МБ из 39 МБ APK).
+        // Телефонам нужны только ARM: x86/x86_64 остаются лишь для эмулятора и включаются
+        // флагом -PjbAllAbis=true при локальной отладке.
+        val allAbis = (project.findProperty("jbAllAbis") as String?)?.toBoolean() == true
+        ndk {
+            abiFilters += if (allAbis) {
+                listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            } else {
+                listOf("armeabi-v7a", "arm64-v8a")
+            }
+        }
     }
 
     signingConfigs {
+        // Ключ подписи НЕ хранится в репозитории. Порядок поиска:
+        // 1) keystore.properties в корне проекта (в .gitignore);
+        // 2) переменные окружения JB_KEYSTORE_FILE / JB_KEYSTORE_PASSWORD / JB_KEY_ALIAS / JB_KEY_PASSWORD;
+        // 3) путь по умолчанию для локальной машины разработчика.
+        // Если ключа нет — release собирается неподписанным (assembleRelease проходит,
+        // подписать можно позже apksigner'ом), а не падает с невнятной ошибкой.
+        val signingProps = Properties()
+        val propsFile = rootProject.file("keystore.properties")
+        if (propsFile.exists()) propsFile.inputStream().use { signingProps.load(it) }
+        val storePath = System.getenv("JB_KEYSTORE_FILE")
+            ?: signingProps.getProperty("storeFile")
+            ?: "/opt/workspace/keys/jbosint-release.jks"
+        val storePass = System.getenv("JB_KEYSTORE_PASSWORD")
+            ?: signingProps.getProperty("storePassword")
+            ?: "REDACTED"
+        val aliasName = System.getenv("JB_KEY_ALIAS") ?: signingProps.getProperty("keyAlias") ?: "jbosint"
+        val keyPass = System.getenv("JB_KEY_PASSWORD")
+            ?: signingProps.getProperty("keyPassword")
+            ?: storePass
+        val storeFileRef = rootProject.file(storePath)
         create("release") {
-            storeFile = file("/opt/workspace/keys/jbosint-release.jks")
-            storePassword = System.getenv("JB_KEYSTORE_PASSWORD") ?: "REDACTED"
-            keyAlias = "jbosint"
-            keyPassword = System.getenv("JB_KEY_PASSWORD") ?: "REDACTED"
+            if (storeFileRef.exists()) {
+                storeFile = storeFileRef
+                storePassword = storePass
+                keyAlias = aliasName
+                keyPassword = keyPass
+            }
         }
     }
 
@@ -63,8 +99,12 @@ android {
     }
 
     lint {
-        abortOnError = false
+        // Ошибки lint останавливают сборку: раньше abortOnError = false пропускал их в релиз.
+        abortOnError = true
+        warningsAsErrors = false
         checkReleaseBuilds = false
+        checkDependencies = true
+        disable += setOf("GradleDependency")
     }
 }
 

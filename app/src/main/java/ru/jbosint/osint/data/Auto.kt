@@ -80,7 +80,10 @@ object AutoCheck {
             val ch = vin[index]
             val value = when {
                 ch.isDigit() -> ch.digitToInt()
-                ch == 'X' -> 10
+                // В теле VIN буква X стоит 7 (как и в таблице выше). Значение 10 у неё
+                // есть только в 9-й позиции — как контрольная цифра, но её вес равен 0,
+                // поэтому на сумму она не влияет. Считать X десяткой везде — ошибка:
+                // любой VIN с X вне 9-й позиции получал «контрольная сумма не пройдена».
                 else -> transliteration[ch] ?: return false
             }
             sum += value * weights[index]

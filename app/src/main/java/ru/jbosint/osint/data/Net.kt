@@ -64,7 +64,10 @@ object Net {
                 val result = execute(url, headers, method, body)
                 // 429/5xx — имеет смысл повторить, 4xx — нет.
                 if ((result.code == 429 || result.code >= 500) && attempt < attempts) {
-                    delay(400L * attempt)
+                    // Retry-After уважаем: сервисы считают долбёжку через 400 мс нарушением.
+                    // Верхняя граница — 5 с, чтобы поиск не «висел» на одном источнике.
+                    val hinted = result.retryAfter?.coerceIn(1, 5)
+                    delay(hinted?.times(1000L) ?: (400L * attempt))
                     continue
                 }
                 return@withContext result
@@ -84,15 +87,17 @@ object Net {
     ): Response {
         var target = url
         var hops = 0
+        var currentMethod = method
+        var currentBody = body
         while (true) {
             val builder = Request.Builder()
                 .url(target)
                 .header("Accept", "application/json")
                 .header("User-Agent", "JB-OSINT/1.0 (Android)")
             headers.forEach { (k, v) -> builder.header(k, v) }
-            if (method.equals("POST", ignoreCase = true)) {
+            if (currentMethod.equals("POST", ignoreCase = true)) {
                 builder.post(
-                    (body ?: "")
+                    (currentBody ?: "")
                         .toRequestBody("application/json; charset=utf-8".toMediaType())
                 )
             } else {
@@ -110,6 +115,13 @@ object Net {
                     }
                     if (hops >= MAX_REDIRECTS) return Response(response.code, "")
                     hops++
+                    // 301/302/303 по HTTP-семантике превращают POST в GET без тела,
+                    // иначе сервис получает второй POST с уже отправленным телом.
+                    val keepsMethod = response.code == 307 || response.code == 308
+                    if (!keepsMethod && currentMethod.equals("POST", ignoreCase = true)) {
+                        currentMethod = "GET"
+                        currentBody = null
+                    }
                     target = next.toString()
                     return@use
                 }

@@ -35,10 +35,20 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean("onboarding", false)
         set(value) = prefs.edit().putBoolean("onboarding", value).apply()
 
-    /** SHA-256 от PIN-кода доступа к разделу анализа; пусто — защиты нет. */
+    /** PBKDF2-хеш PIN-кода доступа к разделу анализа; пусто — защиты нет. */
     var profilePin: String
         get() = prefs.getString("profile_pin", "").orEmpty()
         set(value) = prefs.edit().putString("profile_pin", value).apply()
+
+    /** Неудачные вводы PIN: нужны, чтобы перебор 4 цифр упирался в паузу. */
+    var pinFails: Int
+        get() = prefs.getInt("pin_fails", 0)
+        set(value) = prefs.edit().putInt("pin_fails", value).apply()
+
+    /** Время (мс), до которого ввод PIN заблокирован после серии ошибок. */
+    var pinLockUntil: Long
+        get() = prefs.getLong("pin_lock_until", 0L)
+        set(value) = prefs.edit().putLong("pin_lock_until", value).apply()
 }
 
 data class HistoryEntry(
@@ -73,41 +83,42 @@ class HistoryStore(context: Context) {
     private val prefs = context.getSharedPreferences("jb_history_index", Context.MODE_PRIVATE)
 
     fun save(entry: HistoryEntry, keep: Int = 20) {
-        val all = loadRaw().toMutableList()
-        all.removeAll { it.first == entry.id }
-        all.add(0, entry.id to Serialization.encode(entry))
-        while (all.size > keep) {
-            all.removeAt(all.size - 1)
+        val limit = keep.coerceAtLeast(1)
+        val order = orderIds().filter { it != entry.id }.toMutableList()
+        // Пишем только новую запись: раньше при каждом поиске заново шифровались
+        // и перезаписывались все записи истории (до 20 обращений к Keystore).
+        secure.put("hist_${entry.id}", Serialization.encode(entry))
+        val overflow = (order.size + 1 - limit).coerceAtLeast(0)
+        if (overflow > 0) {
+            val dropped = order.takeLast(overflow)
+            dropped.forEach { secure.remove("hist_$it") }
+            order.removeAll(dropped.toSet())
         }
-        all.forEach { (id, json) -> secure.put("hist_$id", json) }
-        prefs.edit().putString("order", all.joinToString(",") { it.first }).apply()
+        order.add(0, entry.id)
+        prefs.edit().putString("order", order.joinToString(",")).apply()
     }
 
-    fun list(): List<HistoryEntry> {
-        val order = prefs.getString("order", "").orEmpty().split(',').filter { it.isNotBlank() }
-        return order.mapNotNull { id -> secure.get("hist_$id")?.let { Serialization.decodeEntry(it) } }
-    }
+    fun list(): List<HistoryEntry> =
+        orderIds().mapNotNull { id -> secure.get("hist_$id")?.let { Serialization.decodeEntry(it) } }
 
     fun get(id: String): HistoryEntry? = secure.get("hist_$id")?.let(Serialization::decodeEntry)
 
     fun delete(id: String) {
         secure.remove("hist_$id")
-        val order = prefs.getString("order", "").orEmpty().split(',').filter { it.isNotBlank() && it != id }
+        val order = orderIds().filter { it != id }
         prefs.edit().putString("order", order.joinToString(",")).apply()
     }
 
     fun clear() {
-        prefs.getString("order", "").orEmpty().split(',').filter { it.isNotBlank() }
-            .forEach { secure.remove("hist_$it") }
+        orderIds().forEach { secure.remove("hist_$it") }
         prefs.edit().remove("order").apply()
     }
 
     fun newId(): String = UUID.randomUUID().toString()
 
-    private fun loadRaw(): List<Pair<String, String>> {
-        val order = prefs.getString("order", "").orEmpty().split(',').filter { it.isNotBlank() }
-        return order.mapNotNull { id -> secure.get("hist_$id")?.let { id to it } }
-    }
+    private fun orderIds(): List<String> = prefs.getString("order", "").orEmpty()
+        .split(',')
+        .filter { it.isNotBlank() }
 }
 
 /** Внутренняя (не пользовательская) сериализация снимка поиска. */

@@ -132,12 +132,24 @@ Android-приложение для сбора и структурировани
 export ANDROID_HOME=/path/to/android-sdk
 echo "sdk.dir=$ANDROID_HOME" > local.properties
 
-./gradlew :app:assembleDebug        # debug APK
-./gradlew :app:assembleRelease      # подписанный release APK (R8 + shrink)
+./gradlew :app:assembleDebug        # debug APK (ARM + x86 для эмулятора: -PjbAllAbis=true)
+./gradlew :app:assembleRelease      # release APK (R8 + shrink)
 ./gradlew test                      # unit-тесты (report-core + app)
+./gradlew :app:lintDebug            # lint; ошибки останавливают сборку
 ```
 
-Release-сборка ожидает keystore по пути из `app/build.gradle.kts` (`storeFile`) либо переменные окружения `JB_KEYSTORE`, `JB_KEYSTORE_PASSWORD`, `JB_KEY_ALIAS`, `JB_KEY_PASSWORD`.
+**Подпись.** Ключ в репозитории не хранится. Порядок поиска: `keystore.properties` в корне
+(образец — `keystore.properties.example`, файл в `.gitignore`), затем переменные окружения
+`JB_KEYSTORE_FILE`, `JB_KEYSTORE_PASSWORD`, `JB_KEY_ALIAS`, `JB_KEY_PASSWORD`. Если ключа нет,
+`assembleRelease` собирает неподписанный APK, а не падает с ошибкой.
+
+**Размер APK.** Нативные библиотеки ML Kit (распознавание лиц) занимают ~33 МБ из 39 МБ, потому что
+лежат под четыре ABI. По умолчанию в сборку попадают только `armeabi-v7a` и `arm64-v8a`;
+для запуска на эмуляторе добавьте `-PjbAllAbis=true` (вернёт x86/x86_64, APK вырастет примерно вдвое).
+
+**CI.** `.github/workflows/ci.yml` собирает и тестирует проект на каждый push, прогоняет lint
+и публикует debug APK. Release собирается только при заданных секретах `JB_KEYSTORE_BASE64`,
+`JB_KEYSTORE_PASSWORD`, `JB_KEY_ALIAS`, `JB_KEY_PASSWORD`.
 
 ## Структура
 
@@ -198,6 +210,10 @@ report-core/               Чистый Kotlin/JVM: модель, агрегат
 ## Безопасность
 
 - Ключи и история — только в зашифрованном хранилище; открытый текст в логах не появляется.
+- PIN на раздел анализа хранится как PBKDF2-HMAC-SHA256 с индивидуальной солью (120 000 итераций),
+  а не как голый SHA-256; после пяти ошибок ввод блокируется на 30 с с удвоением паузы. Старые
+  PIN-коды в формате SHA-256 по-прежнему принимаются и автоматически переводятся в новый формат
+  после первого удачного ввода.
 - Сетевые запросы идут по HTTPS, сертификаты проверяются системным trust store; ключи передаются в заголовках/параметрах и не логируются.
 - Экспортированные файлы создаются в приватном кэше и передаются получателю через `FileProvider` с временным grant.
 - В отчётах нет названий источников — только «Поиск JB OSINT».
@@ -209,5 +225,7 @@ report-core/               Чистый Kotlin/JVM: модель, агрегат
 
 ## Подпись
 
-Release APK подписан ключом `CN=JB OSINT, OU=Analytics, O=JB OSINT, L=Moscow, C=RU`
-SHA-256: `ca5ec647c52144ebda96d9685f15561e1f7f7bc23254899ecd53c053e4383052`.
+Release APK подписывается ключом из `keystore.properties` или переменных окружения (см. раздел «Сборка»).
+Сам ключ и его пароли в репозитории не хранятся: без них APK остаётся неподписанным и его нужно
+подписать вручную через `apksigner`. Отпечаток сертификата фиксируется в описании каждого релиза —
+сверяйте его при установке обновления поверх предыдущей версии.
