@@ -159,6 +159,16 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
     }
 
     if (state.restoreOffer != null) RestoreOfferDialog(state, vm)
+
+    // Вход в «Ключи» или «Настройки» при установленном мастер-пароле.
+    if (state.pendingUnlock != null) {
+        PasswordDialog(
+            action = PasswordAction.Unlock,
+            hasPassword = state.adminHasPassword,
+            onDismiss = { vm.cancelPendingUnlock() },
+            onSubmit = { _, password -> vm.completePendingUnlock(password) }
+        )
+    }
 }
 
 @Composable

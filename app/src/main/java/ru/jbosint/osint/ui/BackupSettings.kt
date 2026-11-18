@@ -97,8 +97,11 @@ fun AccessSection(state: UiState, vm: AppViewModel) {
             ActionRow(
                 icon = Icons.Filled.AdminPanelSettings,
                 title = "Войти как администратор",
-                subtitle = if (state.adminHasPassword) "Нужен мастер-пароль" else "Пароль ещё не задан",
-                onClick = { action = PasswordAction.Unlock }
+                subtitle = if (state.adminHasPassword) "Нужен мастер-пароль"
+                else "Пароль ещё не задан — создайте его при входе",
+                onClick = {
+                    action = if (state.adminHasPassword) PasswordAction.Unlock else PasswordAction.Create
+                }
             )
             if (state.adminHasPassword && state.adminBiometric && biometric) {
                 Spacer(Modifier.height(8.dp))
@@ -189,7 +192,11 @@ fun AccessSection(state: UiState, vm: AppViewModel) {
             onDismiss = { action = null },
             onSubmit = { currentPassword, password ->
                 when (current) {
-                    PasswordAction.Create -> vm.adminSetPassword(password)
+                    PasswordAction.Create -> {
+                        val error = vm.adminSetPassword(password)
+                        if (error == null && state.userMode) vm.switchMode(WorkMode.ADMIN, password)
+                        error
+                    }
                     PasswordAction.Change -> vm.adminSetPassword(password, currentPassword)
                     PasswordAction.Unlock -> {
                         val error = vm.adminUnlock(password)
@@ -454,20 +461,18 @@ internal fun PasswordDialog(
             confirm = "Войти"
         )
         PasswordAction.Export -> DialogSpec(
-            title = "Пароль для копии",
-            subtitle = "Этим паролем будет зашифрован файл. Запомните его: без него копию не открыть.",
-            confirm = "Экспортировать",
-            repeat = true
+            title = "Мастер-пароль",
+            subtitle = "Подтвердите мастер-пароль: им же будет зашифрован файл копии.",
+            confirm = "Экспортировать"
         )
         PasswordAction.Build -> DialogSpec(
-            title = "Пароль сборки",
-            subtitle = "Получатель введёт его при первом запуске, чтобы применить конфигурацию.",
-            confirm = "Создать сборку",
-            repeat = true
+            title = "Мастер-пароль",
+            subtitle = "Подтвердите мастер-пароль: получатель введёт его при первом запуске сборки.",
+            confirm = "Создать сборку"
         )
         is PasswordAction.Import -> DialogSpec(
             title = "Импорт ключей",
-            subtitle = "Введите пароль, которым зашифрован файл.",
+            subtitle = "Введите мастер-пароль, которым зашифрован файл.",
             confirm = "Импортировать"
         )
     }

@@ -73,19 +73,43 @@ object AdminPolicy {
 class AdminStore(context: Context) {
 
     private val prefs = context.getSharedPreferences("jb_admin", Context.MODE_PRIVATE)
+    /** Хеш пароля и резервный код лежат в шифрованном хранилище (Android Keystore, AES-256/GCM). */
+    private val secure = SecureStore(context)
 
     var mode: WorkMode
         get() = WorkMode.of(prefs.getString("mode", WorkMode.ADMIN.id).orEmpty())
         set(value) = prefs.edit().putString("mode", value.id).apply()
 
-    fun hasPassword(): Boolean = prefs.getString("hash", "").orEmpty().isNotBlank()
+    /** Хеш читается из зашифрованного хранилища; старые открытые записи переносятся туда же. */
+    private fun storedHash(): String {
+        secure.get(HASH_KEY)?.takeIf { it.isNotBlank() }?.let { return it }
+        val legacy = prefs.getString("hash", "").orEmpty()
+        if (legacy.isNotBlank()) {
+            secure.put(HASH_KEY, legacy)
+            prefs.edit().remove("hash").apply()
+        }
+        return legacy
+    }
+
+    private fun storedRecovery(): String {
+        secure.get(RECOVERY_KEY)?.takeIf { it.isNotBlank() }?.let { return it }
+        val legacy = prefs.getString("recovery", "").orEmpty()
+        if (legacy.isNotBlank()) {
+            secure.put(RECOVERY_KEY, legacy)
+            prefs.edit().remove("recovery").apply()
+        }
+        return legacy
+    }
+
+    fun hasPassword(): Boolean = storedHash().isNotBlank()
 
     fun passwordSetAt(): Long = prefs.getLong("hash_at", 0L)
 
     fun setPassword(password: String): Boolean {
         if (AdminPolicy.validate(password) != null) return false
+        secure.put(HASH_KEY, PinHash.hash(password))
         prefs.edit()
-            .putString("hash", PinHash.hash(password))
+            .remove("hash")
             .putLong("hash_at", System.currentTimeMillis())
             .putInt("fails", 0)
             .putLong("lock_until", 0L)
@@ -112,10 +136,10 @@ class AdminStore(context: Context) {
     fun verify(password: String, now: Long = System.currentTimeMillis()): Boolean {
         if (hasPassword().not()) return false
         if (lockLeft(now) > 0) return false
-        val stored = prefs.getString("hash", "").orEmpty()
+        val stored = storedHash()
         if (PinHash.verify(password, stored)) {
             prefs.edit().putInt("fails", 0).putLong("lock_until", 0L).apply()
-            if (PinHash.needsRehash(stored)) prefs.edit().putString("hash", PinHash.hash(password)).apply()
+            if (PinHash.needsRehash(stored)) secure.put(HASH_KEY, PinHash.hash(password))
             return true
         }
         val fails = fails() + 1
@@ -130,21 +154,23 @@ class AdminStore(context: Context) {
     /** Создаёт резервный код; возвращает его в открытом виде ровно один раз. */
     fun generateRecoveryCode(): String {
         val code = AdminPolicy.newRecoveryCode()
+        secure.put(RECOVERY_KEY, PinHash.hash(AdminPolicy.normaliseRecovery(code)))
         prefs.edit()
-            .putString("recovery", PinHash.hash(AdminPolicy.normaliseRecovery(code)))
+            .remove("recovery")
             .putLong("recovery_at", System.currentTimeMillis())
             .apply()
         return code
     }
 
-    fun hasRecovery(): Boolean = prefs.getString("recovery", "").orEmpty().isNotBlank()
+    fun hasRecovery(): Boolean = storedRecovery().isNotBlank()
 
     /** Сброс пароля резервным кодом: старый пароль при этом перестаёт действовать. */
     fun resetWithRecovery(code: String, newPassword: String): Boolean {
-        val stored = prefs.getString("recovery", "").orEmpty()
+        val stored = storedRecovery()
         if (stored.isBlank()) return false
         if (!PinHash.verify(AdminPolicy.normaliseRecovery(code), stored)) return false
         if (!setPassword(newPassword)) return false
+        secure.remove(RECOVERY_KEY)
         prefs.edit().remove("recovery").apply()
         return true
     }
@@ -155,5 +181,14 @@ class AdminStore(context: Context) {
         set(value) = prefs.edit().putBoolean("biometric", value).apply()
 
     /** Полный сброс режима: пароль, резервный код, блокировка. */
-    fun clear() = prefs.edit().clear().apply()
+    fun clear() {
+        secure.remove(HASH_KEY)
+        secure.remove(RECOVERY_KEY)
+        prefs.edit().clear().apply()
+    }
+
+    private companion object {
+        const val HASH_KEY = "admin_hash"
+        const val RECOVERY_KEY = "admin_recovery"
+    }
 }

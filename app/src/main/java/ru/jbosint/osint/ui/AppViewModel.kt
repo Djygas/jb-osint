@@ -265,6 +265,8 @@ data class UiState(
     val backupBusy: Boolean = false,
     val backupNote: String? = null,
     val restoreOffer: RestoreOffer? = null,
+    /** Экран, который ждёт ввода мастер-пароля. */
+    val pendingUnlock: String? = null,
     /** Сколько ключей сейчас сохранено — для подсказок и проверки «пусто ли». */
     val storedKeys: Int = 0,
     val repairing: Boolean = false,
@@ -429,13 +431,33 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // ---------------------------------------------------------------- навигация
 
     fun navigate(screen: Screen) {
+        val current = _state.value
         // В режиме «Пользователь» управление ключами и настройками закрыто.
-        if (!_state.value.canManage && screen in MANAGED_SCREENS) {
+        if (!current.canManage && screen in MANAGED_SCREENS) {
             _state.update { it.copy(toast = "Режим «Пользователь»: настройки и ключи заблокированы") }
+            return
+        }
+        // Мастер-пароль спрашивается каждый раз при входе в управляющие разделы.
+        if (screen in MANAGED_SCREENS && current.adminHasPassword && !current.adminUnlocked) {
+            _state.update {
+                it.copy(pendingUnlock = screen.name, toast = "Введите мастер-пароль администратора")
+            }
             return
         }
         _state.update { it.copy(screen = screen, searchError = null) }
     }
+
+    /** Пароль введён для отложенного перехода: при успехе открываем нужный экран. */
+    fun completePendingUnlock(password: String): String? {
+        val target = _state.value.pendingUnlock ?: return null
+        val error = adminUnlock(password)
+        if (error != null) return error
+        val screen = runCatching { Screen.valueOf(target) }.getOrNull() ?: Screen.SETTINGS
+        _state.update { it.copy(pendingUnlock = null, screen = screen, searchError = null) }
+        return null
+    }
+
+    fun cancelPendingUnlock() = _state.update { it.copy(pendingUnlock = null) }
 
     fun backHome() = _state.update { it.copy(screen = Screen.HOME) }
 
@@ -1868,8 +1890,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Резервная копия всех ключей: jb_osint_keys.json. */
     fun exportKeys(password: String) {
         if (_state.value.backupBusy) return
-        AdminPolicy.validate(password)?.let { error ->
-            _state.update { state -> state.copy(toast = error) }
+        masterError(password)?.let {
+            _state.update { state -> state.copy(toast = it) }
             return
         }
         val count = runCatching { backupService.payloadForBackup(false, BackupPayload.MODE_ADMIN).keyCount }
@@ -1906,7 +1928,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Пользовательская сборка: активные модули и их ключи, после импорта — режим «Пользователь». */
     fun createUserBuild(password: String) {
         if (_state.value.backupBusy) return
-        AdminPolicy.validate(password)?.let { error ->
+        masterError(password)?.let { error ->
             _state.update { state -> state.copy(toast = error) }
             return
         }
@@ -1962,6 +1984,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * итераций занимает доли секунды, зато ошибку пароля видно сразу в диалоге.
      */
     fun importKeys(bytes: ByteArray, password: String): String? {
+        // Копия защищена мастер-паролем: без него не расшифровываем.
+        if (adminStore.hasPassword()) {
+            lockMessage()?.let { return it }
+            if (!adminStore.verify(password)) {
+                refreshAccessState()
+                return lockMessage() ?: "Мастер-пароль неверен"
+            }
+        }
         val result = runCatching {
             runBlocking(Dispatchers.IO) { backupService.restore(bytes, password.toCharArray()) }
         }
@@ -2028,6 +2058,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun lockMessage(): String? {
         val left = adminStore.lockLeft()
         return if (left > 0) "Слишком много попыток. Вход возможен через ${AdminPolicy.lockText(left)}" else null
+    }
+
+    /**
+     * Экспорт и сборка используют мастер-пароль: он же становится ключом шифрования
+     * файла. Проверка идёт через общий счётчик ошибок, поэтому перебор упирается
+     * в ту же паузу, что и вход в настройки.
+     */
+    private fun masterError(password: String): String? {
+        if (!adminStore.hasPassword()) {
+            return "Сначала задайте мастер-пароль: Настройки → Режим работы"
+        }
+        lockMessage()?.let { return it }
+        if (!adminStore.verify(password)) {
+            refreshAccessState()
+            return lockMessage() ?: "Мастер-пароль неверен"
+        }
+        return null
     }
 
     private fun stamp(): String =
