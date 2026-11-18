@@ -29,6 +29,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PlayArrow
@@ -126,6 +127,11 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                     Icon(Icons.Filled.BugReport, contentDescription = null, tint = JbAccent2, modifier = Modifier.size(15.dp))
                     Spacer(Modifier.width(4.dp))
                     Text("Диагностика", color = JbAccent2, style = MaterialTheme.typography.labelMedium)
+                }
+                TextButton(onClick = { vm.openModules() }) {
+                    Icon(Icons.Filled.AutoAwesome, contentDescription = null, tint = JbAccent2, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("ИИ-разбор", color = JbAccent2, style = MaterialTheme.typography.labelMedium)
                 }
             }
         }

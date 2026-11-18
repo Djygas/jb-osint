@@ -91,8 +91,11 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
     }
 
     BackHandler(enabled = state.screen != Screen.HOME) {
-        if (state.screen == Screen.RESULTS || state.screen == Screen.PROFILE) vm.backHome()
-        else vm.navigate(Screen.HOME)
+        when (state.screen) {
+            Screen.RESULTS, Screen.PROFILE -> vm.backHome()
+            Screen.MODULES -> vm.navigate(Screen.KEYS)
+            else -> vm.navigate(Screen.HOME)
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize().background(backdropBrush())) {
@@ -119,7 +122,9 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
                 }
             },
             bottomBar = {
-                if (state.screen != Screen.RESULTS && state.screen != Screen.PROFILE) {
+                if (state.screen != Screen.RESULTS && state.screen != Screen.PROFILE &&
+                    state.screen != Screen.MODULES
+                ) {
                     JbBottomBar(current = state.screen, onNavigate = vm::navigate)
                 }
             }
@@ -138,6 +143,7 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
                     Screen.SETTINGS -> SettingsScreen(state, vm)
                     Screen.PROFILE -> ProfileScreen(state, vm)
                     Screen.AGENT -> AgentScreen(state, vm)
+                    Screen.MODULES -> ModuleAssistantScreen(state, vm)
                 }
             }
         }

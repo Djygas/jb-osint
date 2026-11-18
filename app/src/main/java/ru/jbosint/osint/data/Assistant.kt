@@ -23,7 +23,10 @@ enum class AssistantRole(val title: String, val task: String, val maxTokens: Int
     RESEARCHER("Исследователь", "search", 900),
     CLASSIFIER("Классификатор", "classify", 500),
     QUERY_PLANNER("Генератор запросов", "generate_queries", 600),
-    SYNTHESIS("Синтезатор отчёта", "synthesize", 1800)
+    SYNTHESIS("Синтезатор отчёта", "synthesize", 1800),
+
+    /** Разбор состояния модулей: короткий ответ по каждому, до двух шагов. */
+    MODULE_DOCTOR("Диагност модулей", "diagnose_modules", 700)
 }
 
 data class AssistantModel(val id: String, val title: String, val note: String)
@@ -249,6 +252,8 @@ object AssistantPrompts {
             "в конкретные запросы к модулям. Отвечаешь только JSON."
         AssistantRole.SYNTHESIS -> "$COMMON Ты редактор отчёта: выстраиваешь материал в " +
             "структуру с заголовками, таблицами и выводами, не добавляя новых фактов."
+        AssistantRole.MODULE_DOCTOR -> "$COMMON Ты инженер поддержки: по коду ответа и структуре " +
+            "JSON определяешь причину сбоя модуля и даёшь короткие шаги настройки. Отвечаешь только JSON."
     }
 
     private fun factsPayload(facts: List<Fact>, limit: Int = 160): JSONArray {
@@ -994,7 +999,8 @@ class AssistantService(private val store: AssistantStore) {
                     .put(JSONObject().put("role", "system").put("content", AssistantPrompts.system(role)))
                     .put(JSONObject().put("role", "user").put("content", prompt)))
                 .put("max_tokens", role.maxTokens)
-                .put("temperature", if (role == AssistantRole.CLASSIFIER || role == AssistantRole.QUERY_PLANNER) 0.1 else 0.5)
+                .put("temperature", if (role == AssistantRole.CLASSIFIER || role == AssistantRole.QUERY_PLANNER ||
+                    role == AssistantRole.MODULE_DOCTOR) 0.1 else 0.5)
                 .put("stream", false)
                 .toString()
             val response = Net.fetch(

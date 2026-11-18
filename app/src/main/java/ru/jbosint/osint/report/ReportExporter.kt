@@ -16,6 +16,8 @@ import ru.jbosint.osint.BuildConfig
 import ru.jbosint.osint.core.model.ReportMeta
 import ru.jbosint.osint.core.report.HtmlReport
 import ru.jbosint.osint.core.report.JsonReport
+import ru.jbosint.osint.core.report.ModuleReport
+import ru.jbosint.osint.core.report.ModuleReportData
 import ru.jbosint.osint.core.report.PdfReport
 import ru.jbosint.osint.core.report.ReportFonts
 import ru.jbosint.osint.core.report.ReportNaming
@@ -86,6 +88,25 @@ class ReportExporter(private val context: Context) {
     suspend fun save(fileName: String, bytes: ByteArray, mime: String): Exported =
         withContext(Dispatchers.IO) {
             deliver(fileName, bytes, format = null, mime = mime)
+        }
+
+    /**
+     * Отчёт ИИ-ассистента модулей: состояние модулей, рекомендации и экономия токенов.
+     * Имя файла фиксированное по времени, чтобы отчёты не перезаписывали друг друга.
+     */
+    suspend fun moduleReport(data: ModuleReportData, format: Format): Exported =
+        withContext(Dispatchers.IO) {
+            val stamp = java.text.SimpleDateFormat("yyyy-MM-dd_HH-mm", java.util.Locale.US)
+                .format(java.util.Date())
+            val fileName = "JB_OSINT_Modules_$stamp.${format.extension}"
+            val report = ModuleReport(data, fonts())
+            val bytes = when (format) {
+                Format.PDF -> report.buildPdf()
+                Format.XLSX -> report.buildXlsx()
+                Format.JSON -> report.buildJson().toByteArray(Charsets.UTF_8)
+                Format.HTML -> report.buildHtml().toByteArray(Charsets.UTF_8)
+            }
+            deliver(fileName, bytes, format)
         }
 
     private fun deliver(

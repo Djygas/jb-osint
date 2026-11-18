@@ -26,7 +26,11 @@ data class DiagBlock(
     val error: String?,
     val advice: String,
     /** Запрос, которым реально проверялся модуль (если отличается от общего). */
-    val testQuery: String? = null
+    val testQuery: String? = null,
+    /** Идентификатор модуля в каталоге — ключ кэша рекомендаций ИИ-ассистента. */
+    val moduleId: String = "",
+    /** Состояние ключа встроенного модуля (KeyState.name); у своих модулей пусто. */
+    val keyState: String = ""
 )
 
 /**

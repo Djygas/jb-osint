@@ -14,8 +14,8 @@ android {
         applicationId = "ru.jbosint.osint"
         minSdk = 26
         targetSdk = 35
-        versionCode = 26
-        versionName = "1.19.1"
+        versionCode = 27
+        versionName = "1.20.0"
         resourceConfigurations += listOf("ru", "en")
 
         // ML Kit face-detection приносит нативные библиотеки под все ABI (33 МБ из 39 МБ APK).
@@ -32,28 +32,26 @@ android {
     }
 
     signingConfigs {
-        // Ключ подписи НЕ хранится в репозитории. Порядок поиска:
-        // 1) keystore.properties в корне проекта (в .gitignore);
-        // 2) переменные окружения JB_KEYSTORE_FILE / JB_KEYSTORE_PASSWORD / JB_KEY_ALIAS / JB_KEY_PASSWORD;
-        // 3) путь по умолчанию для локальной машины разработчика.
-        // Если ключа нет — release собирается неподписанным (assembleRelease проходит,
-        // подписать можно позже apksigner'ом), а не падает с невнятной ошибкой.
+        // Ключ подписи НЕ хранится в репозитории, и пароля по умолчанию нет:
+        // значения берутся только из keystore.properties (в .gitignore) или переменных
+        // окружения JB_KEYSTORE_FILE / JB_KEYSTORE_PASSWORD / JB_KEY_ALIAS / JB_KEY_PASSWORD.
+        // Нет ключа или пароля — release собирается неподписанным, а не падает.
         val signingProps = Properties()
         val propsFile = rootProject.file("keystore.properties")
         if (propsFile.exists()) propsFile.inputStream().use { signingProps.load(it) }
         val storePath = System.getenv("JB_KEYSTORE_FILE")
-            ?: signingProps.getProperty("storeFile")
-            ?: "/opt/workspace/keys/jbosint-release.jks"
+            ?: signingProps.getProperty("storeFile").orEmpty()
         val storePass = System.getenv("JB_KEYSTORE_PASSWORD")
-            ?: signingProps.getProperty("storePassword")
-            ?: "REDACTED"
-        val aliasName = System.getenv("JB_KEY_ALIAS") ?: signingProps.getProperty("keyAlias") ?: "jbosint"
+            ?: signingProps.getProperty("storePassword").orEmpty()
+        val aliasName = System.getenv("JB_KEY_ALIAS")
+            ?: signingProps.getProperty("keyAlias")
+            ?: "jbosint"
         val keyPass = System.getenv("JB_KEY_PASSWORD")
             ?: signingProps.getProperty("keyPassword")
             ?: storePass
-        val storeFileRef = rootProject.file(storePath)
+        val storeFileRef = storePath.takeIf { it.isNotBlank() }?.let { rootProject.file(it) }
         create("release") {
-            if (storeFileRef.exists()) {
+            if (storeFileRef != null && storeFileRef.exists() && storePass.isNotBlank()) {
                 storeFile = storeFileRef
                 storePassword = storePass
                 keyAlias = aliasName
@@ -71,7 +69,10 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("release")
+            // Подпись подключается только когда ключ и пароль реально заданы:
+            // иначе APK остаётся неподписанным, а не падает на validateSigning.
+            val releaseSigning = signingConfigs.getByName("release")
+            if (releaseSigning.storeFile != null) signingConfig = releaseSigning
         }
     }
 
