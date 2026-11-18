@@ -653,6 +653,12 @@ class CustomModuleStore(context: Context) {
             if (module.auth != CustomAuth.NONE && key.isBlank()) null else module to key
         }
 
+    /** Сериализация модуля для резервной копии (сам ключ хранится отдельно). */
+    fun encodeForBackup(module: CustomModule): String = encode(module)
+
+    /** Разбор модуля из резервной копии; повреждённая запись отбрасывается. */
+    fun decodeFromBackup(json: String): CustomModule? = decode(json)
+
     private fun order(): List<String> =
         prefs.getString("order", "").orEmpty().split(',').filter { it.isNotBlank() }
 

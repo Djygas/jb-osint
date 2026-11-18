@@ -125,7 +125,7 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
                 if (state.screen != Screen.RESULTS && state.screen != Screen.PROFILE &&
                     state.screen != Screen.MODULES
                 ) {
-                    JbBottomBar(current = state.screen, onNavigate = vm::navigate)
+                    JbBottomBar(current = state.screen, userMode = state.userMode, onNavigate = vm::navigate)
                 }
             }
         ) { padding ->
@@ -145,14 +145,30 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
                     Screen.AGENT -> AgentScreen(state, vm)
                     Screen.MODULES -> ModuleAssistantScreen(state, vm)
                 }
+                if (state.userMode) {
+                    UserModeBadge(
+                        state = state,
+                        vm = vm,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = 10.dp, end = 14.dp)
+                    )
+                }
             }
         }
     }
+
+    if (state.restoreOffer != null) RestoreOfferDialog(state, vm)
 }
 
 @Composable
-private fun JbBottomBar(current: Screen, onNavigate: (Screen) -> Unit) {
-    val items = listOf(
+private fun JbBottomBar(current: Screen, userMode: Boolean, onNavigate: (Screen) -> Unit) {
+    val items = if (userMode) {
+        // Режим «Пользователь»: только поиск, без ключей и настроек.
+        listOf(
+            Triple(Screen.HOME, "Поиск", Icons.Filled.Search)
+        )
+    } else listOf(
         Triple(Screen.HOME, "Поиск", Icons.Filled.Search),
         Triple(Screen.AGENT, "Агент", Icons.Filled.AutoAwesome),
         Triple(Screen.TELEGRAM, "Telegram", Icons.Filled.Forum),

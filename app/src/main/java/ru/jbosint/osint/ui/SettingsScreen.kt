@@ -119,6 +119,12 @@ fun SettingsScreen(state: UiState, vm: AppViewModel) {
 
         item { AssistantSection(state, vm) }
 
+        item { AccessSection(state, vm) }
+
+        if (state.canManage) {
+            item { BackupSection(state, vm) }
+        }
+
         item {
             SectionHeader("Защита")
             GlowCard(modifier = Modifier.fillMaxWidth(), padding = 16) {
@@ -277,7 +283,7 @@ private fun ToggleRow(title: String, subtitle: String, checked: Boolean, onCheck
 }
 
 @Composable
-private fun ActionRow(
+internal fun ActionRow(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     title: String,
     subtitle: String,

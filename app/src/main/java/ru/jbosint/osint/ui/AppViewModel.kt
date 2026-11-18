@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -39,6 +40,12 @@ import ru.jbosint.osint.data.ModulePlanner
 import ru.jbosint.osint.data.ModulePrompts
 import ru.jbosint.osint.data.ModuleReportBuilder
 import ru.jbosint.osint.data.TokenEstimate
+import ru.jbosint.osint.data.AdminPolicy
+import ru.jbosint.osint.data.AdminStore
+import ru.jbosint.osint.data.BackupPayload
+import ru.jbosint.osint.data.KeyBackupService
+import ru.jbosint.osint.data.VaultCrypto
+import ru.jbosint.osint.data.WorkMode
 import ru.jbosint.osint.data.WebHit
 import ru.jbosint.osint.data.WebResearch
 import ru.jbosint.osint.data.CustomAuth
@@ -125,6 +132,9 @@ import ru.jbosint.osint.data.WatchStore
 /** Попыток ввода PIN до паузы. Дальше пауза удваивается: 30 с, 60 с, 120 с … */
 private const val MAX_PIN_FAILS = 5
 
+/** Экраны, доступные только администратору. */
+private val MANAGED_SCREENS = setOf(Screen.KEYS, Screen.SETTINGS, Screen.MODULES)
+
 enum class Screen { HOME, RESULTS, TELEGRAM, KEYS, SETTINGS, PROFILE, AGENT, MODULES }
 
 /** Состояние быстрой настройки модуля: прогресс или предложение ручной настройки. */
@@ -196,6 +206,17 @@ data class TgUi(
     val dossier: TgDossier? = null
 )
 
+/**
+ * Предложение восстановить резервную копию, найденную на устройстве.
+ * [config] — пользовательская сборка, иначе обычная копия ключей.
+ */
+data class RestoreOffer(
+    val name: String,
+    val path: String,
+    val config: Boolean,
+    val automatic: Boolean = true
+)
+
 data class UiState(
     val ready: Boolean = false,
     val screen: Screen = Screen.HOME,
@@ -233,6 +254,19 @@ data class UiState(
     val moduleQuery: String = "",
     val moduleError: String? = null,
     val moduleExporting: Boolean = false,
+    // ------------------------------------------------ режим работы и резервные копии
+    val workMode: String = WorkMode.ADMIN.id,
+    val adminHasPassword: Boolean = false,
+    /** Сессия администратора разблокирована (или пароля ещё нет). */
+    val adminUnlocked: Boolean = true,
+    val adminLockedUntil: Long = 0L,
+    val adminRecovery: Boolean = false,
+    val adminBiometric: Boolean = false,
+    val backupBusy: Boolean = false,
+    val backupNote: String? = null,
+    val restoreOffer: RestoreOffer? = null,
+    /** Сколько ключей сейчас сохранено — для подсказок и проверки «пусто ли». */
+    val storedKeys: Int = 0,
     val repairing: Boolean = false,
     val repairLog: List<String> = emptyList(),
     val connection: ConnectionUi? = null,
@@ -283,6 +317,12 @@ data class UiState(
     val watchNotes: Map<String, String> = emptyMap(),
     val journal: List<JournalEntry> = emptyList()
 ) {
+    /** Управление ключами, модулями и настройками доступно только администратору. */
+    val canManage: Boolean
+        get() = workMode == WorkMode.ADMIN.id && (adminUnlocked || !adminHasPassword)
+
+    val userMode: Boolean get() = workMode == WorkMode.USER.id
+
     val activeModules: Int
         get() = providers.count { it.enabled && it.hasKey } + customModules.count { it.enabled && (it.hasKey || it.auth == CustomAuth.NONE) }
 }
@@ -301,6 +341,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val assistantService = AssistantService(assistantStore)
     /** Кэш рекомендаций и журнал обращений к модели (JSON во внутренней папке). */
     private val moduleAssistant = ModuleAssistantStore(java.io.File(app.filesDir, "module_assistant.json"))
+    /** Режим работы, мастер-пароль и резервные копии ключей. */
+    private val adminStore = AdminStore(app)
+    private val backupService = KeyBackupService(app, keys, customStore, assistantStore, settings)
     private val profileStore = ProfileStore(app)
     private val agentRunner = AgentRunner(keys)
     private val watchStore = WatchStore(app)
@@ -353,9 +396,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             profileBriefs = profileStore.brief(),
             watches = watchStore.list(),
             moduleStats = moduleAssistant.stats(),
-            moduleJournal = moduleAssistant.journal()
+            moduleJournal = moduleAssistant.journal(),
+            workMode = adminStore.mode.id,
+            adminHasPassword = adminStore.hasPassword(),
+            adminUnlocked = !adminStore.hasPassword(),
+            adminLockedUntil = adminStore.lockedUntil(),
+            adminRecovery = adminStore.hasRecovery(),
+            adminBiometric = adminStore.biometric,
+            storedKeys = countStoredKeys()
         )
+        detectBackupOffer()
     }
+
+    private fun countStoredKeys(): Int =
+        keys.activeCount() + customStore.list().count { customStore.key(it.id).isNotBlank() }
 
     private fun buildProviders(): List<ProviderUi> = ProviderCatalog.all.map { spec ->
         ProviderUi(
@@ -374,8 +428,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------------------------------------------------------------- навигация
 
-    fun navigate(screen: Screen) = _state.update {
-        it.copy(screen = screen, searchError = null)
+    fun navigate(screen: Screen) {
+        // В режиме «Пользователь» управление ключами и настройками закрыто.
+        if (!_state.value.canManage && screen in MANAGED_SCREENS) {
+            _state.update { it.copy(toast = "Режим «Пользователь»: настройки и ключи заблокированы") }
+            return
+        }
+        _state.update { it.copy(screen = screen, searchError = null) }
     }
 
     fun backHome() = _state.update { it.copy(screen = Screen.HOME) }
@@ -1701,6 +1760,279 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         settings.autoWipeDays = days
         _state.update { it.copy(autoWipeDays = days) }
     }
+
+    // --------------------------------------- режим работы и резервные копии ключей
+
+    /** Ищем копию только когда ключей нет: иначе предложение бессмысленно. */
+    private fun detectBackupOffer() {
+        if (keys.activeCount() > 0 || adminStore.mode == WorkMode.USER) return
+        val file = runCatching { backupService.latestBackup() }.getOrNull() ?: return
+        _state.update {
+            it.copy(
+                restoreOffer = RestoreOffer(
+                    name = file.name,
+                    path = file.absolutePath,
+                    config = file.name == KeyBackupService.CONFIG_FILE
+                )
+            )
+        }
+    }
+
+    fun dismissRestoreOffer() = _state.update { it.copy(restoreOffer = null, backupNote = null) }
+
+    /** Создать или сменить мастер-пароль администратора. Возвращает текст ошибки. */
+    fun adminSetPassword(password: String, current: String? = null): String? {
+        if (current != null && adminStore.hasPassword() && !adminStore.verify(current)) {
+            return lockMessage() ?: "Текущий пароль неверен"
+        }
+        AdminPolicy.validate(password)?.let { return it }
+        if (!adminStore.setPassword(password)) return "Не удалось сохранить пароль"
+        refreshAccessState()
+        _state.update { it.copy(adminUnlocked = true, toast = "Мастер-пароль сохранён") }
+        return null
+    }
+
+    /** Проверка пароля с паузой после пяти ошибок. Возвращает текст ошибки. */
+    fun adminUnlock(password: String): String? {
+        if (!adminStore.hasPassword()) {
+            _state.update { it.copy(adminUnlocked = true) }
+            return null
+        }
+        lockMessage()?.let { return it }
+        if (!adminStore.verify(password)) {
+            refreshAccessState()
+            return lockMessage()
+                ?: "Неверный пароль. Осталось попыток: ${(AdminPolicy.MAX_FAILS - adminStore.fails()).coerceAtLeast(0)}"
+        }
+        refreshAccessState()
+        _state.update { it.copy(adminUnlocked = true, toast = "Режим администратора разблокирован") }
+        return null
+    }
+
+    /** Разблокировка после успешной биометрии (сам диалог показывает экран). */
+    fun adminUnlockTrusted() {
+        if (!adminStore.hasPassword() || !adminStore.biometric) return
+        refreshAccessState()
+        _state.update { it.copy(adminUnlocked = true, toast = "Разблокировано биометрией") }
+    }
+
+    fun adminLock() {
+        if (!adminStore.hasPassword()) return
+        _state.update { it.copy(adminUnlocked = false) }
+    }
+
+    fun setAdminBiometric(enabled: Boolean) {
+        adminStore.biometric = enabled
+        _state.update { it.copy(adminBiometric = enabled) }
+    }
+
+    /** Переключение режима: вход в «Администратор» всегда требует пароль. */
+    fun switchMode(target: WorkMode, password: String?): String? {
+        if (target == WorkMode.USER) {
+            adminStore.mode = WorkMode.USER
+            refreshAccessState()
+            _state.update {
+                it.copy(
+                    workMode = WorkMode.USER.id,
+                    screen = Screen.HOME,
+                    adminUnlocked = !adminStore.hasPassword(),
+                    toast = "Режим «Пользователь»: ключи и настройки заблокированы"
+                )
+            }
+            return null
+        }
+        if (!adminStore.hasPassword()) return "Сначала задайте мастер-пароль администратора"
+        adminUnlock(password.orEmpty())?.let { return it }
+        adminStore.mode = WorkMode.ADMIN
+        refreshAccessState()
+        _state.update { it.copy(workMode = WorkMode.ADMIN.id, toast = "Режим «Администратор»") }
+        return null
+    }
+
+    /** Резервный код показывается один раз — вызывающая сторона обязана его сохранить. */
+    fun generateRecoveryCode(): String? {
+        if (!adminStore.hasPassword()) return null
+        val code = adminStore.generateRecoveryCode()
+        _state.update { it.copy(adminRecovery = true) }
+        return code
+    }
+
+    fun resetAdminWithRecovery(code: String, newPassword: String): String? {
+        AdminPolicy.validate(newPassword)?.let { return it }
+        if (!adminStore.resetWithRecovery(code, newPassword)) return "Резервный код не подошёл"
+        refreshAccessState()
+        _state.update { it.copy(adminUnlocked = true, toast = "Пароль сброшен резервным кодом") }
+        return null
+    }
+
+    /** Резервная копия всех ключей: jb_osint_keys.json. */
+    fun exportKeys(password: String) {
+        if (_state.value.backupBusy) return
+        AdminPolicy.validate(password)?.let { error ->
+            _state.update { state -> state.copy(toast = error) }
+            return
+        }
+        val count = runCatching { backupService.payloadForBackup(false, BackupPayload.MODE_ADMIN).keyCount }
+            .getOrDefault(0)
+        if (count == 0) {
+            _state.update { it.copy(toast = "Сохранять нечего: ключи не заданы") }
+            return
+        }
+        _state.update { it.copy(backupBusy = true) }
+        viewModelScope.launch {
+            val outcome = runCatching { backupService.exportKeys(password.toCharArray()) }
+            outcome.onSuccess { file ->
+                val saved = runCatching {
+                    exporter.save(file.name, file.bytes, "application/json")
+                }.getOrNull()
+                _state.update {
+                    it.copy(
+                        backupBusy = false,
+                        backupNote = "Копия от ${stamp()} · ключей: $count",
+                        toast = if (saved?.publicFolder != null)
+                            "Копия сохранена: ${saved.publicFolder}/${file.name}"
+                        else "Копия готова — используйте «Поделиться»"
+                    )
+                }
+                saved?.let { _shareEvents.emit(ShareRequest(it.uri, it.mime, it.fileName)) }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(backupBusy = false, toast = "Не удалось сохранить копию: ${error.message ?: "ошибка"}")
+                }
+            }
+        }
+    }
+
+    /** Пользовательская сборка: активные модули и их ключи, после импорта — режим «Пользователь». */
+    fun createUserBuild(password: String) {
+        if (_state.value.backupBusy) return
+        AdminPolicy.validate(password)?.let { error ->
+            _state.update { state -> state.copy(toast = error) }
+            return
+        }
+        val payload = runCatching { backupService.payloadForBackup(true, BackupPayload.MODE_USER) }.getOrNull()
+        if (payload == null || payload.keyCount == 0) {
+            _state.update { it.copy(toast = "Нет включённых модулей с ключами для сборки") }
+            return
+        }
+        _state.update { it.copy(backupBusy = true) }
+        viewModelScope.launch {
+            runCatching { backupService.createUserBuild(password.toCharArray()) }
+                .onSuccess { file ->
+                    val saved = runCatching {
+                        exporter.save(file.name, file.bytes, KeyBackupService.MIME)
+                    }.getOrNull()
+                    _state.update {
+                        it.copy(
+                            backupBusy = false,
+                            backupNote = "Сборка от ${stamp()} · модулей: ${payload.custom.size + payload.providers.size}",
+                            toast = "Сборка готова: ${file.name} — передайте файл вместе с приложением"
+                        )
+                    }
+                    saved?.let { _shareEvents.emit(ShareRequest(it.uri, it.mime, it.fileName)) }
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(backupBusy = false, toast = "Не удалось собрать: ${error.message ?: "ошибка"}")
+                    }
+                }
+        }
+    }
+
+    /** Импорт из пикера: читаем содержимое и восстанавливаем. */
+    fun importKeysFromUri(uri: Uri, password: String): String? {
+        val bytes = runCatching {
+            getApplication<Application>().contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        }.getOrNull() ?: return "Не удалось прочитать файл"
+        return importKeys(bytes, password)
+    }
+
+    /** Восстановление из найденной на устройстве копии. */
+    fun restoreFromOffer(password: String): String? {
+        val offer = _state.value.restoreOffer ?: return "Файл не найден"
+        val bytes = runCatching { java.io.File(offer.path).readBytes() }.getOrNull()
+            ?: return "Файл недоступен: возможно, он удалён"
+        val error = importKeys(bytes, password)
+        if (error == null) _state.update { it.copy(restoreOffer = null) }
+        return error
+    }
+
+    /**
+     * Расшифровка и применение копии. Выполняется синхронно: PBKDF2 на 210 000
+     * итераций занимает доли секунды, зато ошибку пароля видно сразу в диалоге.
+     */
+    fun importKeys(bytes: ByteArray, password: String): String? {
+        val result = runCatching {
+            runBlocking(Dispatchers.IO) { backupService.restore(bytes, password.toCharArray()) }
+        }
+        return result.fold(
+            onSuccess = { report ->
+                applyRestoredMode(report)
+                _state.update {
+                    it.copy(
+                        backupNote = "Восстановлено с ${stamp()} · ключей: ${report.totalKeys}",
+                        toast = buildString {
+                            append("Восстановлено ключей: ").append(report.totalKeys)
+                            if (report.userBuild) append(" · включён режим «Пользователь»")
+                        }
+                    )
+                }
+                null
+            },
+            onFailure = { error ->
+                error.message?.takeIf { it.isNotBlank() } ?: "Не удалось прочитать копию"
+            }
+        )
+    }
+
+    private fun applyRestoredMode(report: ru.jbosint.osint.data.RestoreResult) {
+        if (report.userBuild) {
+            adminStore.mode = WorkMode.USER
+        } else if (adminStore.mode == WorkMode.USER && adminStore.hasPassword()) {
+            // Ключи восстановлены — остаёмся в пользовательском режиме, пока не введён пароль.
+            adminStore.mode = WorkMode.ADMIN
+        }
+        refreshProviders()
+        refreshCustom()
+        refreshAccessState()
+        _state.update {
+            it.copy(
+                providers = buildProviders(),
+                customModules = customStore.list(),
+                assistantConfigured = assistantStore.configured(),
+                assistantProvider = assistantStore.provider,
+                assistantKeyed = keyedProviders(),
+                assistantModel = assistantStore.model,
+                analyst = settings.analyst,
+                demoMode = settings.demoMode,
+                storedKeys = countStoredKeys(),
+                workMode = adminStore.mode.id,
+                screen = if (adminStore.mode == WorkMode.USER) Screen.HOME else it.screen
+            )
+        }
+    }
+
+    private fun refreshAccessState() {
+        _state.update {
+            it.copy(
+                workMode = adminStore.mode.id,
+                adminHasPassword = adminStore.hasPassword(),
+                adminLockedUntil = adminStore.lockedUntil(),
+                adminRecovery = adminStore.hasRecovery(),
+                adminBiometric = adminStore.biometric,
+                storedKeys = countStoredKeys()
+            )
+        }
+    }
+
+    private fun lockMessage(): String? {
+        val left = adminStore.lockLeft()
+        return if (left > 0) "Слишком много попыток. Вход возможен через ${AdminPolicy.lockText(left)}" else null
+    }
+
+    private fun stamp(): String =
+        java.text.SimpleDateFormat("dd.MM.yyyy HH:mm", java.util.Locale("ru"))
+            .format(java.util.Date())
 
     fun wipeKeys() {
         keys.wipeKeys()

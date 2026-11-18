@@ -866,6 +866,9 @@ class AssistantStore(context: Context) {
 
     fun key(): String = secure.get(keyName()).orEmpty()
 
+    /** Ключ конкретного поставщика — нужен резервной копии, а не только текущему. */
+    fun key(providerId: String): String = secure.get(keyName(providerId)).orEmpty()
+
     fun hasKey(providerId: String = provider): Boolean = secure.get(keyName(providerId)).orEmpty().isNotBlank()
 
     fun saveKey(value: String, providerId: String = provider) {
