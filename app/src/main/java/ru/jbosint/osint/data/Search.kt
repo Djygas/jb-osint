@@ -79,7 +79,8 @@ object Connectors {
         VkConnector, DyxlessConnector, OpenCorporatesConnector, GoogleConnector, YandexConnector,
         BraveConnector, SerpApiConnector, DdgConnector, WikipediaConnector,
         UrlscanConnector, SecurityTrailsConnector, AbuseIpdbConnector, GitlabConnector,
-        TeleSintConnector, TronkConnector, DadataConnector, RedditConnector
+        TeleSintConnector, TronkConnector, DadataConnector, RedditConnector,
+        TelelogConnector, FunstatConnector
     )
 
     fun byId(id: String): Connector? = all.firstOrNull { it.id == id }
@@ -265,6 +266,28 @@ private object TeleSintConnector : Connector {
         return runCatching { TeleSint.search(token, query, limit = 20) }
             .getOrElse { emptyList() }
             .take(40)
+    }
+}
+
+private object TelelogConnector : Connector {
+    override val id = "telelog"
+    override suspend fun collect(query: String, key: KeySource): List<RawFact> {
+        val token = key.key(id)
+        if (token.isBlank()) return emptyList()
+        val parsed = TelegramRules.parse(query)
+        if (!parsed.valid) return emptyList()
+        return runCatching { TelelogLike.query(id, token, parsed) }.getOrDefault(emptyList()).take(30)
+    }
+}
+
+private object FunstatConnector : Connector {
+    override val id = "funstat"
+    override suspend fun collect(query: String, key: KeySource): List<RawFact> {
+        val token = key.key(id)
+        if (token.isBlank()) return emptyList()
+        val parsed = TelegramRules.parse(query)
+        if (!parsed.valid) return emptyList()
+        return runCatching { TelelogLike.query(id, token, parsed) }.getOrDefault(emptyList()).take(30)
     }
 }
 

@@ -73,12 +73,12 @@ object TelegramRules {
         val fromLink = extractLinkTarget(text)
         if (fromLink != null) {
             username(fromLink)?.let { u ->
-                return Result(true, Kind.USERNAME, "@$u", username = u)
+                return Result(true, Kind.USERNAME, u, username = u)
             }
             if (isId(fromLink)) return Result(true, Kind.USER_ID, fromLink, numericId = fromLink)
         }
         val clean = text.removePrefix("@")
-        username(clean)?.let { u -> return Result(true, Kind.USERNAME, "@$u", username = u) }
+        username(clean)?.let { u -> return Result(true, Kind.USERNAME, u, username = u) }
 
         // Контакты/недавние/стикеры часто приходят как JSON/список/ссылка на файл.
         if (text.contains("contact", true) || text.contains("recent", true) || text.contains("phone", true) || text.contains("\n")) {
@@ -109,7 +109,7 @@ object TelegramRules {
         }
         if (isId(target)) return Result(true, if (stats) Kind.GROUP_STATS else Kind.GROUP_ID, target, numericId = target.filter { it.isDigit() || it == '-' })
         username(target)?.let { u ->
-            return Result(true, if (stats) Kind.GROUP_STATS else Kind.GROUP, "@$u", username = u)
+            return Result(true, if (stats) Kind.GROUP_STATS else Kind.GROUP, u, username = u)
         }
         return null
     }
