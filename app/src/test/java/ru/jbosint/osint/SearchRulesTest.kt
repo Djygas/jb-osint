@@ -42,7 +42,7 @@ class SearchRulesTest {
     fun numericTelegramIdAccepted() {
         val result = TelegramRules.parse("123456789")
         assertTrue(result.valid)
-        assertEquals(TelegramRules.Kind.ID, result.kind)
+        assertEquals(TelegramRules.Kind.USER_ID, result.kind)
     }
 
     @Test

@@ -72,7 +72,7 @@ object ProfileBuilder {
         if (sorted.isEmpty()) missing += "Медиа и сообщения"
 
         return ProfileData(
-            id = entry?.id ?: dossier?.channel ?: "profile_${System.currentTimeMillis()}",
+            id = entry?.id ?: dossier?.input ?: "profile_${System.currentTimeMillis()}",
             query = queryText,
             subject = subject,
             summary = summary,

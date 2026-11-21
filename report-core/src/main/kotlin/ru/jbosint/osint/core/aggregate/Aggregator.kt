@@ -30,6 +30,7 @@ object Aggregator {
             val subject = clean(item.subject)
             val kind = canonicalKind(clean(item.kind).ifBlank { "Сведение" })
             val key = buildKey(item.category, kind, value, subject)
+            val observed = if (item.observedAt > 0L) item.observedAt else System.currentTimeMillis()
             val existing = merged[key]
             if (existing == null) {
                 merged[key] = MutableBundle(
@@ -40,12 +41,20 @@ object Aggregator {
                     attributes = item.attributes.filterValues { it.isNotBlank() }.toMutableMap(),
                     sourceIds = mutableSetOf(item.sourceId),
                     observations = item.weight.coerceAtLeast(1),
-                    urls = collectUrls(item, attributes = item.attributes).toMutableSet()
+                    firstSeen = observed,
+                    lastSeen = observed,
+                    urls = collectUrls(item, attributes = item.attributes).toMutableSet(),
+                    apiConfirmed = item.apiConfirmed,
+                    notes = mutableSetOf<String>().apply { if (item.note.isNotBlank()) add(item.note.trim().take(200)) }
                 )
             } else {
                 existing.sourceIds += item.sourceId
                 existing.observations += item.weight.coerceAtLeast(1)
+                existing.firstSeen = if (existing.firstSeen == 0L) observed else minOf(existing.firstSeen, observed)
+                existing.lastSeen = maxOf(existing.lastSeen, observed)
                 existing.urls += collectUrls(item, attributes = item.attributes)
+                existing.apiConfirmed = existing.apiConfirmed && item.apiConfirmed
+                if (item.note.isNotBlank()) existing.notes += item.note.trim().take(200)
                 for ((k, v) in item.attributes) {
                     if (v.isBlank()) continue
                     val prev = existing.attributes[k]
@@ -219,7 +228,11 @@ object Aggregator {
         val attributes: MutableMap<String, String>,
         val sourceIds: MutableSet<String>,
         var observations: Int,
-        val urls: MutableSet<String> = LinkedHashSet()
+        var firstSeen: Long = 0L,
+        var lastSeen: Long = 0L,
+        val urls: MutableSet<String> = LinkedHashSet(),
+        var apiConfirmed: Boolean = true,
+        val notes: MutableSet<String> = LinkedHashSet()
     ) {
         fun toFact() = Fact(
             category = category,
@@ -229,7 +242,11 @@ object Aggregator {
             attributes = attributes.toMap(),
             sourceIds = sourceIds.toSet(),
             observations = observations,
-            urls = urls.toSet()
+            firstSeen = firstSeen,
+            lastSeen = lastSeen,
+            urls = urls.toSet(),
+            apiConfirmed = apiConfirmed,
+            notes = notes.toSet()
         )
     }
 }

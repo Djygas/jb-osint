@@ -130,14 +130,15 @@ class TeleSintTest {
         facts: List<RawFact> = emptyList(),
         username: String = "osint_channel"
     ) = TgDossier(
-        channel = username,
+        input = username,
+        kind = ru.jbosint.osint.data.TelegramRules.Kind.GROUP,
         title = "OSINT-канал",
         username = username,
-        membersCount = 1200,
         facts = facts,
         members = members,
         pagesLoaded = 1,
         hasMore = false,
+        backends = listOf("TeleSINT"),
         collectedAt = 1_760_000_000_000L
     )
 }
