@@ -60,7 +60,7 @@ object TelegramRules {
             if (hint == Kind.STICKER) return Result(true, hint, text)
             if (hint == Kind.FORWARDED_GROUP_MESSAGE) return parseForwarded(text, group = true)
             if (hint == Kind.CHANNEL_FORWARD_POST) return parseForwarded(text, group = false)
-            if (hint == Kind.GROUP_STATS) return parseGroup(text, stats = true)
+            if (hint == Kind.GROUP_STATS) return parseGroup(text, stats = true) ?: Result(false, Kind.INVALID, text, error = "Укажите группу/канал или ссылку")
         }
 
         parseMessageLink(text)?.let { return it }
