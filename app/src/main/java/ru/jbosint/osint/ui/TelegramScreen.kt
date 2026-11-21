@@ -49,26 +49,29 @@ fun TelegramScreen(state: UiState, vm: AppViewModel) {
             ScreenHeader(
                 eyebrow = "Анализ",
                 title = "Telegram-парсер",
-                subtitle = "Карточка канала и выгрузка аудитории через TeleSINT: отчёт HTML, таблица CSV или Excel."
+                subtitle = "Анализ через ключи TeleSINT/Telelog/Funstat: аккаунты, чаты, сообщения, пересылки, статистика и приватность."
             )
         }
 
         item {
             GlowCard {
-                Column(Modifier.padding(16.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Тип входа", style = MaterialTheme.typography.labelMedium, color = JbMuted)
+                    ModeChips(tg.mode, enabled = !tg.running, onSelect = vm::setTgMode)
                     OutlinedTextField(
                         value = tg.channel,
                         onValueChange = vm::setTgChannel,
                         modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
                         enabled = !tg.running,
-                        placeholder = { Text("@channel или https://t.me/channel", color = JbFaint) },
-                        label = { Text("Канал или чат") },
+                        minLines = if (tg.mode == ru.jbosint.osint.data.TelegramRules.Kind.CONTACT_OR_RECENT ||
+                            tg.mode == ru.jbosint.osint.data.TelegramRules.Kind.FORWARDED_GROUP_MESSAGE ||
+                            tg.mode == ru.jbosint.osint.data.TelegramRules.Kind.CHANNEL_FORWARD_POST) 3 else 1,
+                        placeholder = { Text(inputHint(tg.mode), color = JbFaint) },
+                        label = { Text("Входные данные") },
                         shape = RoundedCornerShape(14.dp),
                         colors = fieldColors(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
                     )
-                    Spacer(Modifier.height(10.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Страниц участников", style = MaterialTheme.typography.labelMedium, color = JbMuted)
                         Spacer(Modifier.weight(1f))
@@ -81,10 +84,8 @@ fun TelegramScreen(state: UiState, vm: AppViewModel) {
                         )
                         StepButton("+") { vm.setTgPages(tg.pages + 1) }
                     }
-                    Spacer(Modifier.height(4.dp))
                     Text(
-                        "До 1000 участников на страницу. Первый запрос к каналу платный, " +
-                            "повторные в течение часа — бесплатно.",
+                        "Работает только по сохранённым ключам TeleSINT/Telelog/Funstat. Возможности, не подтверждённые API, помечаются в результате.",
                         style = MaterialTheme.typography.labelSmall,
                         color = JbFaint
                     )
@@ -114,7 +115,7 @@ fun TelegramScreen(state: UiState, vm: AppViewModel) {
                 } else {
                     Icon(Icons.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("Собрать аудиторию", style = MaterialTheme.typography.titleMedium)
+                    Text("Анализировать", style = MaterialTheme.typography.titleMedium)
                 }
             }
         }
@@ -134,13 +135,10 @@ fun TelegramScreen(state: UiState, vm: AppViewModel) {
 
         tg.dossier?.let { dossier ->
             item { DossierCard(dossier) }
-            item {
-                Text(
-                    "Выгрузка",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = JbMuted
-                )
+            if (dossier.warnings.isNotEmpty()) {
+                item { WarningCard(dossier.warnings) }
             }
+            item { Text("Выгрузка", style = MaterialTheme.typography.labelMedium, color = JbMuted) }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     ExportButton("HTML", tg.exporting) { vm.exportTelegram(TgFormat.HTML) }
@@ -149,28 +147,21 @@ fun TelegramScreen(state: UiState, vm: AppViewModel) {
                 }
             }
             item {
-                OutlinedButton(
-                    onClick = { vm.openProfileFromTelegram() },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+                OutlinedButton(onClick = { vm.openProfileFromTelegram() }, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Filled.Person, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(7.dp))
-                    Text("Открыть профиль канала и аудитории")
+                    Text("Открыть профиль результата")
                 }
             }
-            item { AudienceHeader(dossier) }
-            items(dossier.members.take(50).size) { index ->
-                val member = dossier.members[index]
-                MemberRow(index + 1, member)
-            }
-            if (dossier.members.size > 50) {
-                item {
-                    Text(
-                        "Показаны первые 50 из ${dossier.members.size}. Полный список — в выгрузке CSV или Excel.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = JbFaint
-                    )
+            if (dossier.members.isNotEmpty()) {
+                item { AudienceHeader(dossier) }
+                items(dossier.members.take(50).size) { index -> MemberRow(index + 1, dossier.members[index]) }
+                if (dossier.members.size > 50) {
+                    item { Text("Показаны первые 50 из ${dossier.members.size}. Полный список — в выгрузке CSV/Excel.", style = MaterialTheme.typography.labelSmall, color = JbFaint) }
                 }
+            } else {
+                item { Text("ФАКТЫ · ${dossier.facts.size}", style = MaterialTheme.typography.labelSmall, color = JbMuted) }
+                items(dossier.facts.take(80).size) { index -> FactRow(dossier.facts[index]) }
             }
         }
     }
@@ -210,18 +201,17 @@ private fun DossierCard(dossier: TgDossier) {
             Text(dossier.link, style = MaterialTheme.typography.labelSmall, color = JbAccent2)
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                StatTile("Фактов", dossier.facts.size.toString())
                 StatTile("Участников", dossier.members.size.toString())
-                StatTile("Всего в канале", dossier.membersCount.toString())
-                StatTile("Страниц", dossier.pagesLoaded.toString())
+                StatTile("Бэкенды", dossier.backends.size.toString())
+            }
+            if (dossier.backends.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Text("Источники: ${dossier.backends.joinToString(", ")}", style = MaterialTheme.typography.labelSmall, color = JbMuted)
             }
             if (dossier.hasMore) {
                 Spacer(Modifier.height(10.dp))
-                Text(
-                    "Аудитория выгружена не полностью: увеличьте число страниц и повторите сбор " +
-                        "(в течение часа запросы к этому каналу бесплатны).",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = JbFaint
-                )
+                Text("Данные выгружены не полностью: увеличьте число страниц и повторите сбор.", style = MaterialTheme.typography.labelSmall, color = JbFaint)
             }
         }
     }
@@ -255,6 +245,80 @@ private fun MemberRow(index: Int, member: ru.jbosint.osint.data.TeleSint.Member)
                 if (sub.isNotBlank()) {
                     Text(sub, style = MaterialTheme.typography.labelSmall, color = JbMuted)
                 }
+            }
+        }
+    }
+}
+
+
+@Composable
+private fun ModeChips(selected: ru.jbosint.osint.data.TelegramRules.Kind, enabled: Boolean, onSelect: (ru.jbosint.osint.data.TelegramRules.Kind) -> Unit) {
+    val modes = listOf(
+        ru.jbosint.osint.data.TelegramRules.Kind.USERNAME to "Аккаунт",
+        ru.jbosint.osint.data.TelegramRules.Kind.CONTACT_OR_RECENT to "Контакты",
+        ru.jbosint.osint.data.TelegramRules.Kind.STICKER to "Стикер",
+        ru.jbosint.osint.data.TelegramRules.Kind.GROUP to "Группа/канал",
+        ru.jbosint.osint.data.TelegramRules.Kind.MESSAGE_LINK to "Ссылка на сообщение",
+        ru.jbosint.osint.data.TelegramRules.Kind.FORWARDED_GROUP_MESSAGE to "Пересланное из группы",
+        ru.jbosint.osint.data.TelegramRules.Kind.GROUP_STATS to "Статистика чата",
+        ru.jbosint.osint.data.TelegramRules.Kind.CHANNEL_FORWARD_POST to "Пересылки поста"
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        modes.chunked(2).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                row.forEach { (kind, label) ->
+                    OutlinedButton(
+                        onClick = { onSelect(kind) },
+                        enabled = enabled,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (selected == kind) JbAccent.copy(alpha = 0.18f) else androidx.compose.ui.graphics.Color.Transparent
+                        )
+                    ) { Text(label, style = MaterialTheme.typography.labelSmall, maxLines = 1) }
+                }
+                if (row.size == 1) Spacer(Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+private fun inputHint(kind: ru.jbosint.osint.data.TelegramRules.Kind): String = when (kind) {
+    ru.jbosint.osint.data.TelegramRules.Kind.USERNAME -> "@username, id или телефон"
+    ru.jbosint.osint.data.TelegramRules.Kind.CONTACT_OR_RECENT -> "Контакт/недавние: номер, username, ID или список"
+    ru.jbosint.osint.data.TelegramRules.Kind.STICKER -> "Стикер: ссылка, file_id или описание"
+    ru.jbosint.osint.data.TelegramRules.Kind.GROUP -> "@группа/канал, ID или ссылка"
+    ru.jbosint.osint.data.TelegramRules.Kind.MESSAGE_LINK -> "https://t.me/group/123"
+    ru.jbosint.osint.data.TelegramRules.Kind.FORWARDED_GROUP_MESSAGE -> "Ссылка/текст пересланного сообщения из группы"
+    ru.jbosint.osint.data.TelegramRules.Kind.GROUP_STATS -> "Ссылка/ID группы для статистики"
+    ru.jbosint.osint.data.TelegramRules.Kind.CHANNEL_FORWARD_POST -> "Ссылка/ID пересланного поста канала"
+    else -> "Входные данные"
+}
+
+@Composable
+private fun WarningCard(warnings: List<String>) {
+    GlowCard {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Ограничения", style = MaterialTheme.typography.labelMedium, color = JbAccent2)
+            warnings.take(6).forEach { Text("• $it", style = MaterialTheme.typography.labelSmall, color = JbMuted) }
+        }
+    }
+}
+
+@Composable
+private fun FactRow(fact: ru.jbosint.osint.core.model.RawFact) {
+    GlowCard {
+        Column(Modifier.fillMaxWidth().padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(fact.kind, style = MaterialTheme.typography.labelSmall, color = JbAccent2, modifier = Modifier.weight(1f))
+                Text(if (fact.apiConfirmed) "API" else "не подтверждено", style = MaterialTheme.typography.labelSmall,
+                    color = if (fact.apiConfirmed) JbMuted else JbAccent2)
+            }
+            Text(fact.value, style = MaterialTheme.typography.bodyMedium, color = JbText)
+            val details = (fact.attributes.entries.take(4).map { "${it.key}: ${it.value}" } + "Источник: ${fact.sourceId}").joinToString(" · ")
+            Text(details, style = MaterialTheme.typography.labelSmall, color = JbMuted)
+            if (fact.note.isNotBlank()) {
+                Text(fact.note, style = MaterialTheme.typography.labelSmall, color = JbFaint)
             }
         }
     }

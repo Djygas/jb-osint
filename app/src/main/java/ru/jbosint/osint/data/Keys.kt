@@ -83,9 +83,22 @@ object ProviderCatalog {
             "Api-Key (32 символа)", "https://docs.telesint.dev/en/api/", ProviderGroup.SOCIAL
         ),
         ProviderSpec(
+            "telelog", "Telelog", "Аналитика Telegram: пользователи, каналы, пересылки, статистика",
+            "X-API-KEY", "https://telelog.info", ProviderGroup.SOCIAL
+        ),
+        ProviderSpec(
+            "funstat", "Funstat", "Telegram-аналитика: пользователи, чаты, пересылки",
+            "X-API-KEY", "https://funstat.info", ProviderGroup.SOCIAL
+        ),
+        ProviderSpec(
             "tronk", "TRONK.PRO (проверка авто)", "ДТП, залоги, пробег, владельцы, цена, фото",
             "Bearer-токен", "https://tronk.pro", ProviderGroup.REGISTRY,
             requiresSecondField = "Базовый URL API (https)"
+        ),
+        ProviderSpec(
+            "dadata", "DaData", "Стандартизация и подсказки: ФИО, телефон, email, адрес, организация",
+            "API-ключ (Token)", "https://dadata.ru/api/", ProviderGroup.REGISTRY,
+            requiresSecondField = "Секретный ключ (X-Secret, необязательно)"
         ),
         ProviderSpec(
             "opencorporates", "OpenCorporates", "Юридические лица",
@@ -331,6 +344,8 @@ class KeyValidator(private val repo: KeyRepository) {
                     }
                 }
             }
+            "telelog" -> { { probeTelelogLike("telelog", key) } }
+            "funstat" -> { { probeTelelogLike("funstat", key) } }
             "opencorporates" -> {
                 {
                     probeHttp(
@@ -414,19 +429,24 @@ class KeyValidator(private val repo: KeyRepository) {
             "gitlab" -> { { probeHttp("https://gitlab.com/api/v4/users?username=root") } }
             "tronk" -> {
                 {
+                    val base = repo.secondField("tronk").trim().trimEnd('/')
+                        .ifBlank { "https://api.tronk.pro/v1" }
                     val probe = Net.fetch(
-                        "https://api.tronk.pro/v1/me",
+                        "$base/me",
                         headers = mapOf("Authorization" to "Bearer $key", "Accept" to "application/json"),
                         attempts = 1
                     )
                     when {
                         probe.code in 200..299 -> KeyCheck(KeyState.VALID, "Ключ принят")
                         probe.code == 401 || probe.code == 403 -> KeyCheck(KeyState.INVALID, "Ключ отклонён (${probe.code})")
-                        probe.code == 404 -> KeyCheck(KeyState.VALID, "Ключ принят")
+                        probe.code == 400 || probe.code == 404 || probe.code == 405 || probe.code == 422 ->
+                            KeyCheck(KeyState.VALID, "Сервис доступен, ключ сохранён (HTTP ${probe.code})")
+                        probe.code == 429 -> KeyCheck(KeyState.VALID, "Сервис доступен, превышен лимит запросов")
                         else -> KeyCheck(KeyState.UNCHECKED, "HTTP ${probe.code}")
                     }
                 }
             }
+            "dadata" -> { { probeDadata(key) } }
             else -> { { KeyCheck(KeyState.UNCHECKED, "Проверка не поддерживается") } }
         }
         val result = runCatching { probe() }.getOrElse {
@@ -522,6 +542,58 @@ class KeyValidator(private val repo: KeyRepository) {
             response.code == 429 -> KeyCheck(KeyState.VALID, "Ключ активен, превышен лимит запросов")
             else -> KeyCheck(KeyState.INVALID, "Ответ сервиса ${response.code}")
         }
+    }
+
+    private suspend fun probeDadata(key: String): KeyCheck {
+        val headers = buildMap {
+            put("Authorization", "Token $key")
+            put("Accept", "application/json")
+            put("Content-Type", "application/json")
+            val secret = repo.secondField("dadata")
+            if (secret.isNotBlank()) put("X-Secret", secret)
+        }
+        val response = Net.fetch(
+            "https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/fio",
+            headers = headers,
+            attempts = 1,
+            method = "POST",
+            body = """{"query":"Иванов","count":1}"""
+        )
+        response.crossHostRedirect?.let {
+            return KeyCheck(KeyState.INVALID, "Сервис перенаправляет на $it — ключ не отправлен")
+        }
+        return when {
+            response.code in 200..299 -> KeyCheck(KeyState.VALID, "Ключ принят сервисом")
+            response.code == 401 || response.code == 403 -> KeyCheck(KeyState.INVALID, "Сервис отклонил ключ (${response.code})")
+            response.code == 429 -> KeyCheck(KeyState.VALID, "Ключ активен, превышен лимит запросов")
+            else -> KeyCheck(KeyState.INVALID, "Ответ сервиса ${response.code}")
+        }
+    }
+
+    /**
+     * Telelog/Funstat — Telegram-аналитика с X-API-KEY. Публичная OpenAPI-спека
+     * может отличаться по хосту/пути, поэтому проверяем несколько базовых URL и
+     * считаем 200/400/404/422/429 признаком доступного сервиса (ключ сохранён).
+     */
+    private suspend fun probeTelelogLike(id: String, key: String): KeyCheck {
+        val bases = when (id) {
+            "funstat" -> listOf("https://funstat.info/api/v1", "https://api.funstat.info/v1", "https://funstat.info/api")
+            else -> listOf("https://telelog.info/api/v1", "https://api.telelog.info/v1", "https://telelog.info/api")
+        }
+        var lastCode = -1
+        for (base in bases) {
+            val probe = Net.fetch(
+                "$base/me", mapOf("X-API-KEY" to key, "Accept" to "application/json"), attempts = 1
+            )
+            lastCode = probe.code
+            when (probe.code) {
+                200 -> return KeyCheck(KeyState.VALID, "Ключ принят")
+                401, 403 -> return KeyCheck(KeyState.INVALID, "Ключ отклонён (${probe.code})")
+                400, 404, 405, 422, 429 -> return KeyCheck(KeyState.VALID, "Сервис доступен, ключ сохранён")
+            }
+        }
+        return if (lastCode > 0) KeyCheck(KeyState.INVALID, "Ответ сервиса $lastCode")
+        else KeyCheck(KeyState.INVALID, "Нет связи с сервисом")
     }
 
     private suspend fun probeHttp(

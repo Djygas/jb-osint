@@ -28,6 +28,8 @@ object EvidenceLinks {
             "vk" -> "https://vk.com/${enc(v.trimStart('@'))}"
             "dyxless" -> "https://t.me/${enc(v.trimStart('@'))}"
             "telesint" -> if (v.startsWith("@")) "https://t.me/${enc(v.trimStart('@'))}" else "https://telesint.dev"
+            "telelog" -> "https://telelog.info"
+            "funstat" -> "https://funstat.info"
             "opencorporates" -> "https://opencorporates.com/companies?q=${enc(query)}&jurisdiction_code=ru"
             "google" -> "https://www.google.com/search?q=${enc(query)}"
             "yandex" -> "https://yandex.ru/search/?text=${enc(query)}"
@@ -41,6 +43,8 @@ object EvidenceLinks {
             "face" -> ""
             "faceapi" -> if (v.startsWith("http")) v else "https://profacefinder.com"
             "photo" -> if (v.startsWith("http")) v else "https://saucenao.com"
+            "dadata" -> "https://dadata.ru/suggestions/"
+            "tronk" -> "https://tronk.pro"
             else -> SourceCatalog.ref(moduleId).url
         }
     }

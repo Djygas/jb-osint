@@ -37,7 +37,13 @@ data class RawFact(
     val sourceId: String = "internal",
     val weight: Int = 1,
     /** Прямая ссылка на страницу, где встретилось значение (профиль, запись, карточка утечки). */
-    val sourceUrl: String = ""
+    val sourceUrl: String = "",
+    /** Когда факт наблюдался (epoch ms). */
+    val observedAt: Long = 0L,
+    /** Подтверждён ли факт официальным/задокументированным API источника. */
+    val apiConfirmed: Boolean = true,
+    /** Пояснение для неподтверждённых/ограниченных возможностей. */
+    val note: String = ""
 )
 
 /** Агрегированный факт после дедупликации и слияния наблюдений. */
@@ -51,7 +57,10 @@ data class Fact(
     val observations: Int,
     val firstSeen: Long = 0L,
     /** Ссылки-доказательства: страницы источников, где встретилось значение. */
-    val urls: Set<String> = emptySet()
+    val urls: Set<String> = emptySet(),
+    val lastSeen: Long = 0L,
+    val apiConfirmed: Boolean = true,
+    val notes: Set<String> = emptySet()
 ) {
     val sourceCount: Int get() = sourceIds.size
     val confidence: Confidence

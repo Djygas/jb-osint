@@ -47,8 +47,8 @@ object AgentPlanner {
 
     /** Модули по ключу, но без отдельной оплаты за запрос. */
     private val keyedModules = listOf(
-        "tgstat", "vk", "numverify", "hunter", "opencorporates",
-        "securitytrails", "abuseipdb", "yandex", "brave", "google"
+        "tgstat", "vk", "numverify", "hunter", "opencorporates", "dadata",
+        "securitytrails", "abuseipdb", "yandex", "brave", "google", "telelog", "funstat"
     )
 
     /** Платные запросы: каждый ответ стоит денег владельца ключа. */
@@ -143,6 +143,8 @@ object AgentPlanner {
         "shodan" -> "Shodan"
         "serpapi" -> "SerpAPI: расширенный веб-поиск"
         "telesint" -> "TeleSINT: профили Telegram"
+        "telelog" -> "Telelog: аналитика Telegram"
+        "funstat" -> "Funstat: аналитика Telegram"
         "tronk" -> "TRONK: проверка авто"
         else -> "Модуль $id"
     }

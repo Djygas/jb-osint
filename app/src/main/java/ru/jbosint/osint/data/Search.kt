@@ -79,7 +79,7 @@ object Connectors {
         VkConnector, DyxlessConnector, OpenCorporatesConnector, GoogleConnector, YandexConnector,
         BraveConnector, SerpApiConnector, DdgConnector, WikipediaConnector,
         UrlscanConnector, SecurityTrailsConnector, AbuseIpdbConnector, GitlabConnector,
-        TeleSintConnector, TronkConnector, RedditConnector
+        TeleSintConnector, TronkConnector, DadataConnector, RedditConnector
     )
 
     fun byId(id: String): Connector? = all.firstOrNull { it.id == id }
@@ -90,6 +90,170 @@ object Connectors {
  * Запрос платный (1 ₽ за успешный ответ), поэтому модуль работает только при
  * заданном ключе и только для типов запросов, которые сервис принимает.
  */
+
+/**
+ * DaData: подсказки/стандартизация ФИО, телефонов, email, адресов и организаций.
+ * API: https://dadata.ru/api/suggest/
+ */
+private object DadataConnector : Connector {
+    override val id = "dadata"
+
+    override suspend fun collect(query: String, key: KeySource): List<RawFact> {
+        val token = key.key(id)
+        if (token.isBlank()) return emptyList()
+        val secret = key.secondField(id)
+        val headers = buildMap {
+            put("Authorization", "Token $token")
+            put("Accept", "application/json")
+            put("Content-Type", "application/json")
+            if (secret.isNotBlank()) put("X-Secret", secret)
+        }
+        val q = query.trim()
+        val kind = QueryDetector.detect(q)
+        val facts = ArrayList<RawFact>()
+        when (kind) {
+            QueryKind.EMAIL -> facts += suggestEmail(q, headers)
+            QueryKind.PHONE -> facts += suggestPhone(q, headers)
+            QueryKind.NAME -> {
+                facts += suggestFio(q, headers)
+                facts += suggestParty(q, headers)
+            }
+            QueryKind.DOMAIN -> facts += suggestParty(q, headers)
+            else -> {
+                facts += suggestFio(q, headers)
+                facts += suggestParty(q, headers)
+            }
+        }
+        return facts.distinctBy { it.kind to it.value }.take(24)
+    }
+
+    private suspend fun suggestFio(query: String, headers: Map<String, String>): List<RawFact> {
+        val json = postSuggest("https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/fio", query, headers) ?: return emptyList()
+        val suggestions = json.optJSONArray("suggestions") ?: return emptyList()
+        val facts = ArrayList<RawFact>()
+        for (i in 0 until minOf(suggestions.length(), 5)) {
+            val item = suggestions.optJSONObject(i) ?: continue
+            val value = item.optString("value").ifBlank { item.optString("unrestricted_value") }
+            if (value.isBlank()) continue
+            val data = item.optJSONObject("data")
+            facts += fact(FactCategory.PERSON, "Полное имя", value, value, id, buildMap {
+                data?.optString("gender")?.takeIf { it.isNotBlank() && it != "UNKNOWN" }?.let { put("Пол", genderRu(it)) }
+                data?.optString("qc")?.takeIf { it.isNotBlank() }?.let { put("Код качества", it) }
+            })
+        }
+        return facts
+    }
+
+    private suspend fun suggestPhone(query: String, headers: Map<String, String>): List<RawFact> {
+        // clean endpoint gives standardized phone; fallback to suggest
+        val clean = Net.fetch(
+            "https://cleaner.dadata.ru/api/v1/clean/phone",
+            headers, attempts = 1, method = "POST", body = JSONArray().put(query).toString()
+        )
+        val facts = ArrayList<RawFact>()
+        if (clean.ok) {
+            val arr = runCatching { JSONArray(clean.body) }.getOrNull()
+            val item = arr?.optJSONObject(0)
+            if (item != null) {
+                val phone = item.optString("phone").ifBlank { item.optString("number") }
+                val number = item.optString("number").ifBlank { query }
+                val subject = item.optString("country").ifBlank { query }
+                if (phone.isNotBlank() || number.isNotBlank()) {
+                    facts += fact(FactCategory.CONTACT, "Телефон", phone.ifBlank { number }, subject.ifBlank { query }, id, buildMap {
+                        item.optString("country").takeIf { it.isNotBlank() }?.let { put("Страна", it) }
+                        item.optString("region").takeIf { it.isNotBlank() }?.let { put("Регион", it) }
+                        item.optString("city").takeIf { it.isNotBlank() }?.let { put("Город", it) }
+                        item.optString("provider").takeIf { it.isNotBlank() }?.let { put("Оператор", it) }
+                        item.optString("type").takeIf { it.isNotBlank() }?.let { put("Тип", it) }
+                        item.optString("timezone").takeIf { it.isNotBlank() }?.let { put("Часовой пояс", it) }
+                        item.optString("qc").takeIf { it.isNotBlank() }?.let { put("Код качества", it) }
+                    })
+                }
+            }
+        }
+        if (facts.isEmpty()) {
+            val json = postSuggest("https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/phone", query, headers) ?: return emptyList()
+            val suggestions = json.optJSONArray("suggestions") ?: return emptyList()
+            for (i in 0 until minOf(suggestions.length(), 3)) {
+                val item = suggestions.optJSONObject(i) ?: continue
+                val value = item.optString("value")
+                if (value.isBlank()) continue
+                facts += fact(FactCategory.CONTACT, "Телефон", value, query, id)
+            }
+        }
+        return facts
+    }
+
+    private suspend fun suggestEmail(query: String, headers: Map<String, String>): List<RawFact> {
+        val clean = Net.fetch(
+            "https://cleaner.dadata.ru/api/v1/clean/email",
+            headers, attempts = 1, method = "POST", body = JSONArray().put(query).toString()
+        )
+        val facts = ArrayList<RawFact>()
+        if (clean.ok) {
+            val arr = runCatching { JSONArray(clean.body) }.getOrNull()
+            val item = arr?.optJSONObject(0)
+            if (item != null) {
+                val email = item.optString("email").ifBlank { query }
+                facts += fact(FactCategory.CONTACT, "Почта", email, query, id, buildMap {
+                    item.optString("type").takeIf { it.isNotBlank() }?.let { put("Тип", it) }
+                    item.optString("domain").takeIf { it.isNotBlank() }?.let { put("Домен", it) }
+                    item.optString("local").takeIf { it.isNotBlank() }?.let { put("Локальная часть", it) }
+                    item.optString("qc").takeIf { it.isNotBlank() }?.let { put("Код качества", it) }
+                })
+            }
+        }
+        if (facts.isEmpty()) {
+            val json = postSuggest("https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/email", query, headers) ?: return emptyList()
+            val suggestions = json.optJSONArray("suggestions") ?: return emptyList()
+            for (i in 0 until minOf(suggestions.length(), 3)) {
+                val item = suggestions.optJSONObject(i) ?: continue
+                val value = item.optString("value")
+                if (value.isBlank()) continue
+                facts += fact(FactCategory.CONTACT, "Почта", value, query, id)
+            }
+        }
+        return facts
+    }
+
+    private suspend fun suggestParty(query: String, headers: Map<String, String>): List<RawFact> {
+        val json = postSuggest("https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/party", query, headers) ?: return emptyList()
+        val suggestions = json.optJSONArray("suggestions") ?: return emptyList()
+        val facts = ArrayList<RawFact>()
+        for (i in 0 until minOf(suggestions.length(), 5)) {
+            val item = suggestions.optJSONObject(i) ?: continue
+            val value = item.optString("value")
+            if (value.isBlank()) continue
+            val data = item.optJSONObject("data")
+            val subject = value
+            facts += fact(FactCategory.ORGANIZATION, "Организация", value, subject, id, buildMap {
+                data?.optString("inn")?.takeIf { it.isNotBlank() }?.let { put("ИНН", it) }
+                data?.optString("ogrn")?.takeIf { it.isNotBlank() }?.let { put("ОГРН", it) }
+                data?.optString("kpp")?.takeIf { it.isNotBlank() }?.let { put("КПП", it) }
+                data?.optJSONObject("address")?.optString("value")?.takeIf { it.isNotBlank() }?.let { put("Адрес", it) }
+                data?.optString("state")?.takeIf { it.isNotBlank() }?.let { put("Статус", it) }
+                data?.optJSONObject("management")?.optString("name")?.takeIf { it.isNotBlank() }?.let { put("Руководитель", it) }
+                data?.optJSONObject("management")?.optString("post")?.takeIf { it.isNotBlank() }?.let { put("Должность", it) }
+            })
+            data?.optJSONObject("management")?.optString("name")?.takeIf { it.isNotBlank() }?.let { manager ->
+                facts += fact(FactCategory.PERSON, "Руководитель", manager, value, id)
+            }
+        }
+        return facts
+    }
+
+    private suspend fun postSuggest(url: String, query: String, headers: Map<String, String>): JSONObject? {
+        val response = Net.fetch(url, headers, attempts = 1, method = "POST", body = JSONObject().put("query", query).put("count", 5).toString())
+        if (!response.ok) return null
+        return runCatching { JSONObject(response.body) }.getOrNull()
+    }
+
+    private fun genderRu(code: String): String = when (code.uppercase()) {
+        "MALE" -> "мужской"
+        "FEMALE" -> "женский"
+        else -> code
+    }
+}
 private object TeleSintConnector : Connector {
     override val id = "telesint"
 

@@ -198,6 +198,7 @@ data class PreviewState(
 /** Состояние Telegram-парсера: ввод канала, прогресс сбора и готовый список аудитории. */
 data class TgUi(
     val channel: String = "",
+    val mode: ru.jbosint.osint.data.TelegramRules.Kind = ru.jbosint.osint.data.TelegramRules.Kind.USERNAME,
     val pages: Int = TgParser.DEFAULT_MAX_PAGES,
     val running: Boolean = false,
     val exporting: Boolean = false,
@@ -2471,22 +2472,29 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         it.copy(tg = it.tg.copy(pages = pages.coerceIn(1, 20)))
     }
 
+    fun setTgMode(mode: ru.jbosint.osint.data.TelegramRules.Kind) = _state.update {
+        it.copy(tg = it.tg.copy(mode = mode, error = null))
+    }
+
     fun runTelegramParse() {
         val current = _state.value.tg
         if (current.running) return
         val channel = current.channel.trim()
         if (channel.isBlank()) {
-            _state.update { it.copy(tg = it.tg.copy(error = "Укажите канал: @name или ссылку t.me/name")) }
+            _state.update { it.copy(tg = it.tg.copy(error = "Укажите входные данные для анализа")) }
             return
         }
-        val parsed = TelegramRules.parse(channel)
+        val parsed = TelegramRules.parse(channel, current.mode)
         if (!parsed.valid) {
             _state.update { it.copy(tg = it.tg.copy(error = parsed.error)) }
             return
         }
-        if (keys.key("telesint").isBlank()) {
+        val telesint = keys.key("telesint")
+        val telelog = keys.key("telelog")
+        val funstat = keys.key("funstat")
+        if (telesint.isBlank() && telelog.isBlank() && funstat.isBlank()) {
             _state.update {
-                it.copy(tg = it.tg.copy(error = "Сначала добавьте ключ TeleSINT в разделе «Модули»"))
+                it.copy(tg = it.tg.copy(error = "Добавьте ключ TeleSINT, Telelog или Funstat в разделе «Модули»"))
             }
             return
         }
@@ -2494,8 +2502,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val outcome = runCatching {
                 TgParser.collect(
-                    key = keys.key("telesint"),
-                    channel = channel,
+                    telesintKey = telesint,
+                    telelogKey = telelog,
+                    funstatKey = funstat,
+                    input = channel,
+                    kindHint = current.mode,
                     maxPages = current.pages
                 ) { stage -> _state.update { it.copy(tg = it.tg.copy(stage = stage)) } }
             }
@@ -2503,7 +2514,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update {
                     it.copy(
                         tg = it.tg.copy(running = false, stage = "", dossier = dossier),
-                        toast = "Собрано ${dossier.members.size} участников"
+                        toast = "Готово: ${dossier.facts.size} фактов, ${dossier.members.size} участников"
                     )
                 }
             }.onFailure { error ->

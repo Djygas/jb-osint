@@ -55,6 +55,8 @@ object DiagSamples {
         "dyxless" to "diag-check-zz@example.invalid",
         "leakcheck" to "diag-check-zz@example.invalid",
         "telesint" to "@telegram",
+        "telelog" to "@telegram",
+        "funstat" to "@telegram",
         "faceapi" to "face-photo.jpg",
         "opencorporates" to "tesla",
         "tgstat" to "osint",
@@ -64,7 +66,8 @@ object DiagSamples {
         "brave" to "osint",
         "serpapi" to "osint",
         "ddg" to "osint",
-        "wikipedia" to "osint"
+        "wikipedia" to "osint",
+        "dadata" to "Иванов Иван Иванович"
     )
 
     fun forProvider(id: String): String? = samples[id]
@@ -88,7 +91,10 @@ object DiagSamples {
         "github" to "ник или имя",
         "gitlab" to "ник",
         "dyxless" to "email, телефон, IP, полное ФИО (3 слова), Telegram-ник или id:123456789",
-        "telesint" to "ник (@name), телефон, имя или id:123456789"
+        "telesint" to "ник (@name), телефон, имя или id:123456789",
+        "telelog" to "@username, id, ссылка t.me, контакт или пересланное сообщение",
+        "funstat" to "@username, id, ссылка t.me, контакт или пересланное сообщение",
+        "dadata" to "ФИО, телефон, email, адрес или название организации"
     )
 
     fun acceptedFor(id: String): String? = accepted[id]
@@ -286,6 +292,12 @@ object DiagReport {
         val working = safe.count { it.advice.startsWith("работает") }
         val empty = safe.count { it.facts == 0 }
         sb.appendLine("Итого: модулей ${safe.size}, рабочих $working, без фактов $empty")
+        val runs = ModuleRunLog.snapshot().take(15)
+        if (runs.isNotEmpty()) {
+            sb.appendLine()
+            sb.appendLine("Журнал запусков:")
+            runs.forEach { sb.appendLine("  ${it.line()}") }
+        }
         sb.appendLine("Подсказка: «0 фактов» чаще всего значит, что запрос не того типа — многие API принимают только email, IP или домен (см. «Оценка»).")
         sb.appendLine("Для пользовательских модулей добавьте правила разбора «JSON-путь → поле» в карточке модуля.")
         return sb.toString().trimEnd()
