@@ -17,6 +17,8 @@ jobs:
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
       - uses: android-actions/setup-android@v3
+        with:
+          packages: ""
       - name: Unit tests
         run: ./gradlew :report-core:test :app:testDebugUnitTest --console=plain
       - name: Lint
@@ -34,6 +36,8 @@ jobs:
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
       - uses: android-actions/setup-android@v3
+        with:
+          packages: ""
       - name: Assemble debug APK
         run: ./gradlew :app:assembleDebug --console=plain
       - name: Upload APK
