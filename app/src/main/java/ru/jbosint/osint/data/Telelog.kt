@@ -219,7 +219,7 @@ object TelelogLike {
     }
 
     private suspend fun groupStatsFacts(id: String, key: String, gid: Long, subject: String, warnings: MutableList<String>, raw: MutableList<RawReport>): List<RawFact> {
-        val facts = groupFacts(id, key, gid, subject, warnings).toMutableList()
+        val facts = groupFacts(id, key, gid, subject, warnings, raw).toMutableList()
         // members endpoint is costly; include count-level hint only from group details. No separate stats endpoint.
         warnings += "${label(id)}: отдельный endpoint статистики чата не указан; использованы доступные данные groups/{id}"
         return facts
