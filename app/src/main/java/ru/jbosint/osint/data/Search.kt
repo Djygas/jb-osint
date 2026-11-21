@@ -1496,12 +1496,12 @@ class SearchEngine(
                             else item.copy(sourceUrl = EvidenceLinks.url(module.id, cleanQuery, item.value))
                         }
                         SearchJournal.record(module.id, cleanQuery, items.size, items.isNotEmpty(), took)
+                        ModuleRunLog.add(ModuleRunEntry(moduleId = module.id, action = "search_collect", ok = true, durationMs = took, facts = items.size))
                         synchronized(this@SearchEngine) { responded++ }
                     } else {
-                        SearchJournal.record(
-                            module.id, cleanQuery, 0, false, took,
-                            result.exceptionOrNull()?.message ?: "ошибка запроса"
-                        )
+                        val err = result.exceptionOrNull()?.message ?: "ошибка запроса"
+                        SearchJournal.record(module.id, cleanQuery, 0, false, took, err)
+                        ModuleRunLog.add(ModuleRunEntry(moduleId = module.id, action = "search_collect", ok = false, durationMs = took, message = err))
                         synchronized(this@SearchEngine) { failed++ }
                     }
                     onStage("Модуль ${index + 1} из ${modules.size}", ((index + 1) * 100) / modules.size.coerceAtLeast(1))

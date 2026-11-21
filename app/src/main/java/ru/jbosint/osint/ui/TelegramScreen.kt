@@ -85,7 +85,7 @@ fun TelegramScreen(state: UiState, vm: AppViewModel) {
                         StepButton("+") { vm.setTgPages(tg.pages + 1) }
                     }
                     Text(
-                        "Работает только по сохранённым ключам TeleSINT/Telelog/Funstat. Возможности, не подтверждённые API, помечаются в результате.",
+                        "TeleSINT — платный API: запросы списывают баланс по тарифу сервиса. Telelog/Funstat: JWT Bearer, запросы платные по tech.request_cost; неподдерживаемые публичным API возможности помечаются предупреждением.",
                         style = MaterialTheme.typography.labelSmall,
                         color = JbFaint
                     )

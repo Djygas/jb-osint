@@ -6,12 +6,13 @@ This module supports TeleSINT/Telelog/Funstat key-based analysis. Current implem
 - **TeleSINT**: `https://api.telesint.dev/v1` via `Api-Key` header. Implemented endpoints: `/me/`, `/search/`, `/users/{id}`, `/groups/{id}`, `/groups/{id}/members`. See `app/src/main/java/ru/jbosint/osint/data/TeleSint.kt`.
 - TeleSINT key check is free via `/me/`.
 
-## Best-effort / needs confirmation
-- **Telelog/Funstat**: `X-API-KEY` header, probing common bases:
-  - Telelog: `https://telelog.info/api/v1`, `https://api.telelog.info/v1`, `https://telelog.info/api`
-  - Funstat: `https://funstat.info/api/v1`, `https://api.funstat.info/v1`, `https://funstat.info/api`
-- Candidate paths: `me/profile/user`, `user/users/search`, `chat/chats/search`, `chat/stats`, `message`, `forwards`, `contacts`, `sticker`.
-- Facts from Telelog/Funstat are marked `apiConfirmed=false` with a note until endpoint contracts are confirmed.
+## Telelog/Funstat (confirmed spec)
+- Swagger: `https://telelog.info/swagger/v1/swagger.json` (Funstat API v1).
+- Auth: `Authorization: Bearer <JWT>`.
+- Key check: `GET /api/v1/users/basic_info_by_id?id=<uid>` (uid from JWT) or `resolve_username`.
+- Implemented endpoints: `users/resolve_username`, `users/basic_info_by_id`, `users/{id}/stats_min`, `users/{id}/stats`, `users/{id}/usernames`, `users/{id}/names`, `users/{id}/groups`, `groups/{id}`, `users/{id}/stickers`.
+- Costs are returned in `tech.request_cost/current_ballance`; UI should treat requests as paid.
+- Not confirmed/supported by public spec: contacts/recent import, message-by-link, channel post forwarders, privacy/hide/auction commands. These are surfaced as warnings.
 
 ## UI behavior
 - Input modes: account/username/id, contacts/recent, sticker, group/channel, message link, forwarded group message, group stats, forwarded channel post.

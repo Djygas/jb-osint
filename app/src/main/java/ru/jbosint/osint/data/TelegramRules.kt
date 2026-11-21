@@ -121,7 +121,9 @@ object TelegramRules {
             return null
         }
         username(target)?.let { u ->
-            return Result(true, if (stats) Kind.GROUP_STATS else Kind.GROUP, u, username = u)
+            // Bare @username is ambiguous; default to USERNAME unless caller asked for stats/group hint.
+            if (stats) return Result(true, Kind.GROUP_STATS, u, username = u)
+            return null
         }
         return null
     }

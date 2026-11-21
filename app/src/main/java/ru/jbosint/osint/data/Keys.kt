@@ -83,12 +83,12 @@ object ProviderCatalog {
             "Api-Key (32 символа)", "https://docs.telesint.dev/en/api/", ProviderGroup.SOCIAL
         ),
         ProviderSpec(
-            "telelog", "Telelog", "Аналитика Telegram: пользователи, каналы, пересылки, статистика",
-            "X-API-KEY", "https://telelog.info", ProviderGroup.SOCIAL
+            "telelog", "Telelog", "Telegram-аналитика: профили, группы, сообщения, стикеры, статистика",
+            "JWT (Bearer)", "https://telelog.info/swagger/index.html", ProviderGroup.SOCIAL
         ),
         ProviderSpec(
-            "funstat", "Funstat", "Telegram-аналитика: пользователи, чаты, пересылки",
-            "X-API-KEY", "https://funstat.info", ProviderGroup.SOCIAL
+            "funstat", "Funstat", "Telegram-аналитика (Funstat API): профили, группы, сообщения",
+            "JWT (Bearer)", "https://funstat.info", ProviderGroup.SOCIAL
         ),
         ProviderSpec(
             "tronk", "TRONK.PRO (проверка авто)", "ДТП, залоги, пробег, владельцы, цена, фото",
@@ -571,29 +571,22 @@ class KeyValidator(private val repo: KeyRepository) {
     }
 
     /**
-     * Telelog/Funstat — Telegram-аналитика с X-API-KEY. Публичная OpenAPI-спека
-     * может отличаться по хосту/пути, поэтому проверяем несколько базовых URL и
-     * считаем 200/400/404/422/429 признаком доступного сервиса (ключ сохранён).
+     * Telelog/Funstat — Telegram-аналитика. OpenAPI: https://telelog.info/swagger/v1/swagger.json
+     * Auth: Authorization: Bearer <JWT>.
      */
     private suspend fun probeTelelogLike(id: String, key: String): KeyCheck {
-        val bases = when (id) {
-            "funstat" -> listOf("https://funstat.info/api/v1", "https://api.funstat.info/v1", "https://funstat.info/api")
-            else -> listOf("https://telelog.info/api/v1", "https://api.telelog.info/v1", "https://telelog.info/api")
-        }
-        var lastCode = -1
-        for (base in bases) {
-            val probe = Net.fetch(
-                "$base/me", mapOf("X-API-KEY" to key, "Accept" to "application/json"), attempts = 1
-            )
-            lastCode = probe.code
-            when (probe.code) {
-                200 -> return KeyCheck(KeyState.VALID, "Ключ принят")
-                401, 403 -> return KeyCheck(KeyState.INVALID, "Ключ отклонён (${probe.code})")
-                400, 404, 405, 422, 429 -> return KeyCheck(KeyState.VALID, "Сервис доступен, ключ сохранён")
+        val result = runCatching { TelelogLike.account(id, key) }
+        return result.fold(
+            onSuccess = { KeyCheck(KeyState.VALID, it.detail) },
+            onFailure = { e ->
+                val msg = e.message.orEmpty()
+                when {
+                    e is TelelogLike.ApiException && (e.code == 401 || e.code == 403) -> KeyCheck(KeyState.INVALID, msg.ifBlank { "Ключ отклонён" })
+                    e is TelelogLike.ApiException -> KeyCheck(KeyState.INVALID, msg.ifBlank { "Ответ сервиса ${e.code}" })
+                    else -> KeyCheck(KeyState.INVALID, "Нет связи с сервисом")
+                }
             }
-        }
-        return if (lastCode > 0) KeyCheck(KeyState.INVALID, "Ответ сервиса $lastCode")
-        else KeyCheck(KeyState.INVALID, "Нет связи с сервисом")
+        )
     }
 
     private suspend fun probeHttp(
