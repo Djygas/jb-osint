@@ -100,14 +100,26 @@ object TelegramRules {
     }
 
     private fun parseGroup(text: String, stats: Boolean): Result? {
-        val target = extractLinkTarget(text) ?: text.trim().removePrefix("@")
+        val linkTarget = extractLinkTarget(text)
+        // Don't classify message links as groups; let parseMessageLink handle them.
+        if (linkTarget != null) {
+            val tail = tgLink.find(text)?.groupValues?.get(1)?.trim('/')?.substringBefore('?').orEmpty()
+            val parts = tail.split('/').filter { it.isNotBlank() }
+            if (parts.size >= 2 && parts.last().toIntOrNull() != null) return null
+        }
+        val target = linkTarget ?: text.trim().removePrefix("@")
         if (target.isBlank()) return null
         if (target.startsWith("c/")) {
             val parts = target.removePrefix("c/").split('/')
             val id = parts.firstOrNull().orEmpty()
             if (isId(id)) return Result(true, if (stats) Kind.GROUP_STATS else Kind.GROUP_ID, text, numericId = id)
         }
-        if (isId(target)) return Result(true, if (stats) Kind.GROUP_STATS else Kind.GROUP_ID, target, numericId = target.filter { it.isDigit() || it == '-' })
+        val rawId = target.filter { it.isDigit() || it == '-' }
+        if (isId(target)) {
+            val explicitGroup = text.trim().startsWith("-100") || text.trim().startsWith("-") || text.contains("/c/")
+            if (explicitGroup || stats) return Result(true, if (stats) Kind.GROUP_STATS else Kind.GROUP_ID, target, numericId = rawId)
+            return null
+        }
         username(target)?.let { u ->
             return Result(true, if (stats) Kind.GROUP_STATS else Kind.GROUP, u, username = u)
         }
