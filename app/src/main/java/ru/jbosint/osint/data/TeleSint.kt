@@ -350,11 +350,12 @@ object TeleSint {
 
     /** Разворачивает конверт `{"data": ...}` / `{"result": ...}`. */
     internal fun payload(root: JSONObject?): JSONObject? {
+        val r = root ?: return null
         for (key in listOf("data", "result", "user", "group")) {
-            val nested = root.optJSONObject(key)
+            val nested = r.optJSONObject(key)
             if (nested != null) return nested
         }
-        return if (root.has("id") || root.has("username") || root.has("title")) root else null
+        return if (r.has("id") || r.has("username") || r.has("title")) r else null
     }
 
     /** Список объектов из `data.items`, `data`, `results`, `users`, `groups`. */
