@@ -73,14 +73,14 @@ object TgParser {
         }
         if (telelogKey.isNotBlank()) {
             onProgress("Telelog: запрос…")
-            runBackend("Telelog") { TelelogLike.query("telelog", telelogKey, parsed) }
-                .onSuccess { res -> facts += res; backends += "Telelog" }
+            runBackend("Telelog") { TelelogLike.queryDetailed("telelog", telelogKey, parsed) }
+                .onSuccess { res -> facts += res.facts; warnings += res.warnings; if (res.facts.isNotEmpty()) backends += "Telelog" }
                 .onFailure { e -> warnings += "Telelog: ${e.message ?: "ошибка"}" }
         }
         if (funstatKey.isNotBlank()) {
             onProgress("Funstat: запрос…")
-            runBackend("Funstat") { TelelogLike.query("funstat", funstatKey, parsed) }
-                .onSuccess { res -> facts += res; backends += "Funstat" }
+            runBackend("Funstat") { TelelogLike.queryDetailed("funstat", funstatKey, parsed) }
+                .onSuccess { res -> facts += res.facts; warnings += res.warnings; if (res.facts.isNotEmpty()) backends += "Funstat" }
                 .onFailure { e -> warnings += "Funstat: ${e.message ?: "ошибка"}" }
         }
 

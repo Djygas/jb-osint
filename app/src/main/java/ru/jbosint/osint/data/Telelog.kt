@@ -6,178 +6,329 @@ import ru.jbosint.osint.core.model.FactCategory
 import ru.jbosint.osint.core.model.RawFact
 
 /**
- * Best-effort клиент Telelog/Funstat-подобных Telegram analytics API.
- *
- * Публичная спецификация у сервисов меняется, поэтому клиент пробует несколько
- * базовых URL и типовых endpoint'ов. Неподтверждённые возможности возвращают
- * понятную ошибку, а не выдуманный результат.
+ * Telelog/Funstat API client (OpenAPI: https://telelog.info/swagger/v1/swagger.json).
+ * Auth: Authorization: Bearer <JWT>. Costs come from tech.request_cost/current_ballance.
  */
 object TelelogLike {
 
     class ApiException(val code: Int, message: String) : Exception(message)
 
     data class Account(val ok: Boolean, val detail: String)
+    data class QueryResult(val facts: List<RawFact>, val warnings: List<String> = emptyList())
 
-    private fun bases(id: String): List<String> = when (id) {
-        "funstat" -> listOf("https://funstat.info/api/v1", "https://api.funstat.info/v1", "https://funstat.info/api")
-        else -> listOf("https://telelog.info/api/v1", "https://api.telelog.info/v1", "https://telelog.info/api")
+    private fun base(id: String) = when (id) {
+        "funstat" -> "https://funstat.info/api/v1"
+        else -> "https://telelog.info/api/v1"
     }
+
+    private fun headers(key: String) = mapOf(
+        "Authorization" to "Bearer ${key.trim()}",
+        "Accept" to "application/json"
+    )
 
     suspend fun account(id: String, key: String): Account {
-        val (code, body) = firstResponse(id, key, listOf("me", "profile", "user"), emptyMap())
-        if (code in 200..299) return Account(true, "Ключ принят")
-        throw ApiException(code, bodyMessage(code, body))
-    }
-
-    suspend fun query(id: String, key: String, input: TelegramRules.Result): List<RawFact> {
-        val paths = pathsFor(input)
-        var last: ApiException? = null
-        for ((path, params) in paths) {
-            val (code, body) = firstResponse(id, key, listOf(path), params)
-            if (code in 200..299) return parseFacts(id, body, input)
+        val selfId = resolveSelfId(key)
+        if (selfId != null) {
+            val (code, body) = get(id, key, "/users/basic_info_by_id", mapOf("id" to selfId.toString()))
+            if (code in 200..299) return Account(true, "Ключ принят (Telelog/Funstat API)")
             if (code == 401 || code == 403) throw ApiException(code, bodyMessage(code, body))
-            last = ApiException(code, bodyMessage(code, body))
-            if (code == 404 || code == 405) continue
         }
-        if (last != null) throw last
-        return emptyList()
+        val (c2, b2) = get(id, key, "/users/resolve_username", mapOf("name" to "telegram"))
+        if (c2 in 200..299) return Account(true, "Ключ принят (Telelog/Funstat API)")
+        throw ApiException(c2, bodyMessage(c2, b2))
     }
 
-    private fun pathsFor(input: TelegramRules.Result): List<Pair<String, Map<String, String>>> {
-        val q = input.normalized.ifBlank { input.username.ifBlank { input.numericId } }
-        return when (input.kind) {
-            TelegramRules.Kind.USERNAME, TelegramRules.Kind.USER_ID -> listOf(
-                "user" to mapOf("q" to q, "username" to input.username, "id" to input.numericId),
-                "users/search" to mapOf("q" to q),
-                "search" to mapOf("q" to q, "type" to "user")
-            )
-            TelegramRules.Kind.GROUP, TelegramRules.Kind.GROUP_ID -> listOf(
-                "chat" to mapOf("q" to q, "username" to input.username, "id" to input.numericId),
-                "chats/search" to mapOf("q" to q),
-                "search" to mapOf("q" to q, "type" to "chat")
-            )
-            TelegramRules.Kind.MESSAGE_LINK, TelegramRules.Kind.FORWARDED_GROUP_MESSAGE -> listOf(
-                "message" to mapOf("link" to input.normalized, "q" to q),
-                "messages/search" to mapOf("q" to input.normalized)
-            )
-            TelegramRules.Kind.GROUP_STATS -> listOf(
-                "chat/stats" to mapOf("q" to q, "username" to input.username, "id" to input.numericId),
-                "stats/chat" to mapOf("q" to q),
-                "chat" to mapOf("q" to q, "stats" to "1")
-            )
-            TelegramRules.Kind.CHANNEL_FORWARD_POST -> listOf(
-                "forwards" to mapOf("link" to input.normalized, "q" to q),
-                "channel/forwards" to mapOf("link" to input.normalized),
-                "post/forwards" to mapOf("link" to input.normalized)
-            )
-            TelegramRules.Kind.CONTACT_OR_RECENT -> listOf(
-                "contacts" to mapOf("q" to input.normalized),
-                "users/bulk" to mapOf("q" to input.normalized)
-            )
-            TelegramRules.Kind.STICKER -> listOf(
-                "sticker" to mapOf("q" to input.normalized),
-                "stickers/search" to mapOf("q" to input.normalized)
-            )
-            TelegramRules.Kind.INVALID -> emptyList()
+    private fun resolveSelfId(jwt: String): Long? = runCatching {
+        val parts = jwt.split('.')
+        if (parts.size < 2) return null
+        val b64 = parts[1].replace('-', '+').replace('_', '/')
+        val pad = (4 - b64.length % 4) % 4
+        val payload = String(java.util.Base64.getDecoder().decode(b64 + "=".repeat(pad)))
+        JSONObject(payload).optString("uid").toLongOrNull()
+    }.getOrNull()
+
+    suspend fun query(id: String, key: String, input: TelegramRules.Result): List<RawFact> = queryDetailed(id, key, input).facts
+
+    suspend fun queryDetailed(id: String, key: String, input: TelegramRules.Result): QueryResult {
+        val warnings = ArrayList<String>()
+        val facts = ArrayList<RawFact>()
+        val selfId = resolveSelfId(key)
+
+        when (input.kind) {
+            TelegramRules.Kind.USERNAME, TelegramRules.Kind.USER_ID -> {
+                val user = resolveUser(id, key, input)
+                if (user == null) {
+                    warnings += "${label(id)}: пользователь не найден"
+                } else {
+                    facts += userFacts(id, key, user, input.normalized, warnings)
+                }
+            }
+            TelegramRules.Kind.GROUP, TelegramRules.Kind.GROUP_ID -> {
+                val gid = resolveGroupId(id, key, input, warnings)
+                if (gid != null) facts += groupFacts(id, key, gid, input.normalized, warnings)
+                else warnings += "${label(id)}: группа/канал не найдены или ID не подтверждён"
+            }
+            TelegramRules.Kind.GROUP_STATS -> {
+                val gid = resolveGroupId(id, key, input, warnings)
+                if (gid != null) facts += groupStatsFacts(id, key, gid, input.normalized, warnings)
+                else warnings += "${label(id)}: для статистики нужен ID/username группы, доступный API"
+            }
+            TelegramRules.Kind.MESSAGE_LINK -> {
+                facts += messageLinkFacts(id, key, input, warnings)
+            }
+            TelegramRules.Kind.FORWARDED_GROUP_MESSAGE, TelegramRules.Kind.CHANNEL_FORWARD_POST -> {
+                warnings += "${label(id)}: прямой endpoint для пересылок поста/сообщения в публичной спецификации не подтверждён; показаны доступные косвенные данные"
+                facts += forwardedFacts(id, key, input, warnings)
+            }
+            TelegramRules.Kind.CONTACT_OR_RECENT -> {
+                warnings += "${label(id)}: импорт контактов/недавних не поддерживается публичным API; используйте username/ID"
+            }
+            TelegramRules.Kind.STICKER -> {
+                facts += stickerFacts(id, key, input, warnings)
+            }
+            TelegramRules.Kind.INVALID -> {}
         }
+        if (facts.isEmpty() && warnings.isEmpty()) warnings += "${label(id)}: нет данных по запросу"
+        return QueryResult(facts.distinctBy { it.kind to it.value to it.subject }, warnings.distinct())
     }
 
-    private suspend fun firstResponse(
-        id: String, key: String, paths: List<String>, params: Map<String, String>
-    ): Pair<Int, String> {
-        var lastCode = -1
-        var lastBody = ""
-        for (base in bases(id)) {
-            for (path in paths) {
-                val query = params.filterValues { it.isNotBlank() }
-                    .entries.joinToString("&") { (k, v) -> "${Net.urlEncode(k)}=${Net.urlEncode(v)}" }
-                val url = "$base/${path.trimStart('/')}" + if (query.isNotBlank()) "?$query" else ""
-                val resp = Net.fetch(url, mapOf("X-API-KEY" to key, "Accept" to "application/json"), attempts = 1)
-                lastCode = resp.code; lastBody = resp.body
-                if (resp.code in 200..299 || resp.code == 401 || resp.code == 403) return resp.code to resp.body
-                if (resp.code != 404 && resp.code != 405) return resp.code to resp.body
+    private fun label(id: String) = if (id == "funstat") "Funstat" else "Telelog"
+
+    private data class ResolvedUser(val id: Long, val username: String, val firstName: String, val lastName: String, val active: Boolean, val bot: Boolean, val premium: Boolean)
+
+    private suspend fun resolveUser(id: String, key: String, input: TelegramRules.Result): ResolvedUser? {
+        val (code, body) = if (input.username.isNotBlank()) {
+            get(id, key, "/users/resolve_username", mapOf("name" to input.username))
+        } else {
+            val uid = input.numericId.filter { it.isDigit() }.toLongOrNull() ?: return null
+            get(id, key, "/users/basic_info_by_id", mapOf("id" to uid.toString()))
+        }
+        if (code == 401 || code == 403) throw ApiException(code, bodyMessage(code, body))
+        if (code !in 200..299) return null
+        val arr = dataArray(body)
+        val o = arr.optJSONObject(0) ?: return null
+        val uid = o.optLong("id")
+        if (uid <= 0L) return null
+        return ResolvedUser(
+            id = uid,
+            username = o.optString("username").trim(),
+            firstName = o.optString("first_name").trim(),
+            lastName = o.optString("last_name").trim(),
+            active = o.optBoolean("is_active", false),
+            bot = o.optBoolean("is_bot", false),
+            premium = o.optBoolean("has_premium", false)
+        )
+    }
+
+    private suspend fun resolveGroupId(id: String, key: String, input: TelegramRules.Result, warnings: MutableList<String>): Long? {
+        val rawId = input.numericId.filter { it.isDigit() || it == '-' }
+        rawId.toLongOrNull()?.let { if (it != 0L) return kotlin.math.abs(it) }
+        if (input.username.isNotBlank()) {
+            // No direct group resolve endpoint in spec; try username usage for actual groups/channels.
+            val (code, body) = get(id, key, "/users/username_usage", mapOf("input" to input.username))
+            if (code in 200..299) {
+                val data = dataObj(body)
+                val groups = data?.optJSONArray("actualGroupsOrChannels") ?: JSONArray()
+                for (i in 0 until groups.length()) {
+                    val g = groups.optJSONObject(i) ?: continue
+                    val uname = g.optString("username").trim().removePrefix("@")
+                    if (uname.equals(input.username, true)) return g.optLong("id").takeIf { it > 0 }
+                }
+                if (groups.length() == 1) return groups.optJSONObject(0)?.optLong("id")?.takeIf { it > 0 }
+            } else if (code == 401 || code == 403) throw ApiException(code, bodyMessage(code, body))
+            warnings += "${label(id)}: для группы по username нужен числовой ID; username_usage не дал однозначного ID"
+        }
+        return null
+    }
+
+    private suspend fun userFacts(id: String, key: String, user: ResolvedUser, subject: String, warnings: MutableList<String>): List<RawFact> {
+        val facts = ArrayList<RawFact>()
+        val baseAttrs = linkedMapOf<String, String>()
+        baseAttrs["ID"] = user.id.toString()
+        if (user.username.isNotBlank()) baseAttrs["Ник"] = "@${user.username}"
+        if (user.firstName.isNotBlank() || user.lastName.isNotBlank()) baseAttrs["Имя"] = listOf(user.firstName, user.lastName).filter { it.isNotBlank() }.joinToString(" ")
+        if (user.premium) baseAttrs["Premium"] = "да"
+        if (user.bot) baseAttrs["Бот"] = "да"
+        baseAttrs["Активен"] = if (user.active) "да" else "нет"
+        facts += raw(id, FactCategory.PERSON, "Telegram-профиль", displayUser(user), subject, baseAttrs,
+            link = if (user.username.isNotBlank()) "https://t.me/${user.username}" else "", confirmed = true, note = "Telelog API resolve/basic_info")
+
+        fetchObj(id, key, "/users/${user.id}/stats_min")?.let { o ->
+            val a = linkedMapOf("ID" to user.id.toString())
+            o.optString("first_msg_date").takeIf { it.isNotBlank() }?.let { a["Первое сообщение"] = it }
+            o.optString("last_msg_date").takeIf { it.isNotBlank() }?.let { a["Последнее сообщение"] = it }
+            o.optInt("total_msg_count", 0).takeIf { it > 0 }?.let { a["Сообщений"] = it.toString() }
+            o.optInt("total_groups", 0).takeIf { it > 0 }?.let { a["Групп"] = it.toString() }
+            o.optInt("adm_in_groups", 0).takeIf { it > 0 }?.let { a["Админ в группах"] = it.toString() }
+            facts += raw(id, FactCategory.OTHER, "Telegram-активность", displayUser(user), subject, a, confirmed = true, note = "stats_min FREE")
+        }
+        fetchObj(id, key, "/users/${user.id}/stats")?.let { o ->
+            val a = linkedMapOf("ID" to user.id.toString())
+            o.optString("about").takeIf { it.isNotBlank() }?.let { a["О себе"] = it.take(300) }
+            o.optString("lang_code").takeIf { it.isNotBlank() }?.let { a["Язык"] = it }
+            o.optInt("stars_level", 0).takeIf { it > 0 }?.let { a["Stars level"] = it.toString() }
+            o.optInt("gift_count", 0).takeIf { it > 0 }?.let { a["Подарков"] = it.toString() }
+            val bd = listOf(o.optInt("birth_day",0), o.optInt("birth_month",0), o.optInt("birth_year",0)).filter { it > 0 }
+            if (bd.isNotEmpty()) a["День рождения"] = bd.joinToString(".")
+            facts += raw(id, FactCategory.PERSON, "Telegram-профиль (расширенный)", displayUser(user), subject, a, confirmed = true, note = "stats COST 1")
+        }
+        fetchArray(id, key, "/users/${user.id}/usernames")?.let { arr ->
+            for (i in 0 until minOf(arr.length(), 20)) {
+                val o = arr.optJSONObject(i) ?: continue
+                val name = o.optString("name").trim().removePrefix("@")
+                if (name.isBlank()) continue
+                facts += raw(id, FactCategory.PERSON, "История username", "@$name", subject,
+                    linkedMapOf("ID" to user.id.toString(), "Дата" to o.optString("date_time")), confirmed = true, note = "usernames COST 3")
             }
         }
-        return lastCode to lastBody
+        fetchArray(id, key, "/users/${user.id}/names")?.let { arr ->
+            for (i in 0 until minOf(arr.length(), 20)) {
+                val o = arr.optJSONObject(i) ?: continue
+                val name = o.optString("name").trim()
+                if (name.isBlank()) continue
+                facts += raw(id, FactCategory.PERSON, "История имени", name, subject,
+                    linkedMapOf("ID" to user.id.toString(), "Дата" to o.optString("date_time")), confirmed = true, note = "names COST 3")
+            }
+        }
+        fetchArray(id, key, "/users/${user.id}/groups")?.let { arr ->
+            for (i in 0 until minOf(arr.length(), 30)) {
+                val o = arr.optJSONObject(i) ?: continue
+                val chat = o.optJSONObject("chat") ?: continue
+                val title = chat.optString("title").ifBlank { chat.optString("username") }
+                if (title.isBlank()) continue
+                val attrs = linkedMapOf<String, String>()
+                chat.optLong("id").takeIf { it > 0 }?.let { attrs["Chat ID"] = it.toString() }
+                chat.optString("username").takeIf { it.isNotBlank() }?.let { attrs["Ник"] = "@${it}" }
+                o.optInt("messagesCount", 0).takeIf { it > 0 }?.let { attrs["Сообщений"] = it.toString() }
+                if (o.optBoolean("isAdmin", false)) attrs["Админ"] = "да"
+                facts += raw(id, FactCategory.OTHER, "Группа пользователя", title, subject, attrs,
+                    link = chat.optString("username").takeIf { it.isNotBlank() }?.let { "https://t.me/$it" }.orEmpty(),
+                    confirmed = true, note = "groups COST 5")
+            }
+        } ?: warnings.add("${label(id)}: группы пользователя недоступны/пусты")
+        return facts
+    }
+
+    private suspend fun groupFacts(id: String, key: String, gid: Long, subject: String, warnings: MutableList<String>): List<RawFact> {
+        val facts = ArrayList<RawFact>()
+        fetchObj(id, key, "/groups/$gid")?.let { o ->
+            // spec says 200 description only; try to parse common fields defensively
+            val attrs = linkedMapOf("ID" to gid.toString())
+            o.optString("title").takeIf { it.isNotBlank() }?.let { attrs["Название"] = it }
+            o.optString("username").takeIf { it.isNotBlank() }?.let { attrs["Ник"] = "@${it}" }
+            o.optInt("members_count", o.optInt("participants_count", 0)).takeIf { it > 0 }?.let { attrs["Участников"] = it.toString() }
+            val title = attrs["Название"] ?: attrs["Ник"] ?: "Группа $gid"
+            facts += raw(id, FactCategory.OTHER, "Telegram-чат", title, subject, attrs,
+                link = attrs["Ник"]?.removePrefix("@")?.let { "https://t.me/$it" }.orEmpty(), confirmed = true, note = "groups/{id} COST 0.01")
+        } ?: warnings.add("${label(id)}: детали группы недоступны")
+        return facts
+    }
+
+    private suspend fun groupStatsFacts(id: String, key: String, gid: Long, subject: String, warnings: MutableList<String>): List<RawFact> {
+        val facts = groupFacts(id, key, gid, subject, warnings).toMutableList()
+        // members endpoint is costly; include count-level hint only from group details. No separate stats endpoint.
+        warnings += "${label(id)}: отдельный endpoint статистики чата не указан; использованы доступные данные groups/{id}"
+        return facts
+    }
+
+    private suspend fun messageLinkFacts(id: String, key: String, input: TelegramRules.Result, warnings: MutableList<String>): List<RawFact> {
+        val facts = ArrayList<RawFact>()
+        val text = input.normalized
+        facts += raw(id, FactCategory.OTHER, "Ссылка на сообщение", text, text, linkedMapOf("Ссылка" to text), confirmed = true, note = "Входной идентификатор")
+        warnings += "${label(id)}: прямой endpoint получения сообщения по ссылке в публичной спецификации не найден; можно использовать text/search при наличии текста"
+        return facts
+    }
+
+    private suspend fun forwardedFacts(id: String, key: String, input: TelegramRules.Result, warnings: MutableList<String>): List<RawFact> {
+        val facts = ArrayList<RawFact>()
+        facts += raw(id, FactCategory.OTHER, "Пересланный контент", input.normalized, input.normalized, linkedMapOf("Ввод" to input.normalized.take(200)),
+            confirmed = false, note = "Требуется подтверждённый endpoint пересылок в API")
+        return facts
+    }
+
+    private suspend fun stickerFacts(id: String, key: String, input: TelegramRules.Result, warnings: MutableList<String>): List<RawFact> {
+        val facts = ArrayList<RawFact>()
+        val uid = input.normalized.filter { it.isDigit() }.toLongOrNull()
+        if (uid != null && input.normalized.trim().matches(Regex("\\d{5,15}"))) {
+            fetchArray(id, key, "/users/$uid/stickers")?.let { arr ->
+                for (i in 0 until minOf(arr.length(), 30)) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val title = o.optString("title").ifBlank { o.optString("short_name") }
+                    if (title.isBlank()) continue
+                    facts += raw(id, FactCategory.OTHER, "Стикерпак пользователя", title, input.normalized, linkedMapOf(
+                        "ID набора" to o.optString("sticker_set_id"),
+                        "Короткое имя" to o.optString("short_name"),
+                        "Стикеров" to o.optInt("stickers_count", 0).toString()
+                    ), confirmed = true, note = "stickers COST 1 if found")
+                }
+            }
+            if (facts.isEmpty()) warnings += "${label(id)}: стикерпаки не найдены для user ID"
+        } else {
+            warnings += "${label(id)}: поиск по файлу/ID стикера не поддерживается публичным API; укажите ID пользователя для stickers"
+            facts += raw(id, FactCategory.OTHER, "Стикер (ввод)", input.normalized.take(120), input.normalized, emptyMap(), confirmed = false, note = "Нужен endpoint по sticker/file id")
+        }
+        return facts
+    }
+
+    private fun raw(id: String, cat: FactCategory, kind: String, value: String, subject: String, attrs: Map<String, String>, link: String = "", confirmed: Boolean, note: String): RawFact =
+        RawFact(cat, kind, value, subject, attrs.filterValues { it.isNotBlank() }, id, 2, link, System.currentTimeMillis(), confirmed, note)
+
+    private fun displayUser(u: ResolvedUser): String {
+        val name = listOf(u.firstName, u.lastName).filter { it.isNotBlank() }.joinToString(" ")
+        return when {
+            name.isNotBlank() && u.username.isNotBlank() -> "$name (@${u.username})"
+            u.username.isNotBlank() -> "@${u.username}"
+            name.isNotBlank() -> name
+            else -> "ID ${u.id}"
+        }
+    }
+
+    private suspend fun fetchObj(id: String, key: String, path: String, params: Map<String, String> = emptyMap()): JSONObject? {
+        val (code, body) = get(id, key, path, params)
+        if (code == 401 || code == 403) throw ApiException(code, bodyMessage(code, body))
+        if (code !in 200..299) return null
+        return dataObj(body) ?: runCatching { JSONObject(body) }.getOrNull()
+    }
+
+    private suspend fun fetchArray(id: String, key: String, path: String, params: Map<String, String> = emptyMap()): JSONArray? {
+        val (code, body) = get(id, key, path, params)
+        if (code == 401 || code == 403) throw ApiException(code, bodyMessage(code, body))
+        if (code !in 200..299) return null
+        return dataArray(body)
+    }
+
+    private fun dataObj(body: String): JSONObject? = runCatching {
+        val root = JSONObject(body)
+        root.optJSONObject("data") ?: if (root.has("id") || root.has("title")) root else null
+    }.getOrNull()
+
+    private fun dataArray(body: String): JSONArray = runCatching {
+        val root = JSONObject(body)
+        root.optJSONArray("data") ?: JSONArray()
+    }.getOrDefault(JSONArray())
+
+    private suspend fun get(id: String, key: String, path: String, params: Map<String, String> = emptyMap()): Pair<Int, String> {
+        val q = params.filterValues { it.isNotBlank() }.entries.flatMap { (k, v) ->
+            if (v.contains(',')) v.split(',').map { it.trim() }.filter { it.isNotBlank() }.map { "${Net.urlEncode(k)}=${Net.urlEncode(it)}" }
+            else listOf("${Net.urlEncode(k)}=${Net.urlEncode(v)}")
+        }.joinToString("&")
+        val url = base(id) + path + if (q.isNotBlank()) "?$q" else ""
+        val resp = Net.fetch(url, headers(key), attempts = 1)
+        return resp.code to resp.body
     }
 
     private fun bodyMessage(code: Int, body: String): String {
         val json = runCatching { JSONObject(body) }.getOrNull()
-        val detail = json?.optString("detail").orEmpty().ifBlank { json?.optString("message").orEmpty() }
+        val detail = json?.optString("detail").orEmpty()
+            .ifBlank { json?.optString("title").orEmpty() }
+            .ifBlank { json?.optString("message").orEmpty() }
             .ifBlank { json?.optString("error").orEmpty() }
-        val base = when (code) {
-            401, 403 -> "Ключ отклонён сервисом"
+        val baseMsg = when (code) {
+            401, 403 -> "Ключ отклонён/нет доступа"
             429 -> "Превышен лимит запросов"
-            404 -> "Endpoint/объект не найден"
-            else -> "Ошибка сервиса: HTTP $code"
+            404 -> "Объект/endpoint не найден"
+            else -> "Ошибка API: HTTP $code"
         }
-        return if (detail.isNotBlank()) "$base ($detail)" else base
-    }
-
-    private fun parseFacts(id: String, body: String, input: TelegramRules.Result): List<RawFact> {
-        val root = runCatching { JSONObject(body) }.getOrNull() ?: return emptyList()
-        val facts = ArrayList<RawFact>()
-        collectObjects(root).forEach { obj ->
-            val title = obj.optString("title").ifBlank { obj.optString("name").ifBlank { obj.optString("full_name") } }
-            val username = obj.optString("username").trimStart('@')
-            val uid = obj.optString("id").ifBlank { obj.optString("user_id").ifBlank { obj.optString("chat_id") } }
-            val link = obj.optString("link").ifBlank { if (username.isNotBlank()) "https://t.me/$username" else "" }
-            val value = when {
-                title.isNotBlank() && username.isNotBlank() -> "$title (@$username)"
-                username.isNotBlank() -> "@$username"
-                title.isNotBlank() -> title
-                uid.isNotBlank() -> "ID $uid"
-                else -> null
-            } ?: return@forEach
-            val attrs = linkedMapOf<String, String>()
-            if (uid.isNotBlank()) attrs["ИД"] = uid
-            if (username.isNotBlank()) attrs["Ник"] = "@$username"
-            obj.optString("phone").takeIf { it.isNotBlank() }?.let { attrs["Телефон"] = it }
-            obj.optInt("members_count", obj.optInt("participants_count", 0)).takeIf { it > 0 }?.let { attrs["Участников"] = it.toString() }
-            obj.optInt("forwards_count", 0).takeIf { it > 0 }?.let { attrs["Пересылок"] = it.toString() }
-            obj.optString("last_online").takeIf { it.isNotBlank() }?.let { attrs["Последняя активность"] = it }
-            obj.optString("about").takeIf { it.isNotBlank() }?.let { attrs["Описание"] = it.take(200) }
-            if (link.isNotBlank()) attrs["Ссылка"] = link
-            val kind = when {
-                input.kind == TelegramRules.Kind.GROUP_STATS -> "Статистика чата"
-                input.kind == TelegramRules.Kind.CHANNEL_FORWARD_POST -> "Пересылка поста"
-                obj.has("members_count") || obj.has("participants_count") -> "Telegram-чат"
-                else -> "Telegram-профиль"
-            }
-            facts += RawFact(
-                category = if (kind.contains("чат") || kind.contains("Статистика")) FactCategory.OTHER else FactCategory.PERSON,
-                kind = kind,
-                value = value,
-                subject = input.normalized,
-                attributes = attrs,
-                sourceId = id,
-                weight = 2,
-                sourceUrl = link,
-                observedAt = System.currentTimeMillis(),
-                apiConfirmed = false,
-                note = "Telelog/Funstat: endpoint подтверждён не полностью, требуется спецификация API"
-            )
-        }
-        if (facts.isEmpty()) {
-            facts += RawFact(FactCategory.OTHER, "Ответ $id", input.normalized, input.normalized,
-                mapOf("Сводка" to DiagMask.text(body.take(300))), id, 1,
-                apiConfirmed = false, note = "Нестандартный ответ API, нужна проверка спецификации")
-        }
-        return facts.distinctBy { it.kind to it.value }
-    }
-
-    private fun collectObjects(root: JSONObject): List<JSONObject> {
-        val out = ArrayList<JSONObject>()
-        fun walk(v: Any?) {
-            when (v) {
-                is JSONObject -> {
-                    if (v.has("id") || v.has("username") || v.has("title") || v.has("name")) out += v
-                    v.keys().forEach { walk(v.opt(it)) }
-                }
-                is JSONArray -> for (i in 0 until v.length()) walk(v.opt(i))
-            }
-        }
-        walk(root)
-        return out.take(50)
+        return if (detail.isNotBlank()) "$baseMsg ($detail)" else baseMsg
     }
 }
