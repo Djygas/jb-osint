@@ -1,5 +1,6 @@
 package ru.jbosint.osint.data
 
+import org.json.JSONObject
 import ru.jbosint.osint.core.model.AggregatedData
 import ru.jbosint.osint.core.model.Fact
 import ru.jbosint.osint.core.model.FactCategory
@@ -7,6 +8,14 @@ import ru.jbosint.osint.core.model.RawFact
 import ru.jbosint.osint.core.model.SourceRef
 import ru.jbosint.osint.core.model.SearchStats
 import ru.jbosint.osint.core.report.Csv
+
+data class TgBackendReport(
+    val backend: String,
+    val endpoint: String,
+    val body: String,
+    val contentType: String = "application/json; charset=utf-8",
+    val extension: String = "json"
+)
 
 data class TgDossier(
     val input: String,
@@ -19,6 +28,7 @@ data class TgDossier(
     val hasMore: Boolean,
     val backends: List<String>,
     val warnings: List<String> = emptyList(),
+    val rawReports: List<TgBackendReport> = emptyList(),
     val collectedAt: Long = System.currentTimeMillis()
 ) {
     val truncated: Boolean get() = hasMore
@@ -52,6 +62,7 @@ object TgParser {
         val warnings = ArrayList<String>()
         val backends = ArrayList<String>()
         val members = ArrayList<TeleSint.Member>()
+        val rawReports = ArrayList<TgBackendReport>()
         var pagesLoaded = 0
         var hasMore = false
         val target = parsed.username.ifBlank { parsed.numericId.ifBlank { parsed.normalized } }
@@ -68,19 +79,19 @@ object TgParser {
         if (telesintKey.isNotBlank()) {
             onProgress("TeleSINT: запрос…")
             runBackend("TeleSINT") { collectTeleSint(telesintKey, parsed, maxPages, pageSize, onProgress) }
-                .onSuccess { res -> facts += res.facts; members += res.members; pagesLoaded = maxOf(pagesLoaded, res.pagesLoaded); hasMore = hasMore || res.hasMore; backends += "TeleSINT" }
+                .onSuccess { res -> facts += res.facts; members += res.members; rawReports += res.rawReports; pagesLoaded = maxOf(pagesLoaded, res.pagesLoaded); hasMore = hasMore || res.hasMore; backends += "TeleSINT" }
                 .onFailure { e -> warnings += "TeleSINT: ${e.message ?: "ошибка"}" }
         }
         if (telelogKey.isNotBlank()) {
             onProgress("Telelog: запрос…")
             runBackend("Telelog") { TelelogLike.queryDetailed("telelog", telelogKey, parsed) }
-                .onSuccess { res -> facts += res.facts; warnings += res.warnings; if (res.facts.isNotEmpty()) backends += "Telelog" }
+                .onSuccess { res -> facts += res.facts; warnings += res.warnings; rawReports += res.rawReports.map { TgBackendReport("Telelog", it.endpoint, it.body) }; if (res.facts.isNotEmpty() || res.rawReports.isNotEmpty()) backends += "Telelog" }
                 .onFailure { e -> warnings += "Telelog: ${e.message ?: "ошибка"}" }
         }
         if (funstatKey.isNotBlank()) {
             onProgress("Funstat: запрос…")
             runBackend("Funstat") { TelelogLike.queryDetailed("funstat", funstatKey, parsed) }
-                .onSuccess { res -> facts += res.facts; warnings += res.warnings; if (res.facts.isNotEmpty()) backends += "Funstat" }
+                .onSuccess { res -> facts += res.facts; warnings += res.warnings; rawReports += res.rawReports.map { TgBackendReport("Funstat", it.endpoint, it.body) }; if (res.facts.isNotEmpty() || res.rawReports.isNotEmpty()) backends += "Funstat" }
                 .onFailure { e -> warnings += "Funstat: ${e.message ?: "ошибка"}" }
         }
 
@@ -127,46 +138,63 @@ object TgParser {
             pagesLoaded = pagesLoaded,
             hasMore = hasMore,
             backends = backends.distinct(),
-            warnings = warnings.distinct()
+            warnings = warnings.distinct(),
+            rawReports = rawReports
         )
     }
 
-    private data class TsRes(val facts: List<RawFact>, val members: List<TeleSint.Member>, val pagesLoaded: Int, val hasMore: Boolean)
+    private data class TsRes(val facts: List<RawFact>, val members: List<TeleSint.Member>, val pagesLoaded: Int, val hasMore: Boolean, val rawReports: List<TgBackendReport> = emptyList())
 
     private suspend fun collectTeleSint(
         key: String, parsed: TelegramRules.Result, maxPages: Int, pageSize: Int, onProgress: (String) -> Unit
     ): TsRes {
         val facts = ArrayList<RawFact>()
         val members = ArrayList<TeleSint.Member>()
+        val rawReports = ArrayList<TgBackendReport>()
         val id = parsed.username.ifBlank { parsed.numericId.ifBlank { parsed.normalized } }
         when (parsed.kind) {
             TelegramRules.Kind.USERNAME, TelegramRules.Kind.USER_ID, TelegramRules.Kind.CONTACT_OR_RECENT -> {
-                facts += TeleSint.search(key, id, limit = 20)
+                val sraw = runCatching { TeleSint.searchRaw(key, id, limit = 20) }.getOrNull()
+                if (sraw != null) { rawReports += TgBackendReport("TeleSINT", sraw.endpoint, sraw.body); facts += TeleSint.searchFacts(sraw.root, id) }
                 if (parsed.username.isNotBlank() || parsed.numericId.isNotBlank()) {
-                    runCatching { TeleSint.user(key, id) }.onSuccess { facts += it }
+                    runCatching { TeleSint.userRaw(key, id) }.onSuccess { raw ->
+                        rawReports += TgBackendReport("TeleSINT", raw.endpoint, raw.body)
+                        facts += TeleSint.userFacts(TeleSint.payload(raw.root) ?: JSONObject(), id)
+                    }
                 }
             }
             TelegramRules.Kind.GROUP, TelegramRules.Kind.GROUP_ID, TelegramRules.Kind.GROUP_STATS -> {
-                runCatching { TeleSint.group(key, id) }.onSuccess { facts += it }
+                runCatching { TeleSint.groupRaw(key, id) }.onSuccess { raw ->
+                    rawReports += TgBackendReport("TeleSINT", raw.endpoint, raw.body)
+                    facts += TeleSint.groupFacts(TeleSint.payload(raw.root) ?: JSONObject())
+                }
                 var page = 1
                 val limit = maxPages.coerceIn(1, 20)
                 var hasMore = false
                 while (page <= limit) {
                     onProgress("TeleSINT: участники $page/$limit…")
-                    val chunk = TeleSint.members(key, id, page, pageSize)
+                    val mraw = TeleSint.membersRaw(key, id, page, pageSize)
+                    rawReports += TgBackendReport("TeleSINT", mraw.endpoint, mraw.body)
+                    val chunk = TeleSint.memberPageOf(mraw.root, page, pageSize.coerceIn(1, TeleSint.MAX_PAGE_SIZE))
                     if (chunk.members.isEmpty()) break
                     members += chunk.members
                     hasMore = chunk.hasNext
                     if (!hasMore) break
                     page++
                 }
-                return TsRes(facts, members, page, hasMore)
+                return TsRes(facts, members, page, hasMore, rawReports)
             }
             TelegramRules.Kind.MESSAGE_LINK, TelegramRules.Kind.FORWARDED_GROUP_MESSAGE, TelegramRules.Kind.CHANNEL_FORWARD_POST -> {
                 if (parsed.username.isNotBlank() || parsed.numericId.isNotBlank()) {
-                    runCatching { TeleSint.group(key, id) }.onSuccess { facts += it }
+                    runCatching { TeleSint.groupRaw(key, id) }.onSuccess { raw ->
+                        rawReports += TgBackendReport("TeleSINT", raw.endpoint, raw.body)
+                        facts += TeleSint.groupFacts(TeleSint.payload(raw.root) ?: JSONObject())
+                    }
                 }
-                facts += TeleSint.search(key, parsed.normalized.take(120), limit = 20)
+                runCatching { TeleSint.searchRaw(key, parsed.normalized.take(120), limit = 20) }.onSuccess { raw ->
+                    rawReports += TgBackendReport("TeleSINT", raw.endpoint, raw.body)
+                    facts += TeleSint.searchFacts(raw.root, parsed.normalized)
+                }
                 facts += RawFact(FactCategory.OTHER, "Вход: сообщение/пересылка", parsed.normalized, id,
                     mapOf("Тип" to parsed.kind.name, "Комментарий" to "Точный разбор пересылок зависит от поддержки API бэкенда"),
                     "telesint", 1, apiConfirmed = false,
@@ -177,11 +205,14 @@ object TgParser {
                     mapOf("Комментарий" to "Поиск автора/контекста стикера выполняется через доступные API бэкенды"),
                     "telesint", 1, apiConfirmed = false,
                     note = "Нужна подтверждённая спецификация API для стикеров")
-                facts += TeleSint.search(key, id, limit = 20)
+                runCatching { TeleSint.searchRaw(key, id, limit = 20) }.onSuccess { raw ->
+                    rawReports += TgBackendReport("TeleSINT", raw.endpoint, raw.body)
+                    facts += TeleSint.searchFacts(raw.root, id)
+                }
             }
             TelegramRules.Kind.INVALID -> {}
         }
-        return TsRes(facts, members, 0, false)
+        return TsRes(facts, members, 0, false, rawReports)
     }
 
     private fun privacyFacts(parsed: TelegramRules.Result): List<RawFact> {
@@ -267,6 +298,30 @@ object TgExport {
             }
         }
         return Csv.BOM + Csv.of(rows)
+    }
+
+    fun rawJson(dossier: TgDossier): String {
+        val root = org.json.JSONObject()
+        root.put("input", dossier.input)
+        root.put("kind", dossier.kind.name)
+        root.put("title", dossier.title)
+        root.put("username", dossier.username)
+        root.put("collectedAt", dossier.collectedAt)
+        root.put("backends", org.json.JSONArray(dossier.backends))
+        root.put("warnings", org.json.JSONArray(dossier.warnings))
+        val reports = org.json.JSONArray()
+        dossier.rawReports.forEach { r ->
+            reports.put(org.json.JSONObject().apply {
+                put("backend", r.backend)
+                put("endpoint", r.endpoint)
+                put("contentType", r.contentType)
+                put("body", runCatching { org.json.JSONObject(r.body) }.getOrElse {
+                    runCatching { org.json.JSONArray(r.body) }.getOrElse { r.body }
+                })
+            })
+        }
+        root.put("rawReports", reports)
+        return root.toString(2)
     }
 
     fun fileName(dossier: TgDossier, extension: String): String {
