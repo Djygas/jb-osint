@@ -225,17 +225,25 @@ def _contradictions(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 @app.post("/ai/analyze", dependencies=[Depends(require_key)])
 async def analyze(req: AnalyzeRequest) -> dict[str, Any]:
-    """Cross-check фактов. Всё, что уходит наружу, предварительно маскируется."""
+    """
+    Cross-check фактов. Проверка локальная (правила, без LLM), наружу ничего не уходит,
+    поэтому противоречия ищем по исходным фактам: маскирование до сравнения скрывало бы
+    разницу между двумя почтами или телефонами. Маскирование остаётся обязательным
+    перед любым вызовом внешней LLM (ALLOW_EXTERNAL_LLM=1).
+    """
     facts = req.facts if isinstance(req.facts, list) else [req.facts]
-    safe = mask_json(facts)
-    findings = _contradictions(safe if isinstance(safe, list) else [safe])
+    findings = _contradictions(facts)
+    question = req.question
+    if settings.allow_external_llm and settings.openai_api_key:
+        # На будущее: в LLM уходит только замаскированная версия.
+        question = mask_json(question)
     return {
         "contradictions": findings,
         "notes": [
             "Противоречий не найдено" if not findings else f"Найдено противоречий: {len(findings)}"
         ],
         "provider": "local-rules",
-        "question": mask_json(req.question) if req.question else None,
+        "question": question,
     }
 
 

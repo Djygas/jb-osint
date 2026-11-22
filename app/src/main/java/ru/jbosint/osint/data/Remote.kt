@@ -1,8 +1,26 @@
 package ru.jbosint.osint.data
 
+import org.json.JSONArray
 import org.json.JSONObject
+import ru.jbosint.osint.core.model.Fact
 
 data class ServerHealth(val online: Boolean, val detail: String)
+
+/** Факт в формате серверной сверки: объект, поле, значение, источник. */
+data class AnalyzeFact(
+    val subject: String,
+    val field: String,
+    val value: String,
+    val source: String = ""
+)
+
+data class Contradiction(val subject: String, val field: String, val values: List<String>)
+
+data class AnalyzeResult(
+    val contradictions: List<Contradiction>,
+    val notes: List<String>,
+    val provider: String
+)
 
 /** Текст документа, извлечённый на сервере (MarkItDown/pypdf). */
 data class ExtractedDoc(val text: String, val chars: Int, val provider: String)
@@ -128,6 +146,95 @@ object Remote {
             via = if (rendered) RENDER_VIA else SERVER_VIA
         )
     }
+
+    /**
+     * Сверка фактов на сервере: ищет разные значения одного поля у одного объекта.
+     * PII маскируется на сервере до любого анализа; внешняя LLM по умолчанию выключена.
+     */
+    suspend fun analyze(
+        base: String,
+        key: String,
+        facts: List<AnalyzeFact>,
+        question: String? = null
+    ): AnalyzeResult {
+        val array = JSONArray()
+        facts.forEach { fact ->
+            array.put(
+                JSONObject()
+                    .put("object", fact.subject)
+                    .put("field", fact.field)
+                    .put("value", fact.value)
+                    .put("source", fact.source)
+            )
+        }
+        val body = JSONObject().put("facts", array)
+        if (!question.isNullOrBlank()) body.put("question", question.take(300))
+        val headers = if (key.isBlank()) emptyMap() else mapOf("X-API-Key" to key)
+        val response = Net.fetch(
+            "$base/ai/analyze",
+            headers,
+            attempts = 1,
+            method = "POST",
+            body = body.toString()
+        )
+        if (!response.ok) error("HTTP ${response.code}: ${response.body.take(200)}")
+        return parseAnalyze(response.body)
+    }
+
+    /** Разбор ответа `/ai/analyze` — вынесен из сети под тест. */
+    fun parseAnalyze(raw: String): AnalyzeResult {
+        val json = JSONObject(raw)
+        val list = json.optJSONArray("contradictions")
+        val contradictions = ArrayList<Contradiction>()
+        if (list != null) {
+            for (index in 0 until list.length()) {
+                val item = list.optJSONObject(index) ?: continue
+                val values = item.optJSONArray("values")
+                val parsed = ArrayList<String>()
+                if (values != null) {
+                    for (position in 0 until values.length()) {
+                        values.optString(position).takeIf { it.isNotBlank() }?.let(parsed::add)
+                    }
+                }
+                contradictions += Contradiction(
+                    subject = item.optString("object"),
+                    field = item.optString("field"),
+                    values = parsed
+                )
+            }
+        }
+        val notesArray = json.optJSONArray("notes")
+        val notes = ArrayList<String>()
+        if (notesArray != null) {
+            for (index in 0 until notesArray.length()) {
+                notesArray.optString(index).takeIf { it.isNotBlank() }?.let(notes::add)
+            }
+        }
+        return AnalyzeResult(
+            contradictions = contradictions,
+            notes = notes,
+            provider = json.optString("provider").ifBlank { "local-rules" }
+        )
+    }
+
+    /**
+     * Факты для сверки: объект — subject, поле — kind, значение — value.
+     * Берём не больше [limit], чтобы запрос оставался компактным.
+     */
+    fun analyzeFacts(facts: List<Fact>, limit: Int = 400): List<AnalyzeFact> = facts
+        .asSequence()
+        .filter { it.value.isNotBlank() }
+        .map { fact ->
+            AnalyzeFact(
+                subject = fact.subject.ifBlank { fact.value.take(60) },
+                field = fact.kind.ifBlank { fact.category.name },
+                value = fact.value,
+                source = fact.sourceIds.firstOrNull().orEmpty()
+            )
+        }
+        .distinct()
+        .take(limit)
+        .toList()
 
     const val SERVER_VIA = "server"
 

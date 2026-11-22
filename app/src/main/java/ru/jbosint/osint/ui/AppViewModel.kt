@@ -55,6 +55,7 @@ import ru.jbosint.osint.data.CustomModule
 import ru.jbosint.osint.data.CustomModuleChecker
 import ru.jbosint.osint.data.AutoSetup
 import ru.jbosint.osint.data.Connectors
+import ru.jbosint.osint.data.AnalyzeResult
 import ru.jbosint.osint.data.DocHit
 import ru.jbosint.osint.data.DocRecord
 import ru.jbosint.osint.data.DocSearch
@@ -339,7 +340,9 @@ data class UiState(
     val server: ServerUi = ServerUi(),
     val raeServer: RaeServerUi = RaeServerUi(),
     // ------------------------------------------------------------ документы досье
-    val docs: DocsUi = DocsUi()
+    val docs: DocsUi = DocsUi(),
+    // ------------------------------------------------------------ сверка фактов
+    val crossCheck: CrossCheckUi = CrossCheckUi()
 ) {
     /** Управление ключами, модулями и настройками доступно только администратору. */
     val canManage: Boolean
@@ -350,6 +353,15 @@ data class UiState(
     val activeModules: Int
         get() = providers.count { it.enabled && it.hasKey } + customModules.count { it.enabled && (it.hasKey || it.auth == CustomAuth.NONE) }
 }
+
+/** Сверка фактов на сервере: поиск противоречий по одному полю. */
+data class CrossCheckUi(
+    val open: Boolean = false,
+    val busy: Boolean = false,
+    val facts: Int = 0,
+    val result: AnalyzeResult? = null,
+    val error: String? = null
+)
 
 /** Раздел «Документы»: локальное досье и полнотекстовый поиск по нему. */
 data class DocsUi(
@@ -3840,6 +3852,74 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    // ------------------------------------------------------------- сверка фактов
+
+    fun openCrossCheck() {
+        val data = _state.value.result
+        if (data == null) {
+            _state.update { it.copy(toast = "Сначала выполните поиск") }
+            return
+        }
+        val facts = Remote.analyzeFacts(data.facts)
+        _state.update {
+            it.copy(
+                crossCheck = it.crossCheck.copy(
+                    open = true,
+                    busy = false,
+                    facts = facts.size,
+                    result = null,
+                    error = null
+                )
+            )
+        }
+    }
+
+    fun closeCrossCheck() = _state.update { it.copy(crossCheck = it.crossCheck.copy(open = false)) }
+
+    fun runCrossCheck() {
+        val data = _state.value.result ?: return
+        val base = settings.serverUrl
+        if (!settings.serverEnabled || base.isBlank()) {
+            _state.update {
+                it.copy(
+                    crossCheck = it.crossCheck.copy(
+                        error = "Серверный режим выключен — включите сервер в настройках"
+                    )
+                )
+            }
+            return
+        }
+        val facts = Remote.analyzeFacts(data.facts)
+        if (facts.isEmpty()) {
+            _state.update { it.copy(crossCheck = it.crossCheck.copy(error = "Нет фактов для сверки")) }
+            return
+        }
+        viewModelScope.launch {
+            _state.update {
+                it.copy(crossCheck = it.crossCheck.copy(busy = true, error = null, facts = facts.size))
+            }
+            val outcome = runCatching {
+                withContext(Dispatchers.IO) {
+                    Remote.analyze(base, secure.get("server_key").orEmpty(), facts)
+                }
+            }
+            outcome.onSuccess { result ->
+                _state.update { it.copy(crossCheck = it.crossCheck.copy(busy = false, result = result)) }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        crossCheck = it.crossCheck.copy(
+                            busy = false,
+                            error = error.message ?: "Сверка не удалась"
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- документы досье
 
     private fun displayName(uri: Uri): String? = runCatching {
         getApplication<Application>().contentResolver

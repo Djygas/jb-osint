@@ -85,3 +85,27 @@ def test_rae_without_har_and_without_cli_is_503():
         json={"url": "https://api.example.com", "prompt": "test", "mode": "agent"},
     )
     assert response.status_code in (400, 503)
+
+
+def test_analyze_accepts_empty_facts():
+    response = client.post("/ai/analyze", json={"facts": []})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["contradictions"] == []
+    assert data["provider"] == "local-rules"
+
+
+def test_analyze_detects_contradictions_in_pii_fields():
+    response = client.post(
+        "/ai/analyze",
+        json={
+            "facts": [
+                {"object": "Иванов", "field": "email", "value": "ivan@example.com"},
+                {"object": "Иванов", "field": "email", "value": "ivan2@example.com"},
+            ]
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["contradictions"]) == 1
+    assert sorted(data["contradictions"][0]["values"]) == ["ivan2@example.com", "ivan@example.com"]

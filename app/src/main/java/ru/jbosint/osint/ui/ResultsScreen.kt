@@ -78,6 +78,7 @@ private fun categoryColor(category: FactCategory): Color = when (category) {
 
 @Composable
 fun ResultsScreen(state: UiState, vm: AppViewModel) {
+    if (state.crossCheck.open) CrossCheckDialog(state, vm)
     val context = LocalContext.current
     var pending by remember { mutableStateOf<ReportExporter.Format?>(null) }
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -268,6 +269,8 @@ fun ResultsScreen(state: UiState, vm: AppViewModel) {
         }
 
         item { ExportCard(state.exporting, onExport = ::requestExport, onProfile = vm::openProfileFromLastResult) }
+
+        item { CrossCheckCard(state, vm) }
 
         item {
             Row(
