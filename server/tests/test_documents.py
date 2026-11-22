@@ -82,3 +82,56 @@ def test_endpoint_rejects_empty_body():
         headers={"content-type": "application/octet-stream"},
     )
     assert response.status_code == 400
+
+
+def blank_pdf() -> bytes:
+    """PDF без текстового слоя — имитация скана."""
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=595, height=842)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+def test_scanned_pdf_falls_back_to_ocr(monkeypatch):
+    monkeypatch.setattr("app.documents.ocr_available", lambda: True)
+    monkeypatch.setattr(
+        "app.documents.ocr_pdf",
+        lambda data, lang="rus+eng", max_pages=12: "Распознанный текст скана",
+    )
+    result = extract_document(blank_pdf(), "scan.pdf")
+    assert result["provider"] == "ocr"
+    assert "Распознанный" in result["text"]
+
+
+def test_scan_without_tesseract_is_rejected(monkeypatch):
+    monkeypatch.setattr("app.documents.ocr_available", lambda: False)
+    try:
+        extract_document(blank_pdf(), "scan.pdf")
+    except UnsupportedDocument as exc:
+        assert "tesseract" in str(exc)
+    else:  # pragma: no cover - защита от тихого пропуска
+        raise AssertionError("ожидался отказ без tesseract")
+
+
+def test_image_scan_goes_to_ocr(monkeypatch):
+    monkeypatch.setattr("app.documents.ocr_available", lambda: True)
+    monkeypatch.setattr(
+        "app.documents.ocr_image", lambda data, lang="rus+eng": "Скан квитанции"
+    )
+    result = extract_document(b"\x89PNG\r\n\x1a\n fake", "receipt.png")
+    assert result["provider"] == "ocr"
+    assert "квитанции" in result["text"]
+
+
+def test_text_pdf_does_not_run_ocr(monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("OCR не должен запускаться для текстового PDF")
+
+    monkeypatch.setattr("app.documents.from_pdf", lambda data: "Договор аренды помещения " * 5)
+    monkeypatch.setattr("app.documents.ocr_pdf", boom)
+    result = extract_document(b"%PDF-1.4 fake", "contract.pdf")
+    assert result["provider"] == "pypdf"
+    assert "Договор" in result["text"]

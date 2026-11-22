@@ -122,6 +122,13 @@ object DocumentText {
         }
     }
 
+    /** Метка источника текста: локальный разбор, сервер или OCR скана. */
+    fun providerTag(provider: String): String = when (provider) {
+        "server" -> "сервер"
+        "ocr" -> "OCR"
+        else -> "локально"
+    }
+
     fun mimeFor(fileName: String): String = when (extension(fileName)) {
         "pdf" -> "application/pdf"
         "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"

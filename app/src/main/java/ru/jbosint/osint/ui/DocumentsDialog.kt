@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import ru.jbosint.osint.data.DocHit
+import ru.jbosint.osint.data.DocumentText
 import ru.jbosint.osint.data.DocRecord
 
 /**
@@ -269,7 +270,7 @@ private fun DocRow(doc: DocRecord, onDelete: () -> Unit) {
         }
         Spacer(Modifier.width(6.dp))
         Text(
-            if (doc.provider == "server") "сервер" else "локально",
+            DocumentText.providerTag(doc.provider),
             style = MaterialTheme.typography.labelSmall,
             color = JbFaint
         )

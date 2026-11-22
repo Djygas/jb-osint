@@ -95,6 +95,13 @@ class DocumentsTest {
     }
 
     @Test
+    fun providerTagsAreReadable() {
+        assertEquals("локально", DocumentText.providerTag("local"))
+        assertEquals("сервер", DocumentText.providerTag("server"))
+        assertEquals("OCR", DocumentText.providerTag("ocr"))
+    }
+
+    @Test
     fun serverAnswerIsParsed() {
         val doc = Remote.parseExtract(
             """{"filename":"a.pdf","chars":5,"provider":"pypdf","text":"Текст"}"""

@@ -3791,7 +3791,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                 )
                             }.onSuccess { extracted ->
                                 text = extracted.text.trim()
-                                provider = "server"
+                                // Сервер сам говорит, что это было: OCR скана или обычный разбор.
+                                provider = if (extracted.provider == "ocr") "ocr" else "server"
                             }.onFailure { error ->
                                 note = "Сервер: ${error.message ?: "текст не извлечён"}"
                             }

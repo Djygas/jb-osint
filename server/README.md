@@ -73,7 +73,7 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/rae/generate \
 - `/scrape` не исполняет JavaScript и не обходит Cloudflare — для этого отдельный
   `scrapling-worker` (Playwright) по ТЗ, он не входит в этот образ.
 - Rate limit — в памяти процесса (10 rps на IP). Для нескольких реплик нужен Redis.
-- PDF/OCR и MarkItDown остаются на Termux/отдельном сервисе.
+- PDF и сканы разбираются этим же сервисом: pypdf/MarkItDown для текстового слоя, tesseract для сканов.
 
 ## Проверки
 
@@ -83,3 +83,17 @@ pytest -q
 
 Тесты покрывают маскирование (email/phone/IP/токены/заголовки), RAE-эндпоинт
 (`script_path`, `usage`, отсутствие PII в сгенерированном коде) и cross-check.
+
+### OCR сканов
+
+Если в PDF нет текстового слоя (скан) или пришла картинка, сервер распознаёт страницы
+через tesseract (`rus+eng`, до 12 страниц, 200 dpi). Нужны системный бинарник и
+pytesseract/PyMuPDF из `requirements.txt`:
+
+```bash
+apt-get install -y tesseract-ocr tesseract-ocr-rus   # Termux: pkg install tesseract
+pip install -r requirements.txt
+```
+
+Без tesseract сервер честно отвечает 415 «Скан без текстового слоя: нужен OCR» — текст
+не подменяется. В ответе `provider=ocr` означает распознавание, `pypdf` — родной слой PDF.
