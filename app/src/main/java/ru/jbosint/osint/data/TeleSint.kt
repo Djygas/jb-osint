@@ -63,6 +63,8 @@ object TeleSint {
         }
     }
 
+    data class RawResponse(val endpoint: String, val body: String, val root: JSONObject)
+
     /** Бесплатная проверка токена: баланс, логин, роли. */
     suspend fun account(key: String): Account {
         val root = request("$BASE/me/", key)
@@ -76,29 +78,37 @@ object TeleSint {
         )
     }
 
+    suspend fun userRaw(key: String, identifier: String): RawResponse {
+        val url = "$BASE/users/${Net.urlEncode(identifier.trimStart('@'))}"
+        val resp = requestRaw(url, key)
+        return RawResponse(url, resp.body, resp.json ?: JSONObject())
+    }
+
     /** Карточка пользователя Telegram по @username, ID или телефону. */
     suspend fun user(key: String, identifier: String): List<RawFact> {
-        val data = payload(request("$BASE/users/${Net.urlEncode(identifier.trimStart('@'))}", key))
-            ?: return emptyList()
+        val raw = userRaw(key, identifier)
+        val data = payload(raw.root) ?: return emptyList()
         return userFacts(data, identifier)
     }
 
-    /** Похожие пользователи (по аватару/нику/связям) — бесплатное расширение карточки. */
-    suspend fun similarUsers(key: String, identifier: String): List<RawFact> {
-        val root = request("$BASE/users/${Net.urlEncode(identifier.trimStart('@'))}/similar", key)
-        return items(root).flatMap { userFacts(it, identifier) }
+    suspend fun groupRaw(key: String, identifier: String): RawResponse {
+        val url = "$BASE/groups/${Net.urlEncode(identifier.trimStart('@'))}"
+        val resp = requestRaw(url, key)
+        return RawResponse(url, resp.body, resp.json ?: JSONObject())
     }
 
     /** Карточка канала или чата. */
     suspend fun group(key: String, identifier: String): List<RawFact> {
-        val data = payload(request("$BASE/groups/${Net.urlEncode(identifier.trimStart('@'))}", key))
-            ?: return emptyList()
+        val raw = groupRaw(key, identifier)
+        val data = payload(raw.root) ?: return emptyList()
         return groupFacts(data)
     }
 
-    suspend fun similarGroups(key: String, identifier: String): List<RawFact> {
-        val root = request("$BASE/groups/${Net.urlEncode(identifier.trimStart('@'))}/similar", key)
-        return items(root).flatMap { groupFacts(it) }
+    suspend fun membersRaw(key: String, identifier: String, page: Int = 1, pageSize: Int = 200): RawResponse {
+        val size = pageSize.coerceIn(1, MAX_PAGE_SIZE)
+        val url = "$BASE/groups/${Net.urlEncode(identifier.trimStart('@'))}/members?page=$page&page_size=$size"
+        val resp = requestRaw(url, key)
+        return RawResponse(url, resp.body, resp.json ?: JSONObject())
     }
 
     /**
@@ -111,10 +121,8 @@ object TeleSint {
         page: Int = 1,
         pageSize: Int = 200
     ): MemberPage {
-        val size = pageSize.coerceIn(1, MAX_PAGE_SIZE)
-        val url = "$BASE/groups/${Net.urlEncode(identifier.trimStart('@'))}/members" +
-            "?page=$page&page_size=$size"
-        return memberPageOf(request(url, key), page, size)
+        val raw = membersRaw(key, identifier, page, pageSize)
+        return memberPageOf(raw.root, page, pageSize.coerceIn(1, MAX_PAGE_SIZE))
     }
 
     /** Разбор ответа `/groups/{id}/members` — вынесен отдельно, чтобы покрыть тестом. */
@@ -142,14 +150,15 @@ object TeleSint {
         )
     }
 
-    /** Поиск пользователей и групп по запросу (без полных карточек). */
-    suspend fun search(key: String, query: String, limit: Int = 20): List<RawFact> {
+    suspend fun searchRaw(key: String, query: String, limit: Int = 20): RawResponse {
         val url = "$BASE/search/?query=${Net.urlEncode(query)}&limit=${limit.coerceIn(1, 100)}"
-        val root = runCatching { request(url, key) }.getOrElse { error ->
-            if (error is ApiException && error.code == 400) return emptyList() else throw error
-        }
+        val resp = requestRaw(url, key)
+        return RawResponse(url, resp.body, resp.json ?: JSONObject())
+    }
+
+    internal fun searchFacts(root: JSONObject, query: String): List<RawFact> {
         val facts = ArrayList<RawFact>()
-        val users = root.optJSONArray("users") ?: JSONObject(root.toString()).optJSONArray("users")
+        val users = root.optJSONArray("users")
         if (users != null) for (i in 0 until users.length()) {
             users.optJSONObject(i)?.let { facts += userFacts(it, query) }
         }
@@ -163,9 +172,17 @@ object TeleSint {
         return facts.distinctBy { it.kind to it.value }
     }
 
+    /** Поиск пользователей и групп по запросу (без полных карточек). */
+    suspend fun search(key: String, query: String, limit: Int = 20): List<RawFact> {
+        val raw = runCatching { searchRaw(key, query, limit) }.getOrElse { error ->
+            if (error is ApiException && error.code == 400) return emptyList() else throw error
+        }
+        return searchFacts(raw.root, query)
+    }
+
     // ------------------------------------------------------------ разбор ответов
 
-    private fun userFacts(data: JSONObject, query: String): List<RawFact> {
+    internal fun userFacts(data: JSONObject, query: String): List<RawFact> {
         val id = data.optString("id").ifBlank { data.optString("user_id") }
         val username = data.optString("username").ifBlank {
             data.optString("usernames").trim().trim('[', ']', '"')
@@ -240,7 +257,7 @@ object TeleSint {
         return facts
     }
 
-    private fun groupFacts(data: JSONObject): List<RawFact> {
+    internal fun groupFacts(data: JSONObject): List<RawFact> {
         val title = data.optString("title").ifBlank { data.optString("name") }
         val username = data.optString("username").trimStart('@')
         val id = data.optString("id").ifBlank { data.optString("group_id") }
@@ -297,7 +314,9 @@ object TeleSint {
 
     // ------------------------------------------------------------ транспорт
 
-    private suspend fun request(url: String, key: String): JSONObject {
+    private data class RawHttp(val body: String, val json: JSONObject?)
+
+    private suspend fun requestRaw(url: String, key: String): RawHttp {
         if (key.isBlank()) throw ApiException(401, "Ключ TeleSINT не задан")
         val response = Net.fetch(
             url,
@@ -308,8 +327,10 @@ object TeleSint {
         if (response.code !in 200..299) {
             throw ApiException(response.code, messageFor(response.code, parsed))
         }
-        return parsed ?: throw ApiException(response.code, "Некорректный ответ сервиса")
+        return RawHttp(response.body, parsed ?: throw ApiException(response.code, "Некорректный ответ сервиса"))
     }
+
+    private suspend fun request(url: String, key: String): JSONObject = requestRaw(url, key).json!!
 
     private fun messageFor(code: Int, body: JSONObject?): String {
         val detail = body?.optString("detail").orEmpty()
@@ -328,12 +349,13 @@ object TeleSint {
     }
 
     /** Разворачивает конверт `{"data": ...}` / `{"result": ...}`. */
-    private fun payload(root: JSONObject): JSONObject? {
+    internal fun payload(root: JSONObject?): JSONObject? {
+        val r = root ?: return null
         for (key in listOf("data", "result", "user", "group")) {
-            val nested = root.optJSONObject(key)
+            val nested = r.optJSONObject(key)
             if (nested != null) return nested
         }
-        return if (root.has("id") || root.has("username") || root.has("title")) root else null
+        return if (r.has("id") || r.has("username") || r.has("title")) r else null
     }
 
     /** Список объектов из `data.items`, `data`, `results`, `users`, `groups`. */

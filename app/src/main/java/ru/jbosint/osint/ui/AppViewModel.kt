@@ -171,7 +171,8 @@ enum class TgFormat(val extension: String, val mime: String, val label: String) 
         "xlsx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "Excel"
-    )
+    ),
+    RAW_JSON("json", "application/json", "Raw JSON")
 }
 
 /** Краткая карточка снимка, по которому выполняется или выполнен поиск. */
@@ -2548,14 +2549,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val bytes = runCatching {
                 when (format) {
                     TgFormat.HTML -> {
-                        val intro = "Канал ${dossier.title} (${dossier.link}): " +
-                            "загружено ${dossier.members.size} участников за ${dossier.pagesLoaded} стр." +
-                            if (dossier.hasMore) ", выгрузка неполная — увеличьте число страниц." else "."
-                        HtmlReport(meta, TgExport.data(dossier), intro = intro, factsTitle = "Профиль канала и аудитория")
+                        val intro = "Объект ${dossier.title} (${dossier.link}): " +
+                            "фактов ${dossier.facts.size}, участников ${dossier.members.size}, бэкенды ${dossier.backends.joinToString()}." +
+                            if (dossier.hasMore) " Выгрузка неполная — увеличьте число страниц." else ""
+                        HtmlReport(meta, TgExport.data(dossier), intro = intro, factsTitle = "Результат Telegram-парсера")
                             .build().toByteArray(Charsets.UTF_8)
                     }
                     TgFormat.CSV -> TgExport.csv(dossier).toByteArray(Charsets.UTF_8)
                     TgFormat.XLSX -> XlsxReport(meta, TgExport.data(dossier)).build()
+                    TgFormat.RAW_JSON -> TgExport.rawJson(dossier).toByteArray(Charsets.UTF_8)
                 }
             }
             _state.update { it.copy(tg = it.tg.copy(exporting = false)) }

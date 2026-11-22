@@ -145,6 +145,10 @@ fun TelegramScreen(state: UiState, vm: AppViewModel) {
                     ExportButton("CSV", tg.exporting) { vm.exportTelegram(TgFormat.CSV) }
                     ExportButton("Excel", tg.exporting) { vm.exportTelegram(TgFormat.XLSX) }
                 }
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ExportButton("Raw JSON", tg.exporting) { vm.exportTelegram(TgFormat.RAW_JSON) }
+                }
             }
             item {
                 OutlinedButton(onClick = { vm.openProfileFromTelegram() }, modifier = Modifier.fillMaxWidth()) {
