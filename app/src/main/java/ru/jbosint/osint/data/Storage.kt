@@ -49,6 +49,43 @@ class SettingsStore(context: Context) {
     var pinLockUntil: Long
         get() = prefs.getLong("pin_lock_until", 0L)
         set(value) = prefs.edit().putLong("pin_lock_until", value).apply()
+
+    // ------------------------------------------------------- локальный бэкенд Termux
+
+    var termuxEnabled: Boolean
+        get() = prefs.getBoolean("termux_enabled", false)
+        set(value) = prefs.edit().putBoolean("termux_enabled", value).apply()
+
+    /** Домашняя папка Termux; нормализуется в TermuxSpec. */
+    var termuxHome: String
+        get() = prefs.getString("termux_home", TermuxSpec.DEFAULT_HOME).orEmpty()
+            .ifBlank { TermuxSpec.DEFAULT_HOME }
+        set(value) = prefs.edit().putString("termux_home", TermuxSpec.normalizeHome(value)).apply()
+
+    /** Белый список скриптов: только их разрешено запускать из приложения. */
+    var termuxTrusted: List<String>
+        get() {
+            val raw = prefs.getString("termux_trusted", null)
+                ?: return TermuxSpec.DEFAULT_TRUSTED
+            return raw.split(',')
+                .mapNotNull { TermuxSpec.sanitizeScriptName(it) }
+                .distinct()
+        }
+        set(value) = prefs.edit()
+            .putString("termux_trusted", value.mapNotNull { TermuxSpec.sanitizeScriptName(it) }
+                .distinct().joinToString(","))
+            .apply()
+
+    // ------------------------------------------------------- серверный ускоритель
+
+    var serverEnabled: Boolean
+        get() = prefs.getBoolean("server_enabled", false)
+        set(value) = prefs.edit().putBoolean("server_enabled", value).apply()
+
+    /** Базовый адрес сервера без хвостового слэша; только https. */
+    var serverUrl: String
+        get() = prefs.getString("server_url", "").orEmpty()
+        set(value) = prefs.edit().putString("server_url", value.trim().trimEnd('/')).apply()
 }
 
 data class HistoryEntry(

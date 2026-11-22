@@ -20,3 +20,12 @@ keys/
 
 # ключ подписи и его параметры (см. build.gradle.kts)
 keystore.properties
+
+# сервер
+server/.env
+server/.venv/
+server/certs/
+server/data/
+__pycache__/
+.pytest_cache/
+

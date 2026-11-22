@@ -8,6 +8,13 @@
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
+    <!-- Мост к Termux: только официальный RUN_COMMAND, только доверенные скрипты. -->
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+
+    <!-- Android 11+: видимость пакета Termux для диагностики. -->
+    <queries>
+        <package android:name="com.termux" />
+    </queries>
 
     <application
         android:name=".JbApp"
@@ -45,6 +52,14 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <receiver
+            android:name=".data.TermuxResultReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="ru.jbosint.osint.TERMUX_RESULT" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

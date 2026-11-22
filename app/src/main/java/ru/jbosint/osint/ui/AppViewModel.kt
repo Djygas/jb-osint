@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -78,6 +79,12 @@ import ru.jbosint.osint.data.HistoryEntry
 import ru.jbosint.osint.data.HistoryStore
 import ru.jbosint.osint.data.KeyRepository
 import ru.jbosint.osint.data.ConnectionUi
+import ru.jbosint.osint.data.TermuxCheck
+import ru.jbosint.osint.data.TermuxResults
+import ru.jbosint.osint.data.TermuxSpec
+import ru.jbosint.osint.data.Remote
+import ru.jbosint.osint.data.RaeRemote
+import ru.jbosint.osint.data.SecureStore
 import ru.jbosint.osint.data.KeyIntake
 import ru.jbosint.osint.data.KeyState
 import ru.jbosint.osint.data.ProviderGuess
@@ -319,7 +326,12 @@ data class UiState(
     val photoSearch: PhotoUi = PhotoUi(),
     val watches: List<WatchItem> = emptyList(),
     val watchNotes: Map<String, String> = emptyMap(),
-    val journal: List<JournalEntry> = emptyList()
+    val journal: List<JournalEntry> = emptyList(),
+    // ------------------------------------------------------------ локальный бэкенд
+    val termux: TermuxUi = TermuxUi(),
+    // ------------------------------------------------------------ серверный режим
+    val server: ServerUi = ServerUi(),
+    val raeServer: RaeServerUi = RaeServerUi()
 ) {
     /** Управление ключами, модулями и настройками доступно только администратору. */
     val canManage: Boolean
@@ -331,10 +343,40 @@ data class UiState(
         get() = providers.count { it.enabled && it.hasKey } + customModules.count { it.enabled && (it.hasKey || it.auth == CustomAuth.NONE) }
 }
 
+/** Состояние локального бэкенда Termux. */
+data class TermuxUi(
+    val enabled: Boolean = false,
+    val home: String = TermuxSpec.DEFAULT_HOME,
+    val trusted: List<String> = TermuxSpec.DEFAULT_TRUSTED,
+    val checking: Boolean = false,
+    val checks: List<TermuxCheck> = emptyList(),
+    val note: String? = null,
+    val running: String? = null,
+    val lastRunAt: Long = 0L
+)
+
+/** Состояние серверного ускорителя (гибридный режим). */
+data class ServerUi(
+    val enabled: Boolean = false,
+    val url: String = "",
+    val keyed: Boolean = false,
+    val checking: Boolean = false,
+    val online: Boolean = false,
+    val note: String? = null
+)
+
+/** Ответ серверного RAE. */
+data class RaeServerUi(
+    val busy: Boolean = false,
+    val result: RaeRemote? = null,
+    val error: String? = null
+)
+
 class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private val settings = SettingsStore(app)
     private val keys = KeyRepository(app)
+    private val secure = SecureStore(app)
     private val historyStore = HistoryStore(app)
     private val exporter = ReportExporter(app)
     private val validator = KeyValidator(keys)
@@ -353,6 +395,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val watchStore = WatchStore(app)
     /** Сообщения, импортированные пользователем для профиля (живут до пересборки). */
     private var importedMessages: List<ru.jbosint.osint.profile.ProfileMessage> = emptyList()
+    private var termuxDiagRequest: String? = null
+    private var termuxScriptRequest: String? = null
 
     private val _state = MutableStateFlow(UiState())
     val state = _state.asStateFlow()
@@ -361,6 +405,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val shareEvents = _shareEvents.asSharedFlow()
 
     init {
+        // Результаты команд Termux приходят через PendingIntent -> BroadcastReceiver.
+        viewModelScope.launch {
+            TermuxResults.events.collect { result -> onTermuxResult(result) }
+        }
         // Автоудаление старых отчётов и загрузка истории — вне главного потока.
         viewModelScope.launch(Dispatchers.IO) {
             val keepDays = settings.autoWipeDays
@@ -407,7 +455,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             adminLockedUntil = adminStore.lockedUntil(),
             adminRecovery = adminStore.hasRecovery(),
             adminBiometric = adminStore.biometric,
-            storedKeys = countStoredKeys()
+            storedKeys = countStoredKeys(),
+            termux = TermuxUi(
+                enabled = settings.termuxEnabled,
+                home = settings.termuxHome,
+                trusted = settings.termuxTrusted
+            ),
+            server = ServerUi(
+                enabled = settings.serverEnabled,
+                url = settings.serverUrl,
+                keyed = secure.get("server_key")?.isNotBlank() == true
+            )
         )
         detectBackupOffer()
     }
@@ -887,6 +945,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun clearManualDraft() = _state.update { it.copy(manualDraft = null, manualKey = "") }
+
+    /** Черновик модуля из RAE: открывает обычный редактор с готовым URL-шаблоном. */
+    fun openCustomDraft(module: CustomModule) {
+        _state.update { it.copy(manualDraft = module, manualKey = "") }
+    }
 
     fun cancelAutoSetup() {
         autoSetupJob?.cancel()
@@ -1783,6 +1846,273 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun setAutoWipeDays(days: Int) {
         settings.autoWipeDays = days
         _state.update { it.copy(autoWipeDays = days) }
+    }
+
+    // ------------------------------------------------------------ локальный бэкенд
+
+    fun setTermuxEnabled(value: Boolean) {
+        settings.termuxEnabled = value
+        _state.update { it.copy(termux = it.termux.copy(enabled = value)) }
+    }
+
+    fun setTermuxHome(raw: String) {
+        val home = TermuxSpec.normalizeHome(raw)
+        settings.termuxHome = home
+        _state.update { it.copy(termux = it.termux.copy(home = home), toast = "Путь Termux: $home") }
+    }
+
+    /** @return текст ошибки или null, если скрипт добавлен в белый список. */
+    fun addTermuxScript(raw: String): String? {
+        val name = TermuxSpec.sanitizeScriptName(raw)
+            ?: return "Имя скрипта: латиница, цифры, точка, дефис; файл .py или .sh"
+        val next = (settings.termuxTrusted + name).distinct()
+        settings.termuxTrusted = next
+        _state.update {
+            it.copy(termux = it.termux.copy(trusted = next), toast = "Скрипт $name разрешён")
+        }
+        return null
+    }
+
+    fun removeTermuxScript(name: String) {
+        val next = settings.termuxTrusted - name
+        settings.termuxTrusted = next
+        _state.update { it.copy(termux = it.termux.copy(trusted = next)) }
+    }
+
+    fun termuxSetupScript(): String = TermuxSpec.setupScript(settings.termuxHome)
+
+    /** Диагностика: локальные проверки сразу, остальное — ответом из Termux. */
+    fun runTermuxDiagnostics() {
+        val app = getApplication<Application>()
+        val local = TermuxSpec.localChecks(app)
+        val blocked = local.firstOrNull { !it.ok }
+        if (blocked != null) {
+            _state.update {
+                it.copy(termux = it.termux.copy(checking = false, checks = local, note = blocked.detail))
+            }
+            return
+        }
+        val requestId = "diag-${System.currentTimeMillis()}"
+        termuxDiagRequest = requestId
+        _state.update {
+            it.copy(termux = it.termux.copy(checking = true, checks = local, note = null))
+        }
+        val started = TermuxSpec.startDiagnostics(app, settings.termuxHome, requestId)
+        if (started.isFailure) {
+            termuxDiagRequest = null
+            _state.update {
+                it.copy(
+                    termux = it.termux.copy(
+                        checking = false,
+                        note = started.exceptionOrNull()?.message ?: "Termux не запустился"
+                    )
+                )
+            }
+            return
+        }
+        viewModelScope.launch {
+            delay(20_000)
+            if (termuxDiagRequest == requestId) {
+                termuxDiagRequest = null
+                _state.update {
+                    it.copy(
+                        termux = it.termux.copy(
+                            checking = false,
+                            note = "Termux не ответил за 20 с: проверьте allow-external-apps=true и разрешение RUN_COMMAND"
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    /** Запуск только доверенного скрипта; произвольный код из UI не выполняется. */
+    fun runTermuxScript(name: String) {
+        val app = getApplication<Application>()
+        val current = _state.value.termux
+        if (!TermuxSpec.isTrusted(current.trusted, name)) {
+            _state.update { it.copy(toast = "Скрипт не в белом списке") }
+            return
+        }
+        val requestId = "run-${System.currentTimeMillis()}"
+        termuxScriptRequest = requestId
+        val started = TermuxSpec.startScript(
+            app,
+            current.home,
+            name,
+            background = false,
+            requestId = requestId
+        )
+        if (started.isFailure) {
+            termuxScriptRequest = null
+            _state.update {
+                it.copy(
+                    termux = it.termux.copy(
+                        note = started.exceptionOrNull()?.message ?: "Termux не запустился"
+                    )
+                )
+            }
+            return
+        }
+        _state.update {
+            it.copy(termux = it.termux.copy(running = name, note = "Открываю Termux: $name"))
+        }
+    }
+
+    private fun onTermuxResult(result: ru.jbosint.osint.data.TermuxResult) {
+        when (result.requestId) {
+            termuxDiagRequest -> {
+                termuxDiagRequest = null
+                val parsed = if (result.stdout.isBlank()) {
+                    emptyList()
+                } else {
+                    TermuxSpec.parseDiagnostics(result.stdout)
+                }
+                val note = when {
+                    result.error.isNotBlank() -> result.error
+                    result.exitCode != 0 -> "Termux вернул код ${result.exitCode}: ${result.stderr.take(300)}".trim()
+                    else -> "Диагностика завершена"
+                }
+                _state.update { s ->
+                    val local = s.termux.checks.filter { it.id == "termux" || it.id == "permission" }
+                    s.copy(
+                        termux = s.termux.copy(
+                            checking = false,
+                            checks = if (parsed.isEmpty()) s.termux.checks else local + parsed,
+                            note = note,
+                            lastRunAt = System.currentTimeMillis()
+                        )
+                    )
+                }
+            }
+            termuxScriptRequest -> {
+                termuxScriptRequest = null
+                val note = when {
+                    result.error.isNotBlank() -> result.error
+                    result.stdout.isNotBlank() -> result.stdout.takeLast(500)
+                    result.stderr.isNotBlank() -> result.stderr.takeLast(500)
+                    else -> "Скрипт завершён (код ${result.exitCode})"
+                }
+                _state.update {
+                    it.copy(
+                        termux = it.termux.copy(
+                            running = null,
+                            note = note,
+                            lastRunAt = System.currentTimeMillis()
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ серверный режим
+
+    fun setServerEnabled(value: Boolean) {
+        settings.serverEnabled = value
+        _state.update { it.copy(server = it.server.copy(enabled = value)) }
+        if (value) checkServer()
+    }
+
+    fun setServerUrl(raw: String) {
+        val url = Remote.normalizeUrl(raw)
+        if (url == null) {
+            _state.update {
+                it.copy(toast = "Адрес сервера: только https, например https://api.example.com")
+            }
+            return
+        }
+        settings.serverUrl = url
+        _state.update { it.copy(server = it.server.copy(url = url, note = null)) }
+        checkServer()
+    }
+
+    fun saveServerKey(raw: String) {
+        val key = raw.trim()
+        if (key.length < 8) {
+            _state.update { it.copy(toast = "Ключ сервера слишком короткий") }
+            return
+        }
+        secure.put("server_key", key)
+        _state.update {
+            it.copy(server = it.server.copy(keyed = true), toast = "Ключ сервера сохранён")
+        }
+    }
+
+    fun clearServerKey() {
+        secure.remove("server_key")
+        _state.update {
+            it.copy(server = it.server.copy(keyed = false, online = false, note = "Ключ удалён"))
+        }
+    }
+
+    fun checkServer() {
+        val server = _state.value.server
+        if (!server.enabled) {
+            _state.update { it.copy(server = it.server.copy(note = "Серверный режим выключен")) }
+            return
+        }
+        if (server.url.isBlank()) {
+            _state.update { it.copy(server = it.server.copy(note = "Укажите адрес сервера")) }
+            return
+        }
+        _state.update { it.copy(server = it.server.copy(checking = true, note = null)) }
+        viewModelScope.launch {
+            val current = _state.value.server
+            val health = Remote.health(current.url, secure.get("server_key").orEmpty())
+            _state.update {
+                it.copy(
+                    server = it.server.copy(
+                        checking = false,
+                        online = health.online,
+                        note = if (health.online) health.detail
+                        else "Режим ограниченной функциональности. Выполнено локально. ${health.detail}"
+                    )
+                )
+            }
+        }
+    }
+
+    /** Серверный RAE: URL + цель. При ошибке остаётся локальный путь через Termux. */
+    fun raeGenerateRemote(url: String, prompt: String) {
+        val server = _state.value.server
+        if (!server.enabled || server.url.isBlank()) {
+            _state.update { it.copy(raeServer = RaeServerUi(error = "Серверный режим выключен")) }
+            return
+        }
+        val target = Remote.normalizeUrl(url)
+        if (target == null) {
+            _state.update { it.copy(raeServer = RaeServerUi(error = "Адрес сайта: только https")) }
+            return
+        }
+        _state.update { it.copy(raeServer = RaeServerUi(busy = true)) }
+        viewModelScope.launch {
+            val result = Remote.raeGenerate(
+                server.url,
+                secure.get("server_key").orEmpty(),
+                target,
+                prompt
+            )
+            _state.update { s ->
+                val ui = result.fold(
+                    onSuccess = { RaeServerUi(result = it) },
+                    onFailure = {
+                        RaeServerUi(
+                            error = (it.message ?: "Ошибка сервера") +
+                                ". Локальный режим доступен: Termux → «Из трафика»."
+                        )
+                    }
+                )
+                s.copy(
+                    raeServer = ui,
+                    server = s.server.copy(online = ui.result != null || s.server.online)
+                )
+            }
+        }
+    }
+
+    fun clearRaeServer() {
+        _state.update { it.copy(raeServer = RaeServerUi()) }
     }
 
     // --------------------------------------- режим работы и резервные копии ключей

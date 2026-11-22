@@ -163,6 +163,31 @@ object Net {
         }
     }
 
+    /** Долгий POST для серверных задач (RAE/скрейпинг): свой таймаут до 15 минут. */
+    suspend fun postLong(
+        url: String,
+        headers: Map<String, String>,
+        body: String,
+        timeoutSec: Long = 900
+    ): Response = withContext(Dispatchers.IO) {
+        require(url.startsWith("https://")) { "Разрешён только HTTPS" }
+        val builder = Request.Builder()
+            .url(url)
+            .header("Accept", "application/json")
+            .header("User-Agent", "JB-OSINT/1.0 (Android)")
+            .header("Content-Type", "application/json; charset=utf-8")
+        headers.forEach { (name, value) -> builder.header(name, value) }
+        val request = builder.post(body.toRequestBody("application/json; charset=utf-8".toMediaType())).build()
+        val longClient = client.newBuilder()
+            .callTimeout(timeoutSec, TimeUnit.SECONDS)
+            .readTimeout(timeoutSec, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .build()
+        longClient.newCall(request).execute().use { response ->
+            Response(response.code, response.body?.string().orEmpty())
+        }
+    }
+
     /** Multipart-загрузка с произвольными заголовками (ключ сервиса в заголовке). */
     suspend fun postMultipart(
         url: String,

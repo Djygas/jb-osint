@@ -30,6 +30,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PlayArrow
@@ -85,6 +86,7 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
     val context = LocalContext.current
     var editorOpen by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<CustomModule?>(null) }
+    var raeOpen by remember { mutableStateOf(false) }
     LazyColumn(
         modifier = Modifier.fillMaxSize().imePadding().padding(horizontal = 20.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 12.dp, bottom = 28.dp),
@@ -188,6 +190,11 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                         color = JbMuted
                     )
                 }
+                TextButton(onClick = { raeOpen = true }) {
+                    Icon(Icons.Filled.Bolt, contentDescription = null, tint = JbAccent2, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Из трафика", style = MaterialTheme.typography.labelMedium, color = JbAccent2)
+                }
                 TextButton(onClick = {
                     editing = null
                     editorOpen = true
@@ -261,6 +268,20 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                     method = method
                 )
                 editorOpen = false
+            }
+        )
+    }
+
+    if (raeOpen) {
+        RaeDialog(
+            state = state,
+            vm = vm,
+            onDismiss = { raeOpen = false },
+            onCreateModule = { module ->
+                raeOpen = false
+                editing = null
+                vm.openCustomDraft(module)
+                editorOpen = true
             }
         )
     }
