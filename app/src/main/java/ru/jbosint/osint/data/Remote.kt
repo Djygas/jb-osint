@@ -81,7 +81,11 @@ object Remote {
      * поэтому ответ разбирается тем же [PageContent].
      */
     suspend fun scrape(base: String, key: String, url: String): PageContent {
-        val body = JSONObject().put("url", url).put("capture_api", false).toString()
+        val body = JSONObject()
+            .put("url", url)
+            .put("capture_api", false)
+            .put("render", true)
+            .toString()
         val headers = if (key.isBlank()) emptyMap() else mapOf("X-API-Key" to key)
         val response = runCatching {
             Net.fetch("$base/scrape", headers, attempts = 1, method = "POST", body = body)
@@ -112,6 +116,7 @@ object Remote {
         val status = json.optInt("status", 0)
         val blocked = json.optBoolean("blocked", false)
         val ok = status in 200..299 && !blocked && (text.length > 40 || title.isNotBlank())
+        val rendered = json.optJSONObject("render")?.optBoolean("used") == true
         return PageContent(
             url = json.optString("url").ifBlank { url },
             title = title,
@@ -120,11 +125,14 @@ object Remote {
             links = links.distinct(),
             ok = ok,
             error = if (ok) "" else "сервер: HTTP $status",
-            via = SERVER_VIA
+            via = if (rendered) RENDER_VIA else SERVER_VIA
         )
     }
 
     const val SERVER_VIA = "server"
+
+    /** Страницу отрисовал headless-браузер на сервере (Crawl4AI). */
+    const val RENDER_VIA = "render"
 
     /**
      * Извлечение текста документа на сервере: тело запроса — сырые байты файла,

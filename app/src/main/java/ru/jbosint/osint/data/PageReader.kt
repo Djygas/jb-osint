@@ -143,7 +143,10 @@ object PageReader {
                 if (page.title.isNotBlank()) put("Заголовок", page.title.take(160))
                 if (page.description.isNotBlank()) put("Описание", page.description.take(240))
                 if (page.host.isNotBlank()) put("Сайт", page.host)
-                if (page.via == Remote.SERVER_VIA) put("Получено", "серверный режим")
+                when (page.via) {
+                    Remote.SERVER_VIA -> put("Получено", "серверный режим")
+                    Remote.RENDER_VIA -> put("Получено", "сервер + JS-рендер")
+                }
             },
             sourceId = "page",
             weight = 1,

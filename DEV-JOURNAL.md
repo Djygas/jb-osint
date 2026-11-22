@@ -129,3 +129,21 @@
   живой /documents/extract на uvicorn (DOCX 337 Б) → 200, provider=stdlib, два абзаца
   с переносом; :app:lintDebug → 0 errors / 2 warnings; APK 1.21.3 (versionCode 31),
   37 630 361 Б, SHA-256 DF702F7A…18A9CC.
+
+### Срез 8 — JS/Cloudflare-рендер через Crawl4AI
+
+- `server/app/render.py`: `render_page()` — headless-браузер Crawl4AI; понимает и 0.4
+  (`markdown` строкой), и 0.6+ (`markdown` объектом с raw/fit_markdown). Пакета нет →
+  `RenderUnavailable`, сервер честно отвечает «Crawl4AI не установлен».
+- `/scrape` получил поле `render` (по умолчанию false). Рендер включается только когда
+  обычный ответ бесполезен: `blocked` (401/403/429/503) или текста меньше 200 символов.
+  В ответе блок `render: {used, provider, note}`; HTML наружу не отдаётся — сервер сам
+  извлекает title/text/links.
+- Клиент: `Remote.scrape` всегда просит render (он вызывается только как фолбэк после
+  локальной ошибки); `PageContent.via = "render"`, факт помечается
+  «Получено: сервер + JS-рендер».
+- Тесты: `test_scrape.py` +3 (рендер подменяет блокировку; отсутствие Crawl4AI сохраняет
+  blocked; без флага блока `render` нет), `ServerFallbackTest` +1 (via=render).
+- Проверки: `pytest` 20 passed; `:app:testDebugUnitTest` 267 тестов, 0 падений;
+  живой `/scrape` с `render=true` → `render.used=false`, note «Crawl4AI не установлен»
+  (реальный рендер проверяется там, где пакет установлен — Termux/VPS).

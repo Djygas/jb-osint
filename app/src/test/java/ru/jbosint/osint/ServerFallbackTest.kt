@@ -70,6 +70,18 @@ class ServerFallbackTest {
     }
 
     @Test
+    fun renderedAnswerIsMarked() {
+        val page = Remote.parseScrape(
+            """{"status":200,"blocked":false,"render":{"used":true,"provider":"crawl4ai"},"content":{"title":"Ромашка","text":"Текст страницы после исполнения JavaScript, достаточно длинный для проверки разбора.","links":[]}}""",
+            "https://romashka.ru/"
+        )
+        assertTrue(page.ok)
+        assertEquals(Remote.RENDER_VIA, page.via)
+        val facts = PageReader.facts(page)
+        assertEquals("сервер + JS-рендер", facts.first().attributes["Получено"])
+    }
+
+    @Test
     fun localPageHasNoServerMarker() {
         val page = PageReader.parse(
             "<html><head><title>Локальная страница</title></head><body>Текст страницы достаточной длины для разбора.</body></html>",

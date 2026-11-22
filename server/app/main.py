@@ -21,6 +21,7 @@ from pydantic import BaseModel, HttpUrl
 
 from .config import settings
 from .documents import MAX_BYTES as MAX_DOC_BYTES, UnsupportedDocument, extract_document
+from .render import RenderUnavailable, render_page
 from .llm import generate_client
 from .masking import mask_har, mask_json
 
@@ -108,6 +109,8 @@ def extract_content(html: str, base_url: str) -> dict[str, Any]:
 class ScrapeRequest(BaseModel):
     url: HttpUrl
     capture_api: bool = False
+    # Разрешить JS-рендер через Crawl4AI, если обычный запрос заблокирован.
+    render: bool = False
 
 
 class AnalyzeRequest(BaseModel):
@@ -131,38 +134,76 @@ async def healthz() -> dict[str, Any]:
     return {"ok": True, "uptime_sec": round(time.time() - STARTED_AT, 1)}
 
 
-@app.post("/scrape", dependencies=[Depends(require_key)])
-async def scrape(req: ScrapeRequest) -> dict[str, Any]:
-    """HTML/JSON без исполнения JS. Сложные защиты — задача scrapling-worker."""
+async def _http_fetch(url: str) -> tuple[httpx.Response | None, str]:
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=30, trust_env=False) as client:
-            response = await client.get(
-                str(req.url), headers={"User-Agent": "JB-OSINT/1.0 (server)"}
-            )
+            response = await client.get(url, headers={"User-Agent": "JB-OSINT/1.0 (server)"})
+            return response, ""
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Источник недоступен: {exc}") from exc
+        return None, f"Источник недоступен: {exc}"
 
-    text = response.text[:500_000]
-    title = re.search(r"<title[^>]*>(.*?)</title>", text, re.S | re.I)
+
+async def _render(url: str) -> tuple[dict[str, Any], str]:
+    """Служебный блок для клиента и HTML для разбора (HTML наружу не отдаём)."""
+    try:
+        page = await render_page(url)
+    except RenderUnavailable as exc:
+        return {"used": False, "provider": "none", "note": str(exc)}, ""
+    except Exception as exc:  # noqa: BLE001 — браузер падает по-разному
+        return {"used": False, "provider": "crawl4ai", "note": f"рендер не удался: {exc}"}, ""
+    if not page["ok"]:
+        return {"used": False, "provider": "crawl4ai", "note": page["error"]}, ""
+    return {"used": True, "provider": "crawl4ai", "note": ""}, page["html"]
+
+
+@app.post("/scrape", dependencies=[Depends(require_key)])
+async def scrape(req: ScrapeRequest) -> dict[str, Any]:
+    """HTTP-запрос к странице; при блокировке или JS-странице — рендер Crawl4AI."""
+    response, error = await _http_fetch(str(req.url))
+    final_url = str(response.url) if response is not None else str(req.url)
     payload: dict[str, Any] = {
-        "status": response.status_code,
-        "url": str(response.url),
-        "title": title.group(1).strip()[:300] if title else "",
-        "bytes": len(response.content),
-        "blocked": response.status_code in (401, 403, 429, 503),
+        "status": response.status_code if response is not None else 0,
+        "url": final_url,
+        "title": "",
+        "bytes": 0,
+        "blocked": True,
         "json": None,
-        "content": extract_content(text, str(response.url)),
+        "content": {"title": "", "description": "", "text": "", "links": []},
+        "error": error,
     }
-    content_type = response.headers.get("content-type", "")
-    if "json" in content_type:
-        try:
-            payload["json"] = response.json()
-        except ValueError:
-            payload["json"] = None
-    if req.capture_api:
-        payload["api_hints"] = sorted(
-            set(re.findall(r"https?://[^\"'\s]+/api/[^\"'\s]+", text))[:20]
+    if response is not None:
+        text = response.text[:500_000]
+        title = re.search(r"<title[^>]*>(.*?)</title>", text, re.S | re.I)
+        payload.update(
+            {
+                "title": title.group(1).strip()[:300] if title else "",
+                "bytes": len(response.content),
+                "blocked": response.status_code in (401, 403, 429, 503),
+                "content": extract_content(text, final_url),
+            }
         )
+        if "json" in response.headers.get("content-type", ""):
+            try:
+                payload["json"] = response.json()
+            except ValueError:
+                payload["json"] = None
+        if req.capture_api:
+            payload["api_hints"] = sorted(
+                set(re.findall(r"https?://[^\"'\s]+/api/[^\"'\s]+", text))[:20]
+            )
+
+    # Рендер только по запросу клиента и только когда обычный ответ бесполезен.
+    thin = len(payload["content"]["text"]) < 200
+    if req.render and (payload["blocked"] or thin):
+        info, html = await _render(final_url)
+        payload["render"] = info
+        if info["used"] and html:
+            content = extract_content(html, final_url)
+            if content["text"]:
+                payload["content"] = content
+                payload["blocked"] = False
+                payload["status"] = 200
+                payload["title"] = content["title"] or payload["title"]
     return payload
 
 

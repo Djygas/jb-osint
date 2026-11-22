@@ -4,3 +4,7 @@ httpx==0.28.1
 pydantic==2.10.4
 pytest==8.3.4
 pypdf==5.1.0
+
+# Опционально: JS/Cloudflare-рендер (тяжёлый: тянет Playwright и Chromium).
+# Установка: pip install crawl4ai && crawl4ai-setup
+# crawl4ai>=0.6

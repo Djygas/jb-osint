@@ -65,3 +65,49 @@ def test_scrape_marks_blocked_source(monkeypatch):
     data = response.json()
     assert data["blocked"] is True
     assert data["content"]["title"].startswith("Just a moment")
+
+def test_render_fallback_replaces_blocked_page(monkeypatch):
+    async def fake_get(self, url, headers=None, **kwargs):
+        return _FakeResponse(status_code=403, text="<title>Just a moment...</title>")
+
+    async def fake_render(url):
+        return {"ok": True, "html": HTML, "markdown": "", "title": "Ромашка", "error": ""}
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setattr("app.main.render_page", fake_render)
+    response = client.post("/scrape", json={"url": "https://romashka.ru/", "render": True})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["render"]["used"] is True
+    assert data["render"]["provider"] == "crawl4ai"
+    assert data["blocked"] is False
+    assert "info@romashka.ru" in data["content"]["text"]
+
+
+def test_render_unavailable_keeps_blocked_content(monkeypatch):
+    from app.render import RenderUnavailable
+
+    async def fake_get(self, url, headers=None, **kwargs):
+        return _FakeResponse(status_code=403, text="<title>Just a moment...</title>")
+
+    async def fake_render(url):
+        raise RenderUnavailable("Crawl4AI не установлен: pip install crawl4ai")
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setattr("app.main.render_page", fake_render)
+    data = client.post(
+        "/scrape", json={"url": "https://romashka.ru/", "render": True}
+    ).json()
+    assert data["render"]["used"] is False
+    assert "Crawl4AI" in data["render"]["note"]
+    assert data["blocked"] is True
+
+
+def test_render_not_requested_on_good_page(monkeypatch):
+    async def fake_get(self, url, headers=None, **kwargs):
+        return _FakeResponse()
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    data = client.post("/scrape", json={"url": "https://romashka.ru/"}).json()
+    assert "render" not in data
+    assert data["blocked"] is False

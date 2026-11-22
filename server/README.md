@@ -25,10 +25,25 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080
 
 Все, кроме `/healthz`, требуют заголовок `X-API-Key`, если задан `JB_API_KEY`.
 
+### JS/Cloudflare-страницы (Crawl4AI, опционально)
+
+Если обычный запрос вернул 403/429 или почти пустой текст, `/scrape` с `render=true`
+открывает страницу в headless-браузере Crawl4AI. Пакет не входит в `requirements.txt`:
+он тянет Playwright и Chromium (сотни мегабайт). Установка:
+
+```bash
+pip install crawl4ai && crawl4ai-setup
+```
+
+Без пакета сервер отвечает `render.used=false` и человеческой причиной — контент не
+подменяется. Тот же сервер можно поднять в Termux: тогда MarkItDown и Crawl4AI из
+скрипта настройки приложения используются локально, на телефоне.
+
+
 | Метод | Путь | Назначение |
 |---|---|---|
 | GET | `/healthz` | Живость сервера |
-| POST | `/scrape` | HTML/JSON без JS; `capture_api=true` — подсказки эндпоинтов |
+| POST | `/scrape` | HTML/JSON без JS; `capture_api=true` — подсказки эндпоинтов; `render=true` — поднять Crawl4AI, если страница заблокирована или пустая |
 | POST | `/ai/analyze` | Cross-check фактов: противоречия по одному полю |
 | POST | `/api/discovery` | Ссылка на страницу выдачи ключа + тип авторизации |
 | POST | `/api/v1/rae/generate` | RAE: HAR → маскирование → клиент; либо CLI-запуск |
