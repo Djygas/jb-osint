@@ -22,7 +22,9 @@ data class PageContent(
     /** Абсолютные ссылки со страницы: нужны для поиска профилей и следующего шага. */
     val links: List<String> = emptyList(),
     val ok: Boolean = false,
-    val error: String = ""
+    val error: String = "",
+    /** "local" — страницу прочитал телефон, "server" — серверный ускоритель. */
+    val via: String = "local"
 ) {
     val host: String get() = runCatching { java.net.URI(url).host.orEmpty().removePrefix("www.") }.getOrDefault("")
 }
@@ -31,6 +33,13 @@ object PageReader {
 
     private const val MAX_BYTES = 400_000
     private const val MAX_TEXT = 6_000
+
+    /**
+     * Серверное чтение страницы. Настраивается один раз из AppViewModel:
+     * null — сервер выключен или не задан, тогда всё работает только локально.
+     */
+    @Volatile
+    var serverFallback: (suspend (String) -> PageContent?)? = null
 
     /** Какие хосты не читаем: соцсети отдают HTML без контента, файлы бесполезны. */
     private val skipHosts = listOf(
@@ -52,13 +61,22 @@ object PageReader {
 
     suspend fun read(url: String): PageContent = withContext(Dispatchers.IO) {
         if (!readable(url)) return@withContext PageContent(url, error = "страница не читается автоматически")
-        val response = runCatching { Net.fetch(url, attempts = 1) }
-            .getOrElse { return@withContext PageContent(url, error = it.message ?: "сеть недоступна") }
-        if (response.code !in 200..299) {
-            return@withContext PageContent(url, error = "HTTP ${response.code}")
-        }
-        val body = if (response.body.length > MAX_BYTES) response.body.take(MAX_BYTES) else response.body
-        parse(body, url)
+        val local = runCatching { Net.fetch(url, attempts = 1) }.fold(
+            onSuccess = { response ->
+                if (response.code !in 200..299) {
+                    PageContent(url, error = "HTTP ${response.code}")
+                } else {
+                    val body = if (response.body.length > MAX_BYTES) response.body.take(MAX_BYTES) else response.body
+                    parse(body, url)
+                }
+            },
+            onFailure = { PageContent(url, error = it.message ?: "сеть недоступна") }
+        )
+        if (local.ok) return@withContext local
+        // Локально не вышло (403/429, блокировка по IP, таймаут) — пробуем сервер.
+        val fallback = serverFallback ?: return@withContext local
+        val remote = runCatching { fallback(url) }.getOrNull() ?: return@withContext local
+        if (remote.ok) remote else local.copy(error = local.error.ifBlank { remote.error })
     }
 
     /** Разбор HTML. Вынесен отдельно от сети — покрывается тестом на строке. */
@@ -125,6 +143,7 @@ object PageReader {
                 if (page.title.isNotBlank()) put("Заголовок", page.title.take(160))
                 if (page.description.isNotBlank()) put("Описание", page.description.take(240))
                 if (page.host.isNotBlank()) put("Сайт", page.host)
+                if (page.via == Remote.SERVER_VIA) put("Получено", "серверный режим")
             },
             sourceId = "page",
             weight = 1,

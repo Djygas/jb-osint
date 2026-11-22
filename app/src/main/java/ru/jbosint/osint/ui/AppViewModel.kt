@@ -82,6 +82,7 @@ import ru.jbosint.osint.data.ConnectionUi
 import ru.jbosint.osint.data.TermuxCheck
 import ru.jbosint.osint.data.TermuxResults
 import ru.jbosint.osint.data.TermuxSpec
+import ru.jbosint.osint.data.PageReader
 import ru.jbosint.osint.data.Remote
 import ru.jbosint.osint.data.RaeRemote
 import ru.jbosint.osint.data.SecureStore
@@ -405,6 +406,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val shareEvents = _shareEvents.asSharedFlow()
 
     init {
+        // Серверный ускоритель чтения страниц: включается только когда сервер задан
+        // и включён; иначе поиск остаётся полностью локальным.
+        PageReader.serverFallback = { url ->
+            if (!settings.serverEnabled || settings.serverUrl.isBlank()) null
+            else Remote.scrape(settings.serverUrl, secure.get("server_key").orEmpty(), url)
+        }
         // Результаты команд Termux приходят через PendingIntent -> BroadcastReceiver.
         viewModelScope.launch {
             TermuxResults.events.collect { result -> onTermuxResult(result) }

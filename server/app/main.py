@@ -57,6 +57,53 @@ def require_key(x_api_key: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Неверный X-API-Key")
 
 
+_TAGS = re.compile(r"<[^>]+>")
+_SCRIPTS = re.compile(r"<(script|style|noscript)\b[^>]*>.*?</\1>", re.S | re.I)
+_ENTITIES = (
+    ("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"),
+    ("&quot;", '"'), ("&#39;", "'"), ("&laquo;", "«"), ("&raquo;", "»"),
+)
+
+
+def _plain(html: str) -> str:
+    text = _SCRIPTS.sub(" ", html)
+    text = _TAGS.sub(" ", text)
+    for entity, char in _ENTITIES:
+        text = text.replace(entity, char)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _meta(html: str, name: str) -> str:
+    """description / og:description: порядок атрибутов в <meta> произвольный."""
+    for tag in re.findall(r"<meta[^>]*>", html, re.I):
+        key = re.search(r"(?:name|property)=[\"']([^\"']+)[\"']", tag, re.I)
+        if not key or key.group(1).lower() != name.lower():
+            continue
+        value = re.search(r"content=[\"']([^\"']*)[\"']", tag, re.I)
+        if value and value.group(1).strip():
+            return _plain(value.group(1))
+    return ""
+
+
+def extract_content(html: str, base_url: str) -> dict[str, Any]:
+    """Заголовок, описание, текст и ссылки — тот же набор, что разбирает клиент."""
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
+    title = _plain(title_match.group(1))[:300] if title_match else ""
+    links: list[str] = []
+    for href in re.findall(r"href=[\"']([^\"']+)[\"']", html, re.I):
+        absolute = urljoin(base_url, href.strip())
+        if absolute.startswith(("http://", "https://")) and absolute not in links:
+            links.append(absolute)
+        if len(links) >= 60:
+            break
+    return {
+        "title": title,
+        "description": (_meta(html, "description") or _meta(html, "og:description"))[:400],
+        "text": _plain(html)[:6000],
+        "links": links,
+    }
+
+
 class ScrapeRequest(BaseModel):
     url: HttpUrl
     capture_api: bool = False
@@ -87,7 +134,7 @@ async def healthz() -> dict[str, Any]:
 async def scrape(req: ScrapeRequest) -> dict[str, Any]:
     """HTML/JSON без исполнения JS. Сложные защиты — задача scrapling-worker."""
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30, trust_env=False) as client:
             response = await client.get(
                 str(req.url), headers={"User-Agent": "JB-OSINT/1.0 (server)"}
             )
@@ -103,6 +150,7 @@ async def scrape(req: ScrapeRequest) -> dict[str, Any]:
         "bytes": len(response.content),
         "blocked": response.status_code in (401, 403, 429, 503),
         "json": None,
+        "content": extract_content(text, str(response.url)),
     }
     content_type = response.headers.get("content-type", "")
     if "json" in content_type:
@@ -153,7 +201,7 @@ async def analyze(req: AnalyzeRequest) -> dict[str, Any]:
 async def discovery(req: DiscoveryRequest) -> dict[str, Any]:
     """Ищет страницу выдачи ключа и способ авторизации по публичной странице."""
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30, trust_env=False) as client:
             response = await client.get(
                 str(req.url), headers={"User-Agent": "JB-OSINT/1.0 (server)"}
             )

@@ -71,4 +71,55 @@ object Remote {
             script = script
         )
     }
+
+    /**
+     * Серверное чтение страницы: включается, когда локальный запрос не удался
+     * (403/429, блокировка по IP, таймаут). Сервер отдаёт уже разобранный текст,
+     * поэтому ответ разбирается тем же [PageContent].
+     */
+    suspend fun scrape(base: String, key: String, url: String): PageContent {
+        val body = JSONObject().put("url", url).put("capture_api", false).toString()
+        val headers = if (key.isBlank()) emptyMap() else mapOf("X-API-Key" to key)
+        val response = runCatching {
+            Net.fetch("$base/scrape", headers, attempts = 1, method = "POST", body = body)
+        }.getOrElse {
+            return PageContent(url, error = it.message ?: "сервер недоступен", via = SERVER_VIA)
+        }
+        if (!response.ok) {
+            return PageContent(url, error = "сервер: HTTP ${response.code}", via = SERVER_VIA)
+        }
+        return parseScrape(response.body, url)
+    }
+
+    /** Разбор ответа `/scrape`. Вынесен из сети, чтобы покрываться тестом. */
+    fun parseScrape(raw: String, url: String): PageContent {
+        val json = runCatching { JSONObject(raw) }.getOrNull()
+            ?: return PageContent(url, error = "сервер: ответ не JSON", via = SERVER_VIA)
+        val content = json.optJSONObject("content")
+        val title = content?.optString("title").orEmpty().take(300)
+        val description = content?.optString("description").orEmpty()
+        val text = content?.optString("text").orEmpty()
+        val links = ArrayList<String>()
+        content?.optJSONArray("links")?.let { array ->
+            for (index in 0 until minOf(array.length(), 60)) {
+                val link = array.optString(index)
+                if (link.startsWith("https://")) links += link
+            }
+        }
+        val status = json.optInt("status", 0)
+        val blocked = json.optBoolean("blocked", false)
+        val ok = status in 200..299 && !blocked && (text.length > 40 || title.isNotBlank())
+        return PageContent(
+            url = json.optString("url").ifBlank { url },
+            title = title,
+            description = description,
+            text = text,
+            links = links.distinct(),
+            ok = ok,
+            error = if (ok) "" else "сервер: HTTP $status",
+            via = SERVER_VIA
+        )
+    }
+
+    const val SERVER_VIA = "server"
 }

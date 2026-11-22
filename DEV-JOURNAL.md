@@ -88,3 +88,23 @@
   от пользователя либо доступ к репозиторию через его окружение.
 - Локальный RAE в Termux требует Playwright/Chromium и GUI-сессии; на практике
   надёжнее серверный режим. В UI это честно указано.
+
+### Срез 6 — серверное чтение страниц (фолбэк)
+
+- Сервер `POST /scrape` теперь отдаёт блок `content`: `title`, `description`,
+  `text` (до 6 000 символов), `links` (до 60) — `extract_content()` в `server/app/main.py`.
+  Заодно `trust_env=False` у httpx: переменные прокси из окружения (`NO_PROXY` с `[::1]`)
+  роняли клиент на разборе URL.
+- Клиент: `Remote.scrape()` + `Remote.parseScrape()` (разбор вынесен из сети под тест),
+  `PageContent.via` = `local` / `server`; в фактах страницы появляется
+  атрибут «Получено: серверный режим».
+- `PageReader.read()`: локальный запрос не удался (403/429/таймаут) → пробует сервер,
+  если он включён в настройках. Сервер выключен — поведение прежнее, всё локально.
+- `AppViewModel.init`: `PageReader.serverFallback` читает `serverEnabled`/`serverUrl`
+  и ключ из SecureStore при каждом вызове, поэтому настройки применяются сразу.
+- Тесты: `ServerFallbackTest` (6) — разбор ответа, blocked, битый JSON, маркер источника;
+  `server/tests/test_scrape.py` (3) — извлечение из HTML и blocked-страница.
+- Проверки: `:app:testDebugUnitTest` → **257 тестов, 0 падений**; `pytest -q` →
+  **10 passed**; живой `/scrape` на uvicorn: `status=200`, `title=Example Domain`,
+  текст извлечён, `blocked=false`. APK `1.21.2` (versionCode 30) собран.
+
