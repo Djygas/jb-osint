@@ -75,6 +75,7 @@ private val kindLabel = mapOf(
 
 @Composable
 fun HomeScreen(state: UiState, vm: AppViewModel) {
+    if (state.docs.open) DocumentsDialog(state, vm)
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -254,6 +255,11 @@ fun HomeScreen(state: UiState, vm: AppViewModel) {
         item {
             Spacer(Modifier.height(12.dp))
             AssistantCard(state, vm)
+        }
+
+        item {
+            Spacer(Modifier.height(12.dp))
+            DocumentsCard(state, vm)
         }
 
         val preview = state.preview

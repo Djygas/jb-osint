@@ -55,6 +55,11 @@ import ru.jbosint.osint.data.CustomModule
 import ru.jbosint.osint.data.CustomModuleChecker
 import ru.jbosint.osint.data.AutoSetup
 import ru.jbosint.osint.data.Connectors
+import ru.jbosint.osint.data.DocHit
+import ru.jbosint.osint.data.DocRecord
+import ru.jbosint.osint.data.DocSearch
+import ru.jbosint.osint.data.DocumentStore
+import ru.jbosint.osint.data.DocumentText
 import ru.jbosint.osint.data.DocHints
 import ru.jbosint.osint.data.SourceLink
 import ru.jbosint.osint.data.CustomModuleSpec
@@ -332,7 +337,9 @@ data class UiState(
     val termux: TermuxUi = TermuxUi(),
     // ------------------------------------------------------------ серверный режим
     val server: ServerUi = ServerUi(),
-    val raeServer: RaeServerUi = RaeServerUi()
+    val raeServer: RaeServerUi = RaeServerUi(),
+    // ------------------------------------------------------------ документы досье
+    val docs: DocsUi = DocsUi()
 ) {
     /** Управление ключами, модулями и настройками доступно только администратору. */
     val canManage: Boolean
@@ -343,6 +350,17 @@ data class UiState(
     val activeModules: Int
         get() = providers.count { it.enabled && it.hasKey } + customModules.count { it.enabled && (it.hasKey || it.auth == CustomAuth.NONE) }
 }
+
+/** Раздел «Документы»: локальное досье и полнотекстовый поиск по нему. */
+data class DocsUi(
+    val open: Boolean = false,
+    val busy: Boolean = false,
+    val query: String = "",
+    val items: List<DocRecord> = emptyList(),
+    val hits: List<DocHit> = emptyList(),
+    /** Подсказка после импорта: что получилось и что не удалось. */
+    val note: String? = null
+)
 
 /** Состояние локального бэкенда Termux. */
 data class TermuxUi(
@@ -394,6 +412,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val profileStore = ProfileStore(app)
     private val agentRunner = AgentRunner(keys)
     private val watchStore = WatchStore(app)
+    private val docStore = DocumentStore(app)
     /** Сообщения, импортированные пользователем для профиля (живут до пересборки). */
     private var importedMessages: List<ru.jbosint.osint.profile.ProfileMessage> = emptyList()
     private var termuxDiagRequest: String? = null
@@ -3703,6 +3722,130 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun consumeToast() = _state.update { it.copy(toast = null) }
+
+    // ------------------------------------------------------------- документы досье
+
+    fun openDocs() {
+        _state.update {
+            it.copy(docs = it.docs.copy(open = true, items = docStore.list(), note = null))
+        }
+    }
+
+    fun closeDocs() = _state.update { it.copy(docs = it.docs.copy(open = false)) }
+
+    fun setDocsQuery(raw: String) {
+        val query = raw.take(80)
+        _state.update { it.copy(docs = it.docs.copy(query = query)) }
+        if (DocSearch.terms(query).isEmpty()) {
+            _state.update { it.copy(docs = it.docs.copy(hits = emptyList())) }
+            return
+        }
+        viewModelScope.launch {
+            val hits = withContext(Dispatchers.IO) { DocSearch.search(docStore.texts(), query) }
+            _state.update { it.copy(docs = it.docs.copy(hits = hits)) }
+        }
+    }
+
+    /**
+     * Импорт файла: текст извлекается локально (TXT/MD/HTML/DOCX), PDF и офисные
+     * форматы — через серверный MarkItDown, если сервер включён. Файл остаётся
+     * в приватной папке приложения, наружу уходят только байты для извлечения текста.
+     */
+    fun importDocument(uri: Uri) {
+        viewModelScope.launch {
+            _state.update { it.copy(docs = it.docs.copy(busy = true, note = null)) }
+            val outcome = runCatching {
+                withContext(Dispatchers.IO) {
+                    val resolver = getApplication<Application>().contentResolver
+                    val name = displayName(uri) ?: "document.txt"
+                    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: error("Не удалось прочитать файл")
+                    if (bytes.isEmpty()) error("Файл пустой")
+                    if (bytes.size > DocumentText.MAX_BYTES) error("Файл больше 12 МБ")
+
+                    val local = DocumentText.extract(name, bytes)?.trim()
+                    var text: String? = local
+                    var provider = "local"
+                    var note = ""
+                    if (local.isNullOrBlank()) {
+                        val base = settings.serverUrl
+                        if (settings.serverEnabled && base.isNotBlank()) {
+                            runCatching {
+                                Remote.extractDocument(
+                                    base,
+                                    secure.get("server_key").orEmpty(),
+                                    name,
+                                    bytes
+                                )
+                            }.onSuccess { extracted ->
+                                text = extracted.text.trim()
+                                provider = "server"
+                            }.onFailure { error ->
+                                note = "Сервер: ${error.message ?: "текст не извлечён"}"
+                            }
+                        } else {
+                            note = "Формат требует серверного режима — включите сервер в настройках"
+                        }
+                    }
+                    if (text.isNullOrBlank() && note.isBlank()) {
+                        note = "Текст не найден (возможно, скан без распознавания)"
+                    }
+                    docStore.add(
+                        title = DocumentText.title(name),
+                        fileName = name,
+                        bytes = bytes,
+                        text = text.orEmpty(),
+                        provider = provider,
+                        note = note
+                    )
+                }
+            }
+            outcome.onSuccess { record ->
+                _state.update {
+                    it.copy(
+                        docs = it.docs.copy(
+                            busy = false,
+                            items = docStore.list(),
+                            hits = emptyList(),
+                            query = "",
+                            note = if (record.note.isBlank()) "Добавлено: ${record.title}"
+                            else record.note
+                        )
+                    )
+                }
+            }
+            outcome.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        docs = it.docs.copy(
+                            busy = false,
+                            note = error.message ?: "Импорт не удался"
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun deleteDocument(id: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { docStore.delete(id) }
+            _state.update {
+                it.copy(
+                    docs = it.docs.copy(
+                        items = docStore.list(),
+                        hits = it.docs.hits.filterNot { hit -> hit.doc.id == id }
+                    )
+                )
+            }
+        }
+    }
+
+    private fun displayName(uri: Uri): String? = runCatching {
+        getApplication<Application>().contentResolver
+            .query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+    }.getOrNull()
 
 
 }

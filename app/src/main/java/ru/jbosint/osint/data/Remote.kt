@@ -4,6 +4,9 @@ import org.json.JSONObject
 
 data class ServerHealth(val online: Boolean, val detail: String)
 
+/** Текст документа, извлечённый на сервере (MarkItDown/pypdf). */
+data class ExtractedDoc(val text: String, val chars: Int, val provider: String)
+
 data class RaeRemote(
     val client: RaeClient,
     val scriptPath: String,
@@ -122,4 +125,38 @@ object Remote {
     }
 
     const val SERVER_VIA = "server"
+
+    /**
+     * Извлечение текста документа на сервере: тело запроса — сырые байты файла,
+     * имя — в query (по расширению сервер выбирает конвертер).
+     */
+    suspend fun extractDocument(
+        base: String,
+        key: String,
+        name: String,
+        bytes: ByteArray,
+        contentType: String = DocumentText.mimeFor(name)
+    ): ExtractedDoc {
+        val headers = if (key.isBlank()) emptyMap() else mapOf("X-API-Key" to key)
+        val raw = Net.postMultipart(
+            "$base/documents/extract?name=${Net.urlEncode(name)}",
+            bytes,
+            contentType,
+            headers,
+            timeoutMs = 180_000
+        )
+        return parseExtract(raw)
+    }
+
+    /** Разбор ответа `/documents/extract` — вынесен из сети под тест. */
+    fun parseExtract(raw: String): ExtractedDoc {
+        val json = JSONObject(raw)
+        val text = json.optString("text")
+        require(text.isNotBlank()) { "Сервер не вернул текст документа" }
+        return ExtractedDoc(
+            text = text,
+            chars = json.optInt("chars", text.length),
+            provider = json.optString("provider").ifBlank { "server" }
+        )
+    }
 }

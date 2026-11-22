@@ -108,3 +108,24 @@
   **10 passed**; живой `/scrape` на uvicorn: `status=200`, `title=Example Domain`,
   текст извлечён, `blocked=false`. APK `1.21.2` (versionCode 30) собран.
 
+
+### Срез 7 — документы досье: импорт и полнотекстовый поиск
+
+- data/Documents.kt: DocumentText (UTF-8 с BOM → строгий UTF-8 → windows-1251,
+  DOCX через zip word/document.xml, HTML → текст), DocSearch (все слова запроса,
+  счёт совпадений, сниппет с контекстом), DocumentStore (index.json + <id>.txt
+  в приватной папке приложения, SHA-256 исходного файла).
+- Сервер POST /documents/extract?name=...: тело — сырые байты файла, имя — в query.
+  Порядок конвертеров: MarkItDown (если установлен) → stdlib (TXT/DOCX) → pypdf (PDF).
+  Лимиты: 25 МБ на файл, 400 000 символов текста в ответе. pypdf==5.1.0 в requirements.
+- Приложение: Remote.extractDocument() + parseExtract(); каскад «локально → сервер»
+  (сервер только если включён в настройках). UI: карточка «Документы» на главном экране
+  и полноэкранный диалог — импорт через SAF, поиск, удаление, пометка «локально/сервер».
+- Termux-слой не дублировали: скрипт настройки уже ставит markitdown[all], а тот же
+  FastAPI-сервер можно поднять в Termux — тогда /documents/extract работает на телефоне.
+- Тесты: DocumentsTest (9) — DOCX, cp1251, HTML, PDF→сервер, поиск/сниппет, разбор ответа;
+  server/tests/test_documents.py (7) — TXT/DOCX/CP1251 и отказы 400/415.
+- Проверки: :app:testDebugUnitTest → **266 тестов, 0 падений**; pytest -q → **17 passed**;
+  живой /documents/extract на uvicorn (DOCX 337 Б) → 200, provider=stdlib, два абзаца
+  с переносом; :app:lintDebug → 0 errors / 2 warnings; APK 1.21.3 (versionCode 31),
+  37 630 361 Б, SHA-256 DF702F7A…18A9CC.

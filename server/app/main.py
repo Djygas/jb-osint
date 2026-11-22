@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, HttpUrl
 
 from .config import settings
+from .documents import MAX_BYTES as MAX_DOC_BYTES, UnsupportedDocument, extract_document
 from .llm import generate_client
 from .masking import mask_har, mask_json
 
@@ -278,6 +279,19 @@ def _run_rae_cli(req: RaeRequest, run_dir: Path) -> dict[str, Any]:
         "mode": req.mode,
     }
 
+
+@app.post("/documents/extract", dependencies=[Depends(require_key)])
+async def documents_extract(request: Request, name: str = "file") -> dict[str, Any]:
+    """Извлечение текста из документа: тело — сырые байты файла, имя — в query."""
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Пустое тело запроса")
+    if len(body) > MAX_DOC_BYTES:
+        raise HTTPException(status_code=413, detail="Файл больше 25 МБ")
+    try:
+        return await asyncio.to_thread(extract_document, body, name)
+    except UnsupportedDocument as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
 
 @app.post("/api/v1/rae/generate", dependencies=[Depends(require_key)])
 async def rae_generate(req: RaeRequest) -> dict[str, Any]:
