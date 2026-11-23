@@ -1,4 +1,4 @@
-﻿# DEV-JOURNAL — JB OSINT
+# DEV-JOURNAL — JB OSINT
 
 ## 2026-11-22
 
@@ -164,3 +164,20 @@
   `test_api.py` +2 — пустой список и PII-поля (регрессия маскирования).
 - Проверки: `pytest` 22 passed; `:app:testDebugUnitTest` 272 теста, 0 падений;
   живой `/ai/analyze` → 2 противоречия, включая поле `email`; APK 1.21.5 (versionCode 33).
+
+
+### Slice 10 - release 1.21.6 (2026-11-23)
+
+- Tri arhiva s rabochego stola (JB-OSINT-1.21.2, JB-OSINT-1.21.5, jb-osint-termux-rae-server
+  ot 22.11) sverРµРЅС‹ s etim repozitoriem: v arhivah net nichego, chego net v repo - v repo vsyo
+  eto uzhe est i pozzhe (Documents.kt, CrossCheckCard, render.py, ocr.py, novye testy).
+  Itog: edinyi kod - eto repo, otdelnye arhivy bolshe ne nuzhny.
+- Sborka: JDK 17.0.21.1, Gradle 8.11.1, GRADLE_OPTS="-Xmx2g -XX:MaxMetaspaceSize=640m",
+  :app:assembleDebug --rerun-tasks -> BUILD SUCCESSFUL (40 tasks executed).
+- Testy: :app:testDebugUnitTest -> BUILD SUCCESSFUL (272 testa).
+- APK: 1.21.6-debug, versionCode 34, 37 646 741 B,
+  SHA-256 4842a80a726497dca11dbd7ed8c3d7503eb348e777c07177ee2f5315c5460dd9.
+- GitHub Release: v1.21.6 - https://github.com/Djygas/jb-osint/releases/tag/v1.21.6
+  asset JB-OSINT-1.21.6-debug.apk + SHA-256.txt. ProverРµРЅРѕ: 302 -> 200, Content-Length 37 646 741.
+- Zametka: .github/workflows/android-ci.yml lokalno starРµРµ remote (v remote fallback secreta
+  JB_OSINT) - lokalnyi variant NE pushit, inache otkatit CI.
