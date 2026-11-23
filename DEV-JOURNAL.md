@@ -181,3 +181,24 @@
   asset JB-OSINT-1.21.6-debug.apk + SHA-256.txt. ProverРµРЅРѕ: 302 -> 200, Content-Length 37 646 741.
 - Zametka: .github/workflows/android-ci.yml lokalno starРµРµ remote (v remote fallback secreta
   JB_OSINT) - lokalnyi variant NE pushit, inache otkatit CI.
+
+### Slice 11 - signed release + report check (2026-11-23)
+
+- Podpisannaya sborka poluchena cherez GitHub Actions (workflow_dispatch-bound push,
+  run 45170671412, job apk, artifact jb-osint-release-apk): keystore iz sekretov CI,
+  app/build.gradle.kts bere JB_KEYSTORE_FILE/PASSWORD/ALIAS/KEY_PASSWORD.
+- apksigner verify: Verified (v2 scheme), CN=Evgen, O=Personal Projects, RSA 2048.
+  aapt2: package ru.jbosint.osint, versionCode 34, versionName 1.21.6,
+  minSdk 26 / targetSdk 35. APK 21 171 726 B, SHA-256
+  ee1abb7c5bffdbe324fe78d21d1119b86103a66df0b333d0d99c8b1d7d9de0ac.
+- V release v1.21.6 dobavlen asset JB-OSINT-1.21.6-release.apk; SHA-256.txt peresobran
+  (oba APK). ProverРµРЅРѕ: 302 -> 200, Content-Length 21 171 726.
+- Proverka otchetov: vremennyi test SampleReportsTest sozdaval realnye faily v
+  C:/jbosint/report-check (HTML/JSON/XLSX/PDF/CSV s russkimi dannymi), posle proverki udalen.
+  Itogi: HTML - lang=ru, razdely "Ustanovlennye svedeniya"/"Dostovernost"/"Istochniki", bez
+  mojibake; JSON - schema jb-osint/report/2.0, russkie znacheniya i urovni dostovernosti;
+  XLSX - listy "Svodka"/"Reestr"/"Istochniki"; PDF - %PDF-1.7, 3 vstroennyh shrifta Inter
+  (FontFile2), %%EOF/startxref na meste; CSV - kirillica s razdelitelem ";".
+- Testy: :app:testDebugUnitTest 272 testa, :report-core:test vse zelenye (vklyuchaya
+  "pdf report is built and contains cyrillic text"); lintDebug proshyol v CI.
+- Nuance: release i debug - raznye pakety (ru.jbosint.osint vs ...debug), dannye ne perenositutsya.
