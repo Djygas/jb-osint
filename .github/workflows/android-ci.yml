@@ -42,9 +42,11 @@ jobs:
         id: keystore
         env:
           JB_KEYSTORE_BASE64: ${{ secrets.JB_KEYSTORE_BASE64 }}
+          JB_OSINT: ${{ secrets.JB_OSINT }}
         run: |
-          if [ -n "$JB_KEYSTORE_BASE64" ]; then
-            echo "$JB_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/jbosint-release.jks"
+          KS_B64="${JB_KEYSTORE_BASE64:-$JB_OSINT}"
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 --decode > "$RUNNER_TEMP/jbosint-release.jks"
             echo "keystore=$RUNNER_TEMP/jbosint-release.jks" >> "$GITHUB_OUTPUT"
           fi
 
@@ -54,9 +56,9 @@ jobs:
       - name: Assemble release APK
         env:
           JB_KEYSTORE_FILE: ${{ steps.keystore.outputs.keystore }}
-          JB_KEYSTORE_PASSWORD: ${{ secrets.JB_KEYSTORE_PASSWORD }}
-          JB_KEY_ALIAS: ${{ secrets.JB_KEY_ALIAS }}
-          JB_KEY_PASSWORD: ${{ secrets.JB_KEY_PASSWORD }}
+          JB_KEYSTORE_PASSWORD: ${{ secrets.JB_KEYSTORE_PASSWORD != '' && secrets.JB_KEYSTORE_PASSWORD || secrets.JB_OSINT_KEY_PASSWORD }}
+          JB_KEY_ALIAS: ${{ secrets.JB_KEY_ALIAS != '' && secrets.JB_KEY_ALIAS || secrets.JB_OSINT_KEY_ALIAS }}
+          JB_KEY_PASSWORD: ${{ secrets.JB_KEY_PASSWORD != '' && secrets.JB_KEY_PASSWORD || secrets.JB_OSINT_KEY_PASSWORD }}
         run: ./gradlew :app:assembleRelease --console=plain
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
