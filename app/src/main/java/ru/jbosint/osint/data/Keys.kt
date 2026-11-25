@@ -42,8 +42,14 @@ object ProviderCatalog {
             "hibp-api-key", "https://haveibeenpwned.com/API/Key", ProviderGroup.LEAKS
         ),
         ProviderSpec(
-            "leakcheck", "LeakCheck", "Утечки по email, телефону, нику и домену",
-            "API-ключ (32 символа)", "https://leakcheck.io/api", ProviderGroup.LEAKS
+            "leakcheck", "LeakCheck", "Утечки: база, дата, логин и пароль",
+            "Ключ Pro API (полные записи — тариф Monthly/Lifetime)",
+            "https://leakcheck.io/data-breach-api", ProviderGroup.LEAKS
+        ),
+        ProviderSpec(
+            "hudsonrock", "Hudson Rock", "Заражения инфостилерами: логины и пароли",
+            "Ключ не требуется", "https://www.hudsonrock.com/free-tools", ProviderGroup.LEAKS,
+            keyless = true
         ),
         ProviderSpec(
             "virustotal", "VirusTotal", "Репутация доменов и IP",
@@ -278,18 +284,23 @@ class KeyValidator(private val repo: KeyRepository) {
             }
             "leakcheck" -> {
                 {
-                    // Валидный ключ отвечает 200 и JSON с полем success; неверный — 401/403
-                    // либо 200 с success=false, поэтому тело проверяется отдельно.
+                    // Pro API v2: ключ в заголовке. 401 — ключ неверный; 403 — ключ верный,
+                    // но тариф без полных записей или исчерпан дневной лимит (тоже «ключ активен»).
                     val probe = Net.fetch(
-                        "https://leakcheck.io/api/public?key=${Net.urlEncode(key)}&check=test%40example.com"
+                        "https://leakcheck.io/api/v2/query/test%40example.com?type=email&limit=1",
+                        mapOf("X-API-Key" to key)
                     )
                     when {
-                        probe.code == 401 || probe.code == 403 ->
-                            KeyCheck(KeyState.INVALID, "Сервис отклонил ключ (${probe.code})")
+                        probe.code == 401 ->
+                            KeyCheck(KeyState.INVALID, "Сервис отклонил ключ (401)")
+                        probe.code == 403 && probe.body.contains("limit", ignoreCase = true) ->
+                            KeyCheck(KeyState.VALID, "Ключ активен, дневной лимит исчерпан")
+                        probe.code == 403 ->
+                            KeyCheck(KeyState.VALID, "Ключ активен, тариф без полных записей")
                         probe.code == 429 ->
                             KeyCheck(KeyState.VALID, "Ключ активен, превышен лимит запросов")
                         probe.code in 200..299 && probe.body.contains("\"success\":true") ->
-                            KeyCheck(KeyState.VALID, "Ключ принят сервисом")
+                            KeyCheck(KeyState.VALID, "Ключ активен, полные записи доступны")
                         probe.code in 200..299 ->
                             KeyCheck(KeyState.INVALID, "Сервис ответил, но ключ не принят")
                         else -> KeyCheck(KeyState.INVALID, "Ответ сервиса ${probe.code}")

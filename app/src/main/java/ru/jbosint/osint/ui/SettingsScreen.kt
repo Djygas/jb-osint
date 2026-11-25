@@ -136,6 +136,8 @@ fun SettingsScreen(state: UiState, vm: AppViewModel) {
 
         item { AssistantSection(state, vm) }
 
+        item { PluginSection { vm.navigate(Screen.PLUGINS) } }
+
         item { AccessSection(state, vm) }
 
         if (state.canManage) {

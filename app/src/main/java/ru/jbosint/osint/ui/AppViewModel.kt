@@ -60,6 +60,10 @@ import ru.jbosint.osint.data.DocHit
 import ru.jbosint.osint.data.DocRecord
 import ru.jbosint.osint.data.DocSearch
 import ru.jbosint.osint.data.DocumentStore
+import ru.jbosint.osint.data.LeakIndexReport
+import ru.jbosint.osint.data.LeakRules
+import ru.jbosint.osint.data.LeakScan
+import ru.jbosint.osint.data.LeakStore
 import ru.jbosint.osint.data.DocumentText
 import ru.jbosint.osint.data.DocHints
 import ru.jbosint.osint.data.SourceLink
@@ -147,9 +151,9 @@ import ru.jbosint.osint.data.WatchStore
 private const val MAX_PIN_FAILS = 5
 
 /** Экраны, доступные только администратору. */
-private val MANAGED_SCREENS = setOf(Screen.KEYS, Screen.SETTINGS, Screen.MODULES)
+private val MANAGED_SCREENS = setOf(Screen.KEYS, Screen.SETTINGS, Screen.MODULES, Screen.PLUGINS)
 
-enum class Screen { HOME, RESULTS, TELEGRAM, KEYS, SETTINGS, PROFILE, AGENT, MODULES }
+enum class Screen { HOME, RESULTS, TELEGRAM, KEYS, SETTINGS, PROFILE, AGENT, MODULES, PLUGINS }
 
 /** Состояние быстрой настройки модуля: прогресс или предложение ручной настройки. */
 data class AutoSetupUi(
@@ -341,6 +345,8 @@ data class UiState(
     val raeServer: RaeServerUi = RaeServerUi(),
     // ------------------------------------------------------------ документы досье
     val docs: DocsUi = DocsUi(),
+    // ------------------------------------------------------------ индекс утечек
+    val leak: LeakUi = LeakUi(),
     // ------------------------------------------------------------ сверка фактов
     val crossCheck: CrossCheckUi = CrossCheckUi()
 ) {
@@ -375,6 +381,43 @@ data class DocsUi(
 )
 
 /** Состояние локального бэкенда Termux. */
+/**
+ * Раздел «Утечки»: локальный индекс дампов плюс каскад API.
+ * Отчёт отвечает на вопрос «учётная запись засветилась?», пароль не показывает.
+ */
+data class LeakUi(
+    val open: Boolean = false,
+    val useApi: Boolean = true,
+    val useIndex: Boolean = true,
+    val rawScan: Boolean = false,
+    val query: String = "",
+    val busy: Boolean = false,
+    val stage: String = "",
+    val note: String? = null,
+    val offline: Boolean = false,
+    val cached: Boolean = false,
+    val sources: List<LeakSourceUi> = emptyList(),
+    val fileCount: Int = 0,
+    val rowCount: Long = 0,
+    val secretRows: Long = 0,
+    val sizeMb: Int = 0
+)
+
+data class LeakSourceUi(
+    val id: String,
+    val title: String,
+    val hits: Int,
+    val cached: Boolean = false,
+    val note: String? = null,
+    val rows: List<LeakRowUi> = emptyList()
+)
+
+data class LeakRowUi(
+    val value: String,
+    val where: String = "",
+    val secret: Boolean = false
+)
+
 data class TermuxUi(
     val enabled: Boolean = false,
     val home: String = TermuxSpec.DEFAULT_HOME,
@@ -425,6 +468,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val agentRunner = AgentRunner(keys)
     private val watchStore = WatchStore(app)
     private val docStore = DocumentStore(app)
+    private val leakStore = LeakStore(app)
+    private val leakScan = LeakScan(leakStore, keys)
     /** Сообщения, импортированные пользователем для профиля (живут до пересборки). */
     private var importedMessages: List<ru.jbosint.osint.profile.ProfileMessage> = emptyList()
     private var termuxDiagRequest: String? = null
@@ -3855,6 +3900,292 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ------------------------------------------------------------- сверка фактов
+
+    // ------------------------------------------------------------- утечки
+
+    fun openLeakScan() {
+        _state.update {
+            it.copy(
+                leak = it.leak.copy(
+                    open = true,
+                    useApi = settings.leakUseApi,
+                    useIndex = settings.leakUseIndex,
+                    rawScan = settings.leakRaw,
+                    note = null
+                )
+            )
+        }
+        refreshLeakStats()
+    }
+
+    fun closeLeakScan() = _state.update { it.copy(leak = it.leak.copy(open = false)) }
+
+    private fun refreshLeakStats() {
+        viewModelScope.launch {
+            val stats = withContext(Dispatchers.IO) {
+                runCatching { leakStore.stats() }.getOrNull()
+            } ?: return@launch
+            _state.update {
+                it.copy(
+                    leak = it.leak.copy(
+                        fileCount = stats.files,
+                        rowCount = stats.rows,
+                        secretRows = stats.secrets,
+                        sizeMb = (stats.bytes / (1024 * 1024)).toInt()
+                    )
+                )
+            }
+        }
+    }
+
+    fun setLeakUseApi(value: Boolean) {
+        settings.leakUseApi = value
+        _state.update { it.copy(leak = it.leak.copy(useApi = value)) }
+    }
+
+    fun setLeakUseIndex(value: Boolean) {
+        settings.leakUseIndex = value
+        _state.update { it.copy(leak = it.leak.copy(useIndex = value)) }
+    }
+
+    fun setLeakRaw(value: Boolean) {
+        settings.leakRaw = value
+        _state.update { it.copy(leak = it.leak.copy(rawScan = value)) }
+    }
+
+    fun setLeakQuery(raw: String) =
+        _state.update { it.copy(leak = it.leak.copy(query = raw.take(120))) }
+
+    /** Переиндексация папки leaks/. Неизменившиеся файлы пропускаются. */
+    fun indexLeaks() {
+        if (_state.value.leak.busy) return
+        viewModelScope.launch {
+            _state.update {
+                it.copy(leak = it.leak.copy(busy = true, stage = "Индексация…", note = null))
+            }
+            val outcome = runCatching {
+                withContext(Dispatchers.IO) {
+                    leakStore.index(LeakStore.leaksDir(getApplication())) { name, percent ->
+                        _state.update { it.copy(leak = it.leak.copy(stage = "$name · $percent%")) }
+                    }
+                }
+            }
+            outcome.onSuccess { report ->
+                val stats = withContext(Dispatchers.IO) { leakStore.stats() }
+                _state.update {
+                    it.copy(
+                        leak = it.leak.copy(
+                            busy = false,
+                            stage = "Индекс: ${report.scanned} новых, ${report.skipped} без изменений",
+                            note = buildIndexNote(report, stats.files),
+                            fileCount = stats.files,
+                            rowCount = stats.rows,
+                            secretRows = stats.secrets,
+                            sizeMb = (stats.bytes / (1024 * 1024)).toInt()
+                        )
+                    )
+                }
+            }
+            outcome.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        leak = it.leak.copy(
+                            busy = false,
+                            note = "Индексация: ${error.message ?: "ошибка"}"
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    private fun buildIndexNote(report: LeakIndexReport, files: Int): String = buildString {
+        append("Файлов в индексе: $files")
+        if (report.rows > 0) append(", строк: ${report.rows}")
+        append(". ${report.tookMs} мс")
+        if (report.errors.isNotEmpty()) {
+            append(". Ошибки: ${report.errors.take(2).joinToString("; ")}")
+        }
+    }
+
+    /** Дамп приходит через SAF и копируется в приватную папку приложения. */
+    fun importLeakFile(uri: Uri) {
+        viewModelScope.launch {
+            _state.update {
+                it.copy(leak = it.leak.copy(busy = true, stage = "Копирую файл…", note = null))
+            }
+            val outcome = runCatching {
+                withContext(Dispatchers.IO) {
+                    val resolver = getApplication<Application>().contentResolver
+                    val name = LeakStore.safeName(displayName(uri) ?: "leak.txt")
+                    if (!LeakRules.indexable(name)) {
+                        error("Поддерживаются CSV, TSV, TXT, SQL и JSON")
+                    }
+                    val target = java.io.File(LeakStore.leaksDir(getApplication()), name)
+                    resolver.openInputStream(uri)?.use { input ->
+                        target.outputStream().use { output -> input.copyTo(output, 1 shl 16) }
+                    } ?: error("Не удалось прочитать файл")
+                    target
+                }
+            }
+            outcome.onSuccess { file ->
+                _state.update {
+                    it.copy(
+                        leak = it.leak.copy(
+                            busy = false,
+                            stage = "Добавлено: ${file.name}",
+                            note = "Файл ${file.length() / 1024} КБ в папке leaks/"
+                        )
+                    )
+                }
+                indexLeaks()
+            }
+            outcome.onFailure { error ->
+                _state.update {
+                    it.copy(leak = it.leak.copy(busy = false, note = error.message ?: "Файл не добавлен"))
+                }
+            }
+        }
+    }
+
+    /** Одна кнопка: индекс + кэш + каскад API, без дублей. */
+    fun runLeakScan() {
+        val leak = _state.value.leak
+        if (leak.busy) return
+        val subject = leak.query.trim().ifBlank { _state.value.query.trim() }
+        if (subject.isBlank()) {
+            _state.update { it.copy(toast = "Введите почту, телефон или ник") }
+            return
+        }
+        if (!leak.useApi && !leak.useIndex) {
+            _state.update { it.copy(toast = "Включите онлайн-API или локальный индекс") }
+            return
+        }
+        viewModelScope.launch {
+            if (leak.rawScan) {
+                _state.update {
+                    it.copy(leak = it.leak.copy(busy = true, stage = "Полная переиндексация…"))
+                }
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        leakStore.index(LeakStore.leaksDir(getApplication()), force = true) { name, percent ->
+                            _state.update { it.copy(leak = it.leak.copy(stage = "$name · $percent%")) }
+                        }
+                    }
+                }
+            }
+            _state.update {
+                it.copy(
+                    leak = it.leak.copy(
+                        busy = true,
+                        stage = "Поиск…",
+                        sources = emptyList(),
+                        note = null,
+                        offline = false,
+                        cached = false,
+                        query = subject
+                    )
+                )
+            }
+            val outcome = runCatching {
+                leakScan.scan(subject, leak.useIndex, leak.useApi) { stage ->
+                    _state.update { it.copy(leak = it.leak.copy(stage = stage)) }
+                }
+            }
+            outcome.onSuccess { result ->
+                val groups = result.sources.map { row ->
+                    LeakSourceUi(
+                        id = row.id,
+                        title = row.title,
+                        hits = row.hits,
+                        cached = row.cached,
+                        note = row.error,
+                        rows = result.facts.filter { it.sourceId == row.id }.take(20).map { fact ->
+                            LeakRowUi(
+                                value = fact.value,
+                                where = fact.attributes["Файл"]?.let { file ->
+                                    "$file · стр. ${fact.attributes["Строка"] ?: "?"}"
+                                } ?: fact.attributes["Дата"].orEmpty(),
+                                secret = fact.attributes["Пароль в строке"]?.startsWith("есть") == true
+                            )
+                        }
+                    )
+                }
+                _state.update {
+                    it.copy(
+                        leak = it.leak.copy(
+                            busy = false,
+                            stage = "Готово: ${result.tookMs} мс",
+                            note = result.note,
+                            offline = result.offline,
+                            cached = result.cached,
+                            sources = groups
+                        )
+                    )
+                }
+            }
+            outcome.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        leak = it.leak.copy(
+                            busy = false,
+                            stage = "Поиск прерван",
+                            note = error.message ?: "Ошибка поиска"
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    /** В отчёте только маски — экспорт ничего не раскрывает. */
+    fun exportLeakJson() {
+        val leak = _state.value.leak
+        if (leak.sources.isEmpty()) {
+            _state.update { it.copy(toast = "Сначала выполните поиск") }
+            return
+        }
+        viewModelScope.launch {
+            val root = JSONObject()
+                .put("schema", "jb-osint/leak-scan/1.0")
+                .put("query", leak.query)
+                .put("createdAt", System.currentTimeMillis())
+                .put("offline", leak.offline)
+                .put("cached", leak.cached)
+                .put("note", leak.note.orEmpty())
+            val sources = JSONArray()
+            leak.sources.forEach { source ->
+                val rows = JSONArray()
+                source.rows.forEach { row ->
+                    rows.put(
+                        JSONObject()
+                            .put("value", row.value)
+                            .put("where", row.where)
+                            .put("hadPassword", row.secret)
+                    )
+                }
+                sources.put(
+                    JSONObject()
+                        .put("id", source.id)
+                        .put("title", source.title)
+                        .put("hits", source.hits)
+                        .put("cached", source.cached)
+                        .put("rows", rows)
+                )
+            }
+            root.put("sources", sources)
+            val bytes = root.toString(2).toByteArray(Charsets.UTF_8)
+            val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US)
+                .format(java.util.Date())
+            val saved = runCatching { exporter.save("leak-scan-$stamp.json", bytes, "application/json") }
+            saved.onSuccess { exported ->
+                _state.update { it.copy(toast = "Отчёт готов: ${exported.fileName}") }
+                _shareEvents.emit(ShareRequest(exported.uri, exported.mime, exported.fileName))
+            }.onFailure { error ->
+                _state.update { it.copy(toast = "Экспорт не удался: ${error.message ?: "ошибка"}") }
+            }
+        }
+    }
 
     fun openCrossCheck() {
         val data = _state.value.result

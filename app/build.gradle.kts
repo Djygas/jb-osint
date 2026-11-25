@@ -14,8 +14,8 @@ android {
         applicationId = "ru.jbosint.osint"
         minSdk = 26
         targetSdk = 35
-        versionCode = 34
-        versionName = "1.21.6"
+        versionCode = 39
+        versionName = "1.24.0"
         resourceConfigurations += listOf("ru", "en")
 
         // ML Kit face-detection приносит нативные библиотеки под все ABI (33 МБ из 39 МБ APK).

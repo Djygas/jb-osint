@@ -86,6 +86,23 @@ class SettingsStore(context: Context) {
     var serverUrl: String
         get() = prefs.getString("server_url", "").orEmpty()
         set(value) = prefs.edit().putString("server_url", value.trim().trimEnd('/')).apply()
+
+    // ------------------------------------------------------- индекс утечек
+
+    /** Искать по онлайн-API утечек (каскад с кэшем на сутки). */
+    var leakUseApi: Boolean
+        get() = prefs.getBoolean("leak_use_api", true)
+        set(value) = prefs.edit().putBoolean("leak_use_api", value).apply()
+
+    /** Искать по локальному индексу дампов. */
+    var leakUseIndex: Boolean
+        get() = prefs.getBoolean("leak_use_index", true)
+        set(value) = prefs.edit().putBoolean("leak_use_index", value).apply()
+
+    /** Полная переиндексация перед поиском (долго, сажает батарею). */
+    var leakRaw: Boolean
+        get() = prefs.getBoolean("leak_raw", false)
+        set(value) = prefs.edit().putBoolean("leak_raw", value).apply()
 }
 
 data class HistoryEntry(
