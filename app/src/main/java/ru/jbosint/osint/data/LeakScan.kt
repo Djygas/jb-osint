@@ -114,7 +114,8 @@ object LeakRules {
             ?.takeIf { it.isNotEmpty() }
             ?: return null
         if (candidate.length !in 1..128) return null
-        if (candidate.contains('@') || candidate.contains(' ')) return null
+        // Дубль адреса не считаем паролем, но '@' внутри пароля допустим.
+        if (emailRe.matches(candidate) || candidate.contains(' ')) return null
         if (phoneRe.matches(candidate)) return null
         return candidate
     }
