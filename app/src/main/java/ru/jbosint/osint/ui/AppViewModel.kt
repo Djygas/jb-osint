@@ -7,6 +7,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,9 +22,13 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import ru.jbosint.osint.BuildConfig
+import ru.jbosint.osint.core.aggregate.Aggregator
 import ru.jbosint.osint.core.model.AggregatedData
 import ru.jbosint.osint.core.model.Fact
 import ru.jbosint.osint.core.model.FactCategory
+import ru.jbosint.osint.core.model.SearchStats
+import ru.jbosint.osint.data.source.DataSourceRegistry
+import ru.jbosint.osint.data.source.SearchParams
 import ru.jbosint.osint.data.AssistantCatalog
 import ru.jbosint.osint.data.AssistantClassification
 import ru.jbosint.osint.data.AssistantParser
@@ -76,6 +83,7 @@ import ru.jbosint.osint.data.FaceSearch
 import ru.jbosint.osint.data.PhotoAnalysis
 import ru.jbosint.osint.data.PhotoAnalyzer
 import ru.jbosint.osint.data.QueryDetector
+import ru.jbosint.osint.data.QueryKind
 import ru.jbosint.osint.data.ReverseImage
 import ru.jbosint.osint.data.Net
 import ru.jbosint.osint.core.model.RawFact
@@ -149,7 +157,7 @@ private const val MAX_PIN_FAILS = 5
 /** Экраны, доступные только администратору. */
 private val MANAGED_SCREENS = setOf(Screen.KEYS, Screen.SETTINGS, Screen.MODULES)
 
-enum class Screen { HOME, RESULTS, TELEGRAM, KEYS, SETTINGS, PROFILE, AGENT, MODULES }
+enum class Screen { HOME, RESULTS, TELEGRAM, LEAKS, KEYS, SETTINGS, PROFILE, AGENT, MODULES }
 
 /** Состояние быстрой настройки модуля: прогресс или предложение ручной настройки. */
 data class AutoSetupUi(
@@ -245,6 +253,13 @@ data class UiState(
     val result: AggregatedData? = null,
     val resultEntry: HistoryEntry? = null,
     val photo: PhotoCard? = null,
+    // ------------------------------------------- отдельная вкладка «Утечки»
+    val leaksQuery: String = "",
+    val leaksRunning: Boolean = false,
+    val leaksFacts: List<Fact> = emptyList(),
+    val leaksError: String? = null,
+    val leaksSources: Int = 0,
+    val leaksDone: Boolean = false,
     val history: List<HistoryEntry> = emptyList(),
     val providers: List<ProviderUi> = emptyList(),
     val customModules: List<CustomModule> = emptyList(),
@@ -625,6 +640,99 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun clearPreview() = _state.update { it.copy(preview = null) }
+
+    // ------------------------------------------------------- проверка утечек
+
+    fun setLeaksQuery(value: String) = _state.update {
+        it.copy(
+            leaksQuery = value, leaksError = null,
+            leaksFacts = emptyList(), leaksSources = 0, leaksDone = false
+        )
+    }
+
+    fun clearLeaks() = _state.update {
+        it.copy(
+            leaksQuery = "", leaksFacts = emptyList(), leaksError = null,
+            leaksSources = 0, leaksDone = false
+        )
+    }
+
+    /**
+     * Проверка только по email/телефону через официальные API (HIBP, LeakCheck).
+     * Пароль не запрашивается и не сохраняется: результат — лишь факт утечки,
+     * дата, набор данных и типы скомпрометированных полей.
+     */
+    fun runLeaksCheck() {
+        val current = _state.value
+        if (current.leaksRunning) return
+        val query = current.leaksQuery.trim()
+        val kind = QueryDetector.detect(query)
+        if (query.length < 3 || (kind != QueryKind.EMAIL && kind != QueryKind.PHONE)) {
+            _state.update { it.copy(leaksError = "Введите email или телефон для проверки") }
+            return
+        }
+        if (keys.key("hibp").isBlank() && keys.key("leakcheck").isBlank()) {
+            _state.update {
+                it.copy(leaksError = "Добавьте ключ Have I Been Pwned или LeakCheck в разделе «Ключи»")
+            }
+            return
+        }
+        _state.update {
+            it.copy(
+                leaksRunning = true, leaksError = null,
+                leaksFacts = emptyList(), leaksSources = 0, leaksDone = false
+            )
+        }
+        viewModelScope.launch {
+            val started = System.currentTimeMillis()
+            val outcome = runCatching {
+                val sources = DataSourceRegistry.leakSources
+                val responded = java.util.concurrent.atomic.AtomicInteger(0)
+                val raw = coroutineScope {
+                    sources.map { source ->
+                        async {
+                            val found: List<RawFact> = runCatching {
+                                kotlinx.coroutines.withTimeout(25_000) {
+                                    source.search(SearchParams(query), keys)
+                                }
+                            }.getOrElse { emptyList() }
+                            if (found.isNotEmpty()) responded.incrementAndGet()
+                            found
+                        }
+                    }.awaitAll().flatten()
+                }
+                val counted = responded.get()
+                Aggregator.aggregate(
+                    query,
+                    raw,
+                    SearchStats(
+                        sourcesAttempted = sources.size,
+                        sourcesResponded = counted,
+                        sourcesFailed = sources.size - counted,
+                        rawFacts = raw.size,
+                        durationMs = System.currentTimeMillis() - started
+                    )
+                ) to counted
+            }
+            outcome.onSuccess { (data, counted) ->
+                _state.update {
+                    it.copy(
+                        leaksRunning = false,
+                        leaksFacts = data.facts,
+                        leaksSources = counted,
+                        leaksDone = true
+                    )
+                }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        leaksRunning = false,
+                        leaksError = "Проверка не удалась: ${error.message ?: "неизвестная ошибка"}"
+                    )
+                }
+            }
+        }
+    }
 
     fun startSearch() {
         val current = _state.value
