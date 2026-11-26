@@ -319,7 +319,7 @@ object LabApiModule {
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
         val target = File(base, "JB-Osint/reports/${dir.name}-$stamp")
         target.mkdirs()
-        (dir / "lab.log").takeIf { it.isFile }?.copyTo(File(target, "lab.log"), overwrite = true)
+        File(dir, "lab.log").takeIf { it.isFile }?.copyTo(File(target, "lab.log"), overwrite = true)
         var copied = 0
         dir.walkTopDown().forEach { file ->
             if (copied >= 50) return@forEach
