@@ -520,6 +520,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var labRequest: String? = null
     private var labAction: String? = null
     private var labPending: LabProject? = null
+    private var labAfterPing: (() -> Unit)? = null
 
     private val _state = MutableStateFlow(UiState())
     val state = _state.asStateFlow()
@@ -4438,12 +4439,37 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (!labPermissionOk()) return
         labPending = project
         val suffix = if (project.ref.isBlank()) "" else " (${project.ref})"
-        appendLabLog("Клонирование ${project.url}$suffix…")
-        startLab(
-            "clone",
-            "Клонирую ${project.url}…",
-            GitHubLabSpec.cloneScript(config, project, current.verifyGpg)
-        )
+        pingLab {
+            appendLabLog("Клонирование ${project.url}$suffix…")
+            startLab(
+                "clone",
+                "Клонирую ${project.url}…",
+                GitHubLabSpec.cloneScript(config, project, current.verifyGpg)
+            )
+        }
+    }
+
+    /** Быстрая проверка моста Termux перед долгой операцией. */
+    private fun pingLab(next: () -> Unit) {
+        labAfterPing = next
+        startLab("ping", "Проверяю Termux…", GitHubLabSpec.pingScript())
+    }
+
+    /** Сброс зависшего запроса (Termux не ответил). */
+    fun resetLabBusy() {
+        labRequest = null
+        labAction = null
+        labPending = null
+        labAfterPing = null
+        _state.update {
+            it.copy(
+                lab = it.lab.copy(
+                    busy = false,
+                    stage = "",
+                    note = "Сброшено. Проверьте Termux и повторите."
+                )
+            )
+        }
     }
 
     fun installLabDeps() {
@@ -4537,11 +4563,57 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             labRequest = null
             labAction = null
             labPending = null
+            labAfterPing = null
             val message = result.exceptionOrNull()?.message ?: "Termux не запустился"
             _state.update {
                 it.copy(lab = it.lab.copy(busy = false, stage = "", note = message), toast = message)
             }
+            return
         }
+        viewModelScope.launch {
+            delay(labWatchdogMs(action))
+            if (labRequest == requestId) {
+                labRequest = null
+                labAction = null
+                labPending = null
+                labAfterPing = null
+                val hint = labTimeoutHint(action)
+                _state.update { s ->
+                    s.copy(
+                        lab = s.lab.copy(
+                            log = (s.lab.log + LabLogLine(text = hint, error = true)).takeLast(600),
+                            busy = false,
+                            stage = "",
+                            note = hint
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    private fun labWatchdogMs(action: String): Long = when (action) {
+        "ping" -> 12_000L
+        "clone", "install", "run" -> (labConfig().timeoutSec + 120) * 1000L
+        else -> 90_000L
+    }
+
+    private fun labTimeoutHint(action: String): String = if (action == "ping" || action == "setup") {
+        "Termux не ответил. Установите Termux, выдайте разрешение RUN_COMMAND и включите " +
+            "allow-external-apps=true в ~/.termux/termux.properties."
+    } else {
+        "Termux не ответил вовремя — команда могла ещё выполняться. Проверьте Termux и нажмите «Сбросить»."
+    }
+
+    private fun labErrorHint(stdout: String): String? = when {
+        !stdout.contains("JB_LAB_ERROR=") -> null
+        stdout.contains("no_git") -> "В Termux нет git: выполните pkg install -y git"
+        stdout.contains("no_base64") -> "В Termux нет base64: выполните pkg install -y coreutils"
+        stdout.contains("no_storage") -> "Сначала выполните termux-setup-storage"
+        stdout.contains("escalation") -> "sudo/su/doas запрещены"
+        stdout.contains("bad_path") -> "Некорректный путь среды"
+        stdout.contains("no_project") -> "Сначала клонируйте репозиторий"
+        else -> "Ошибка лаборатории"
     }
 
     private fun markerOf(text: String, prefix: String): String =
@@ -4550,8 +4622,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun handleLabResult(result: ru.jbosint.osint.data.TermuxResult) {
         val action = labAction
+        val afterPing = labAfterPing
         labRequest = null
         labAction = null
+        labAfterPing = null
         val lines = ArrayList<LabLogLine>()
         result.stdout.lineSequence().filter { it.isNotBlank() }.forEach { lines += LabLogLine(text = it) }
         result.stderr.lineSequence().filter { it.isNotBlank() }.forEach {
@@ -4563,7 +4637,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         var configured = _state.value.lab.configured
         var note: String? = null
         var autoInstall: LabProject? = null
+        var next: (() -> Unit)? = null
+        val failureTail = result.stderr.lineSequence().lastOrNull { it.isNotBlank() }?.take(200)
         when (action) {
+            "ping" -> {
+                val responded = result.stdout.contains("JB_LAB_PING")
+                if (responded) {
+                    note = "Termux отвечает"
+                    next = afterPing
+                } else {
+                    labPending = null
+                    note = "Termux не ответил. Установите Termux, выдайте разрешение RUN_COMMAND и " +
+                        "включите allow-external-apps=true в ~/.termux/termux.properties."
+                }
+            }
             "clone" -> {
                 val pending = labPending
                 labPending = null
@@ -4580,31 +4667,38 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     if (settings.labInstallDeps) autoInstall = project
                 } else {
-                    note = "Клонирование не удалось (код ${result.exitCode})"
+                    note = labErrorHint(result.stdout)
+                        ?: buildString {
+                            append("Клонирование не удалось (код ").append(result.exitCode).append(")")
+                            if (!failureTail.isNullOrBlank()) append(": ").append(failureTail)
+                        }
                 }
             }
             "install" -> {
                 note = if (result.exitCode == 0 && result.stdout.contains("JB_LAB_INSTALL_OK")) {
                     "Зависимости установлены"
                 } else {
-                    "Установка зависимостей: код ${result.exitCode}"
+                    labErrorHint(result.stdout)
+                        ?: "Установка зависимостей: код ${result.exitCode}"
                 }
             }
             "run" -> {
                 val exit = markerOf(result.stdout, "JB_LAB_EXIT=").toIntOrNull() ?: result.exitCode
-                note = "Команда завершена (код $exit)"
+                note = labErrorHint(result.stdout) ?: "Команда завершена (код $exit)"
             }
             "clear" -> {
                 project = null
-                note = "Среда удалена"
+                note = labErrorHint(result.stdout) ?: "Среда удалена"
             }
             "export" -> {
                 val out = markerOf(result.stdout, "JB_LAB_EXPORT=")
-                note = if (out.isNotBlank()) "Экспорт: $out" else "Экспорт не удался (код ${result.exitCode})"
+                note = labErrorHint(result.stdout)
+                    ?: if (out.isNotBlank()) "Экспорт: $out" else "Экспорт не удался (код ${result.exitCode})"
             }
             "setup" -> {
                 configured = result.stdout.contains("JB_LAB_SETUP_OK")
-                note = if (configured) "Конфиг Termux записан" else "Настройка не удалась (код ${result.exitCode})"
+                note = labErrorHint(result.stdout)
+                    ?: if (configured) "Конфиг Termux записан" else "Настройка не удалась (код ${result.exitCode})"
             }
         }
         _state.update {
@@ -4619,6 +4713,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 )
             )
         }
+        next?.invoke()
         if (autoInstall != null) installLabDeps()
     }
 

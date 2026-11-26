@@ -1,5 +1,7 @@
 package ru.jbosint.osint.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,10 +25,20 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import ru.jbosint.osint.data.GitHubLabConfig
+import ru.jbosint.osint.data.GitHubLabSpec
+import ru.jbosint.osint.data.TermuxSpec
 
 /**
  * GitHub-лаборатория: клонирование репозитория в Termux, запуск команд по явному
@@ -37,6 +49,29 @@ import androidx.compose.ui.unit.dp
 fun GitHubLabScreen(state: UiState, vm: AppViewModel) {
     val lab = state.lab
     val project = lab.project
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    var permGranted by remember { mutableStateOf(TermuxSpec.isPermissionGranted(context)) }
+    var pendingClone by remember { mutableStateOf(false) }
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        permGranted = granted
+        if (granted && pendingClone) {
+            pendingClone = false
+            vm.cloneLab()
+        }
+    }
+    val installed = remember {
+        runCatching { context.packageManager.getPackageInfo(TermuxSpec.PACKAGE, 0) }.isSuccess
+    }
+    val startClone = {
+        if (TermuxSpec.isPermissionGranted(context)) {
+            permGranted = true
+            vm.cloneLab()
+        } else {
+            pendingClone = true
+            permission.launch(TermuxSpec.PERMISSION)
+        }
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -51,6 +86,37 @@ fun GitHubLabScreen(state: UiState, vm: AppViewModel) {
             subtitle = "Клонирование, запуск и сборка в Termux"
         )
         Spacer(Modifier.height(12.dp))
+
+        GlowCard(modifier = Modifier.fillMaxWidth(), padding = 14) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Pill(
+                    if (installed) "Termux установлен" else "Termux не найден",
+                    if (installed) JbGreen else JbRed
+                )
+                Spacer(Modifier.weight(1f))
+                Pill(
+                    if (permGranted) "Разрешение есть" else "Нет разрешения",
+                    if (permGranted) JbGreen else JbAmber
+                )
+            }
+            if (!permGranted) {
+                TextButton(onClick = { permission.launch(TermuxSpec.PERMISSION) }) {
+                    Text("Разрешить RUN_COMMAND", color = JbAmber)
+                }
+            }
+            TextButton(onClick = {
+                clipboard.setText(AnnotatedString(GitHubLabSpec.setupScript(GitHubLabConfig())))
+            }) {
+                Text("Скопировать скрипт настройки", color = JbAccent2)
+            }
+            Text(
+                "Если Termux не отвечает: откройте Termux, вставьте скрипт настройки, выполните его. " +
+                    "Нужно allow-external-apps=true в ~/.termux/termux.properties.",
+                style = MaterialTheme.typography.labelSmall,
+                color = JbFaint
+            )
+        }
+        Spacer(Modifier.height(10.dp))
 
         GlowCard(modifier = Modifier.fillMaxWidth(), padding = 16) {
             Text("Репозиторий", style = MaterialTheme.typography.titleSmall, color = JbText)
@@ -77,7 +143,7 @@ fun GitHubLabScreen(state: UiState, vm: AppViewModel) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Button(
-                    onClick = vm::cloneLab,
+                    onClick = startClone,
                     enabled = !lab.busy,
                     modifier = Modifier.weight(1f)
                 ) {
@@ -142,6 +208,9 @@ fun GitHubLabScreen(state: UiState, vm: AppViewModel) {
                 if (lab.busy) {
                     Pill("выполняется", JbAmber)
                     Spacer(Modifier.width(6.dp))
+                    TextButton(onClick = vm::resetLabBusy) {
+                        Text("Сбросить", color = JbAmber)
+                    }
                 }
                 TextButton(onClick = vm::clearLabLog) { Text("Очистить лог", color = JbMuted) }
             }
@@ -175,7 +244,13 @@ fun GitHubLabScreen(state: UiState, vm: AppViewModel) {
             }
             lab.note?.let { note ->
                 Spacer(Modifier.height(8.dp))
-                Text(note, style = MaterialTheme.typography.bodySmall, color = JbGreen)
+                val problem = note.contains("не ", true) || note.contains("нет ", true) ||
+                    note.contains("ошиб", true) || note.contains("Сначала", true)
+                Text(
+                    note,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (problem) JbAmber else JbGreen
+                )
             }
             Spacer(Modifier.height(10.dp))
             OutlinedTextField(

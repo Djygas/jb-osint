@@ -26,9 +26,28 @@ class GitHubLabTest {
     }
 
     @Test
+    fun acceptsSchemeLessAndBrowserUrl() {
+        assertEquals(
+            "https://github.com/a/b",
+            GitHubLabSpec.projectFor(config, "github.com/a/b", "")?.url
+        )
+        assertEquals(
+            "https://github.com/a/b",
+            GitHubLabSpec.projectFor(config, "http://github.com/a/b", "")?.url
+        )
+        assertEquals(
+            "dev",
+            GitHubLabSpec.projectFor(config, "https://github.com/a/b/tree/dev", "")?.ref
+        )
+        assertEquals(
+            "v2",
+            GitHubLabSpec.projectFor(config, "https://github.com/a/b/releases/tag/v2", "")?.ref
+        )
+    }
+
+    @Test
     fun rejectsForeignHostAndBadRef() {
         assertNull(GitHubLabSpec.projectFor(config, "https://gitlab.com/a/b", ""))
-        assertNull(GitHubLabSpec.projectFor(config, "http://github.com/a/b", ""))
         assertNull(GitHubLabSpec.projectFor(config, "https://github.com/a/b", "a..b"))
         assertNull(GitHubLabSpec.projectFor(config, "https://github.com/a/b", "-x"))
         assertNull(GitHubLabSpec.projectFor(config, "https://github.com/a/b", "bad ref"))

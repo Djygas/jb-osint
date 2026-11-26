@@ -111,11 +111,49 @@ object GitHubLabSpec {
     fun hostAllowed(config: GitHubLabConfig, host: String): Boolean =
         config.allowedDomains.any { it.equals(host, ignoreCase = true) }
 
+    private val ownerPattern = Regex("^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,38})$")
+    private val repoPattern = Regex("^[A-Za-z0-9._-]{1,100}$")
+
+    private data class RepoParts(val owner: String, val name: String, val ref: String?)
+
+    /**
+     * Разбор ссылки: принимает `github.com/owner/repo` без схемы, `https://…`,
+     * а также ссылки из браузера (`/tree/<ветка>`, `/releases/tag/<тег>`).
+     */
+    private fun parseRepoUrl(raw: String): RepoParts? {
+        var text = raw.trim()
+        if (text.isEmpty()) return null
+        text = when {
+            text.startsWith("http://", ignoreCase = true) -> "https://" + text.substring(7)
+            text.startsWith("https://", ignoreCase = true) -> text
+            else -> "https://$text"
+        }
+        text = text.substringBefore('?').substringBefore('#')
+        val uri = runCatching { java.net.URI(text) }.getOrNull() ?: return null
+        if (!uri.scheme.equals("https", ignoreCase = true)) return null
+        val host = uri.host?.lowercase() ?: return null
+        if (host != "github.com" && host != "www.github.com") return null
+        val segments = uri.path.orEmpty().trim('/').split('/').filter { it.isNotBlank() }
+        if (segments.size < 2) return null
+        val owner = segments[0]
+        val name = segments[1].removeSuffix(".git")
+        if (!ownerPattern.matches(owner) || !repoPattern.matches(name)) return null
+        val ref = when {
+            segments.size >= 4 && segments[2] == "tree" ->
+                segments.drop(3).joinToString("/").takeIf { it.isNotBlank() }
+            segments.size >= 5 && segments[2] == "releases" && segments[3] == "tag" ->
+                segments.drop(4).joinToString("/").takeIf { it.isNotBlank() }
+            else -> null
+        }
+        return RepoParts(owner, name, ref)
+    }
+
     /** Проверка URL и расчёт каталога проекта. null — ссылка/ветка недопустимы. */
     fun projectFor(config: GitHubLabConfig, url: String, ref: String): LabProject? {
-        val repo = PluginRules.parseRepo(url) ?: return null
+        val repo = parseRepoUrl(url) ?: return null
         if (!hostAllowed(config, "github.com")) return null
-        val cleanRef = sanitizeRef(ref) ?: return null
+        val requested = ref.trim().ifBlank { repo.ref.orEmpty() }
+        val cleanRef = sanitizeRef(requested) ?: return null
         val normalized = "https://github.com/${repo.owner}/${repo.name}"
         val hash = hashFor(normalized, cleanRef)
         return LabProject(
@@ -164,12 +202,18 @@ object GitHubLabSpec {
         append("WORK=\"\$HOME/.jb_osint/lab\"\n")
         append("mkdir -p \"\$CONFIG_DIR\" \"\$WORK\"\n")
         append("chmod 700 \"\$WORK\"\n")
+        append("mkdir -p \"\$HOME/.termux\"\n")
+        append("grep -q '^allow-external-apps=true' \"\$HOME/.termux/termux.properties\" 2>/dev/null || ")
+        append("echo 'allow-external-apps=true' >> \"\$HOME/.termux/termux.properties\"\n")
         append("cat > \"\$CONFIG_DIR/github_lab.json\" <<'JBOSINT'\n")
         append(config.toJson()).append('\n')
         append("JBOSINT\n")
         append("chmod 600 \"\$CONFIG_DIR/github_lab.json\"\n")
         append("echo \"JB_LAB_SETUP_OK\"\n")
     }
+
+    /** Проверка моста Termux: результат приходит только если разрешение выдано. */
+    fun pingScript(): String = "echo \"JB_LAB_PING\"\n"
 
     /** Клонирование и определение типа проекта. Код репозитория не запускается. */
     fun cloneScript(
@@ -182,6 +226,8 @@ object GitHubLabSpec {
         return """
             set -euo pipefail
             umask 077
+            command -v git >/dev/null 2>&1 || { echo "JB_LAB_ERROR=no_git"; echo "pkg install -y git"; exit 6; }
+            command -v base64 >/dev/null 2>&1 || { echo "JB_LAB_ERROR=no_base64"; exit 6; }
             WORK=${q(safeWorkDir(config.workDir))}
             PROJ=${q(project.dir)}
             mkdir -p "${'$'}WORK"

@@ -339,6 +339,9 @@ object TermuxSpec {
             putExtra(EXTRA_PENDING_INTENT, buildPendingIntent(context, requestId))
         }
         context.startService(intent)
+            ?: throw IllegalStateException(
+                "Termux не принял команду: проверьте разрешение RUN_COMMAND и allow-external-apps=true"
+            )
         Unit
     }
 }
