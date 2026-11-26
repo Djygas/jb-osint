@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -142,6 +143,18 @@ fun SettingsScreen(state: UiState, vm: AppViewModel) {
                     onCheckedChange = { enabled ->
                         if (enabled) confirmLeakPasswords = true else vm.setLeakShowPasswords(false)
                     }
+                )
+            }
+        }
+
+        item {
+            SectionHeader("GitHub-лаборатория")
+            GlowCard(modifier = Modifier.fillMaxWidth(), padding = 16) {
+                ActionRow(
+                    icon = Icons.Filled.Science,
+                    title = "GitHub Лаборатория",
+                    subtitle = "Клон репозитория, поиск скриптов и запуск через локальный сервер Termux.",
+                    onClick = { vm.navigate(Screen.LAB) }
                 )
             }
         }
