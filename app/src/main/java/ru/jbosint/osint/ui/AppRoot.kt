@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
+import ru.jbosint.lab.ui.screen.GitHubLabScreen as ServerLabScreen
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -143,7 +144,7 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
                     Screen.RESULTS -> ResultsScreen(state, vm)
                     Screen.TELEGRAM -> TelegramScreen(state, vm)
                     Screen.LEAKS -> LeaksScreen(state, vm)
-                    Screen.LAB -> GitHubLabScreen(state, vm)
+                    Screen.LAB -> ServerLabScreen()
                     Screen.KEYS -> KeysScreen(state, vm)
                     Screen.SETTINGS -> SettingsScreen(state, vm)
                     Screen.PROFILE -> ProfileScreen(state, vm)
