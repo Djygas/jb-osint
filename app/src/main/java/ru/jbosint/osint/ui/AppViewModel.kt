@@ -69,6 +69,10 @@ import ru.jbosint.osint.data.DocSearch
 import ru.jbosint.osint.data.DocumentStore
 import ru.jbosint.osint.data.LeakIndexReport
 import ru.jbosint.osint.data.LeakRules
+import ru.jbosint.osint.data.LeakReportCodec
+import ru.jbosint.osint.data.LeakReportRow
+import ru.jbosint.osint.data.LeakReportSource
+import ru.jbosint.osint.data.LeakRows
 import ru.jbosint.osint.data.LeakScan
 import ru.jbosint.osint.data.LeakStore
 import ru.jbosint.osint.data.DocumentText
@@ -415,23 +419,19 @@ data class LeakUi(
     val fileCount: Int = 0,
     val rowCount: Long = 0,
     val secretRows: Long = 0,
-    val sizeMb: Int = 0
+    val sizeMb: Int = 0,
+    /** Показывать пароли из локального индекса (по умолчанию выключено). */
+    val showPasswords: Boolean = false,
+    /** Фильтр по источнику: пустая строка — все источники. */
+    val filterSource: String = "",
+    /** Открытая запись для экрана деталей. */
+    val selected: LeakRowUi? = null,
+    val selectedTitle: String = ""
 )
 
-data class LeakSourceUi(
-    val id: String,
-    val title: String,
-    val hits: Int,
-    val cached: Boolean = false,
-    val note: String? = null,
-    val rows: List<LeakRowUi> = emptyList()
-)
+typealias LeakSourceUi = LeakReportSource
 
-data class LeakRowUi(
-    val value: String,
-    val where: String = "",
-    val secret: Boolean = false
-)
+typealias LeakRowUi = LeakReportRow
 
 data class TermuxUi(
     val enabled: Boolean = false,
@@ -563,7 +563,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 enabled = settings.serverEnabled,
                 url = settings.serverUrl,
                 keyed = secure.get("server_key")?.isNotBlank() == true
-            )
+            ),
+            leak = LeakUi(showPasswords = settings.showLeakPasswords)
         )
         detectBackupOffer()
     }
@@ -4019,6 +4020,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     useApi = settings.leakUseApi,
                     useIndex = settings.leakUseIndex,
                     rawScan = settings.leakRaw,
+                    showPasswords = settings.showLeakPasswords,
                     note = null
                 )
             )
@@ -4026,7 +4028,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         refreshLeakStats()
     }
 
-    fun closeLeakScan() = _state.update { it.copy(leak = it.leak.copy(open = false)) }
+    /** Режим показа паролей; включает/выключает только отображение и экспорт. */
+    fun setLeakShowPasswords(enabled: Boolean) {
+        settings.showLeakPasswords = enabled
+        _state.update { it.copy(leak = it.leak.copy(showPasswords = enabled)) }
+    }
+
+    fun setLeakFilter(sourceId: String) =
+        _state.update { it.copy(leak = it.leak.copy(filterSource = sourceId)) }
+
+    fun openLeakRow(row: LeakRowUi) =
+        _state.update { it.copy(leak = it.leak.copy(selected = row)) }
+
+    fun closeLeakRow() = _state.update { it.copy(leak = it.leak.copy(selected = null)) }
+
+    fun closeLeakScan() = _state.update {
+        it.copy(leak = it.leak.copy(open = false, selected = null))
+    }
 
     private fun refreshLeakStats() {
         viewModelScope.launch {
@@ -4191,7 +4209,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         note = null,
                         offline = false,
                         cached = false,
-                        query = subject
+                        query = subject,
+                        filterSource = "",
+                        selected = null
                     )
                 )
             }
@@ -4202,21 +4222,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
             outcome.onSuccess { result ->
                 val groups = result.sources.map { row ->
+                    val rows = result.facts
+                        .filter { it.sourceId == row.id }
+                        .mapNotNull { LeakRows.fromFact(it) }
+                        .distinctBy { "${it.value}|${it.where}|${it.source}|${it.password}" }
+                        .take(50)
                     LeakSourceUi(
                         id = row.id,
                         title = row.title,
                         hits = row.hits,
                         cached = row.cached,
                         note = row.error,
-                        rows = result.facts.filter { it.sourceId == row.id }.take(20).map { fact ->
-                            LeakRowUi(
-                                value = fact.value,
-                                where = fact.attributes["Файл"]?.let { file ->
-                                    "$file · стр. ${fact.attributes["Строка"] ?: "?"}"
-                                } ?: fact.attributes["Дата"].orEmpty(),
-                                secret = fact.attributes["Пароль в строке"]?.startsWith("есть") == true
-                            )
-                        }
+                        rows = rows
                     )
                 }
                 _state.update {
@@ -4227,7 +4244,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             note = result.note,
                             offline = result.offline,
                             cached = result.cached,
-                            sources = groups
+                            sources = groups,
+                            filterSource = "",
+                            selected = null
                         )
                     )
                 }
@@ -4246,7 +4265,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** В отчёте только маски — экспорт ничего не раскрывает. */
+    /**
+     * Экспорт JSON в схеме `jb-osint/leak-scan/2.0`.
+     * Пароль попадает в файл только при включённом показе паролей.
+     */
     fun exportLeakJson() {
         val leak = _state.value.leak
         if (leak.sources.isEmpty()) {
@@ -4254,44 +4276,59 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         viewModelScope.launch {
-            val root = JSONObject()
-                .put("schema", "jb-osint/leak-scan/1.0")
-                .put("query", leak.query)
-                .put("createdAt", System.currentTimeMillis())
-                .put("offline", leak.offline)
-                .put("cached", leak.cached)
-                .put("note", leak.note.orEmpty())
-            val sources = JSONArray()
-            leak.sources.forEach { source ->
-                val rows = JSONArray()
-                source.rows.forEach { row ->
-                    rows.put(
-                        JSONObject()
-                            .put("value", row.value)
-                            .put("where", row.where)
-                            .put("hadPassword", row.secret)
-                    )
-                }
-                sources.put(
-                    JSONObject()
-                        .put("id", source.id)
-                        .put("title", source.title)
-                        .put("hits", source.hits)
-                        .put("cached", source.cached)
-                        .put("rows", rows)
-                )
-            }
-            root.put("sources", sources)
-            val bytes = root.toString(2).toByteArray(Charsets.UTF_8)
-            val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US)
-                .format(java.util.Date())
-            val saved = runCatching { exporter.save("leak-scan-$stamp.json", bytes, "application/json") }
-            saved.onSuccess { exported ->
-                _state.update { it.copy(toast = "Отчёт готов: ${exported.fileName}") }
-                _shareEvents.emit(ShareRequest(exported.uri, exported.mime, exported.fileName))
-            }.onFailure { error ->
-                _state.update { it.copy(toast = "Экспорт не удался: ${error.message ?: "ошибка"}") }
-            }
+            val text = LeakReportCodec.encode(
+                query = leak.query,
+                createdAt = System.currentTimeMillis(),
+                offline = leak.offline,
+                cached = leak.cached,
+                note = leak.note.orEmpty(),
+                sources = leak.sources,
+                showPasswords = leak.showPasswords
+            )
+            deliverLeak("leak-scan-${leakStamp()}.json", text.toByteArray(Charsets.UTF_8), "application/json")
+        }
+    }
+
+    /** CSV без паролей: только значение, факт наличия, происхождение и источник. */
+    fun exportLeakCsv() {
+        val leak = _state.value.leak
+        if (leak.sources.isEmpty()) {
+            _state.update { it.copy(toast = "Сначала выполните поиск") }
+            return
+        }
+        viewModelScope.launch {
+            val text = LeakReportCodec.toCsv(leak.sources)
+            deliverLeak(
+                "leak-scan-${leakStamp()}.csv",
+                ("\uFEFF" + text).toByteArray(Charsets.UTF_8),
+                "text/csv"
+            )
+        }
+    }
+
+    /** HTML без паролей: показываем только «есть/нет». */
+    fun exportLeakHtml() {
+        val leak = _state.value.leak
+        if (leak.sources.isEmpty()) {
+            _state.update { it.copy(toast = "Сначала выполните поиск") }
+            return
+        }
+        viewModelScope.launch {
+            val text = LeakReportCodec.toHtml(leak.query, System.currentTimeMillis(), leak.sources)
+            deliverLeak("leak-scan-${leakStamp()}.html", text.toByteArray(Charsets.UTF_8), "text/html")
+        }
+    }
+
+    private fun leakStamp(): String =
+        java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US).format(java.util.Date())
+
+    private suspend fun deliverLeak(fileName: String, bytes: ByteArray, mime: String) {
+        val saved = runCatching { exporter.save(fileName, bytes, mime) }
+        saved.onSuccess { exported ->
+            _state.update { it.copy(toast = "Отчёт готов: ${exported.fileName}") }
+            _shareEvents.emit(ShareRequest(exported.uri, exported.mime, exported.fileName))
+        }.onFailure { error ->
+            _state.update { it.copy(toast = "Экспорт не удался: ${error.message ?: "ошибка"}") }
         }
     }
 

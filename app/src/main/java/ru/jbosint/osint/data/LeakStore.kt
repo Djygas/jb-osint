@@ -15,7 +15,9 @@ import java.io.InputStreamReader
  * при индексации считаются только строки с адресами, а сам поиск идёт по
  * индексу `hash` в SQLite, а не чтением файлов.
  *
- * Хранится: SHA-256 адреса, маска, файл, строка, признак пароля. Паролей нет.
+ * Хранится: SHA-256 адреса, маска, файл, строка, происхождение и (для строк
+ * вида `email:password`) сам пароль. Пароль показывается и экспортируется только
+ * при включённом режиме «Показывать пароли».
  */
 class LeakStore(context: Context) : SQLiteOpenHelper(
     context.applicationContext, DB_NAME, null, DB_VERSION
@@ -23,7 +25,7 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
 
     companion object {
         private const val DB_NAME = "leaks.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
 
         /** Папка дампов внутри приватного хранилища приложения. */
         fun leaksDir(context: Context): File =
@@ -63,18 +65,25 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
                 "line INTEGER NOT NULL," +
                 "kind TEXT NOT NULL," +
                 "mask TEXT NOT NULL," +
-                "has_secret INTEGER NOT NULL DEFAULT 0)"
+                "has_secret INTEGER NOT NULL DEFAULT 0," +
+                "password TEXT," +
+                "origin TEXT)"
         )
         db.execSQL("CREATE INDEX idx_leak_hash ON hits(hash)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_leak_origin ON hits(origin)")
         db.execSQL("CREATE TABLE cache(k TEXT PRIMARY KEY, body TEXT NOT NULL, created INTEGER NOT NULL)")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // Индекс пересобирается из файлов: терять нечего, схема могла поменяться.
-        db.execSQL("DROP TABLE IF EXISTS hits")
-        db.execSQL("DROP TABLE IF EXISTS files")
-        db.execSQL("DROP TABLE IF EXISTS cache")
-        onCreate(db)
+        // Миграция без пересоздания: добавляем колонки пароля и происхождения.
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE hits ADD COLUMN password TEXT")
+            db.execSQL("ALTER TABLE hits ADD COLUMN origin TEXT")
+            // Старые строки индекса не содержат пароль/происхождение — помечаем файлы
+            // изменёнными, чтобы ближайшая индексация перечитала их (таблицу не пересоздаём).
+            runCatching { db.execSQL("UPDATE files SET mtime = -1") }
+        }
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_leak_origin ON hits(origin)")
     }
 
     // ------------------------------------------------------------------ индексация
@@ -173,7 +182,8 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
         var secrets = 0L
         var pending = 0
         val statement = db.compileStatement(
-            "INSERT INTO hits(hash, file_id, line, kind, mask, has_secret) VALUES(?,?,?,?,?,?)"
+            "INSERT INTO hits(hash, file_id, line, kind, mask, has_secret, password, origin) " +
+                "VALUES(?,?,?,?,?,?,?,?)"
         )
 
         var failure: Throwable? = null
@@ -192,10 +202,11 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
                     val phone = if (emails.isEmpty()) LeakRules.phoneIn(line) else null
                     if (emails.isEmpty() && phone == null) continue
 
-                    val secret = emails.isNotEmpty() && LeakRules.hasSecret(line, emails.first())
-                    if (secret) secrets++
-
+                    val origin = file.name
                     for (email in emails) {
+                        val password = LeakRules.passwordIn(line, email)
+                        val secret = password != null || LeakRules.hasSecret(line, email)
+                        if (secret) secrets++
                         statement.clearBindings()
                         statement.bindString(1, LeakRules.hash(email))
                         statement.bindLong(2, fileId)
@@ -203,6 +214,8 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
                         statement.bindString(4, "email")
                         statement.bindString(5, LeakRules.mask(email))
                         statement.bindLong(6, if (secret) 1L else 0L)
+                        if (password != null) statement.bindString(7, password) else statement.bindNull(7)
+                        statement.bindString(8, origin)
                         statement.executeInsert()
                         if (++pending >= LeakRules.CHUNK) {
                             db.setTransactionSuccessful()
@@ -219,6 +232,8 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
                         statement.bindString(4, "phone")
                         statement.bindString(5, LeakRules.mask(phone))
                         statement.bindLong(6, 0L)
+                        statement.bindNull(7)
+                        statement.bindString(8, origin)
                         statement.executeInsert()
                         if (++pending >= LeakRules.CHUNK) {
                             db.setTransactionSuccessful()
@@ -272,7 +287,7 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
         val hash = LeakRules.hash(subject)
         val out = ArrayList<LeakHit>()
         readableDatabase.rawQuery(
-            "SELECT h.mask, h.line, h.kind, h.has_secret, f.path FROM hits h " +
+            "SELECT h.mask, h.line, h.kind, h.has_secret, f.path, h.password, h.origin FROM hits h " +
                 "JOIN files f ON f.id = h.file_id WHERE h.hash = ? ORDER BY h.line LIMIT ?",
             arrayOf(hash, LeakRules.MAX_HITS.toString())
         ).use { cursor ->
@@ -282,7 +297,9 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
                     line = cursor.getInt(1),
                     kind = cursor.getString(2),
                     mask = cursor.getString(0),
-                    hasSecret = cursor.getInt(3) == 1
+                    hasSecret = cursor.getInt(3) == 1,
+                    password = cursor.getString(5),
+                    origin = cursor.getString(6)
                 )
             }
         }

@@ -29,6 +29,25 @@ data class SearchParams(val query: String) {
 }
 
 /**
+ * Одна запись источника утечек для определения происхождения.
+ * [attributes] — поля ответа, из которых источник может вывести название дампа.
+ */
+data class LeakRecord(
+    val value: String,
+    val source: String,
+    val attributes: Map<String, String> = emptyMap(),
+    val url: String = ""
+)
+
+/** Общее правило: происхождение берём из метаданных дампа, а не из имени агрегатора. */
+object LeakOrigin {
+    fun from(record: LeakRecord): String =
+        record.attributes["where"].orEmpty()
+            .ifBlank { record.attributes["Наборы данных"].orEmpty() }
+            .trim()
+}
+
+/**
  * Описание источника для экрана настроек и отчёта.
  * [officialApi] = true только для официальных API; такие источники разрешены
  * политикой приложения, в отличие от скрейпинга закрытых страниц.
@@ -56,6 +75,17 @@ interface IDataSource {
     fun supports(params: SearchParams): Boolean = info.types.isNotEmpty()
 
     suspend fun search(params: SearchParams, key: KeySource): List<RawFact>
+
+    /**
+     * Происхождение записи утечки: название дампа/сервиса, откуда пришла запись.
+     * Пустая строка — источник не знает происхождение. Пароль здесь не участвует.
+     */
+    fun resolveOrigin(record: LeakRecord): String = LeakOrigin.from(record)
+}
+
+/** Источник, который умеет сам назвать происхождение записи из своего ответа. */
+interface OriginAware {
+    fun originOf(record: LeakRecord): String
 }
 
 /** Адаптер: любой существующий [Connector] становится [IDataSource] без переписывания. */
@@ -65,6 +95,10 @@ class ConnectorDataSource(
 ) : IDataSource {
     override suspend fun search(params: SearchParams, key: KeySource): List<RawFact> =
         connector.collect(params.query, key)
+
+    /** Прокидываем вызов модулю, если он реализует [OriginAware], иначе — общее правило. */
+    override fun resolveOrigin(record: LeakRecord): String =
+        (connector as? OriginAware)?.originOf(record) ?: LeakOrigin.from(record)
 }
 
 /**

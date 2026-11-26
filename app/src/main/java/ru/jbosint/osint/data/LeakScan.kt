@@ -13,14 +13,9 @@ import java.security.MessageDigest
 /**
  * Правила локального индекса утечек: чистые функции без Android и сети.
  *
- * Модель сознательно не хранит пароли. В базу попадают только:
- *  - SHA-256 нормализованного адреса (по нему идёт поиск),
- *  - маска для показа (`iv***@mail.ru`),
- *  - имя файла, номер строки и признак «в строке был пароль».
- *
- * Пароль остаётся в исходном файле пользователя: приложение показывает,
- * что учётная запись засветилась и где именно, но не превращается в хранилище
- * чужих учётных данных.
+ * Индекс хранит SHA-256 адреса, маску, место в файле и происхождение (имя файла).
+ * Пароль сохраняется в отдельной колонке и показывается только при включённом
+ * режиме «Показывать пароли»; по умолчанию он скрыт.
  */
 object LeakRules {
 
@@ -102,6 +97,29 @@ object LeakRules {
     }
 
     /**
+     * Пароль из строки формата `email:password` (а также `;`, TAB, `,`, `|`).
+     * Берём только значение сразу после адреса: чужие поля (телефон, дубль адреса)
+     * паролем не считаются. Пароль сохраняется в индексе, но показывается только
+     * при включённом режиме показа паролей.
+     */
+    fun passwordIn(line: String, email: String): String? {
+        if (line.isBlank()) return null
+        val text = if (line.length > MAX_LINE) line.substring(0, MAX_LINE) else line
+        val parts = text.split(':', ';', '\t', ',', '|')
+        val at = parts.indexOfFirst { it.trim().trim('"', '\'').equals(email, ignoreCase = true) }
+        if (at < 0) return null
+        val candidate = parts.getOrNull(at + 1)
+            ?.trim()
+            ?.trim('"', '\'', ' ', ')', '(', ']', '[')
+            ?.takeIf { it.isNotEmpty() }
+            ?: return null
+        if (candidate.length !in 1..128) return null
+        if (candidate.contains('@') || candidate.contains(' ')) return null
+        if (phoneRe.matches(candidate)) return null
+        return candidate
+    }
+
+    /**
      * Эвристика «в строке есть пароль»: рядом с адресом стоит токен не из букв
      * (обычно с цифрами), не похожий на почту. Сам токен не возвращаем и не храним.
      */
@@ -119,13 +137,17 @@ object LeakRules {
     }
 }
 
-/** Одно совпадение в локальном индексе. Пароля здесь нет и быть не может. */
+/** Одно совпадение в локальном индексе. */
 data class LeakHit(
     val file: String,
     val line: Int,
     val kind: String,
     val mask: String,
-    val hasSecret: Boolean
+    val hasSecret: Boolean,
+    /** Пароль из строки `email:password`; null, если его нет или он не распознан. */
+    val password: String? = null,
+    /** Происхождение записи: имя файла-дампа. */
+    val origin: String? = null
 )
 
 data class LeakIndexStats(
@@ -153,8 +175,9 @@ data class LeakIndexReport(
  * Если сеть недоступна, возвращается то, что есть локально, с пометкой об офлайне,
  * а не ошибка «No Internet».
  *
- * Чего здесь нет намеренно: перебора прокси для обхода 429 и выдачи паролей.
- * На 429 каскад ждёт и переходит к следующему сервису — это и есть отказоустойчивость.
+ * Чего здесь нет намеренно: перебора прокси для обхода 429 и выдачи паролей
+ * из онлайн-сервисов. Пароль в отчёт попадает только из локального индекса,
+ * а на 429 каскад ждёт и переходит к следующему сервису.
  */
 class LeakScan(private val store: LeakStore, private val keys: KeySource) {
 
@@ -242,8 +265,7 @@ class LeakScan(private val store: LeakStore, private val keys: KeySource) {
         var offline = false
         var fromCache = false
 
-        fun add(fact: RawFact) {
-            val key = "${fact.sourceId}|${fact.kind}|${fact.value}"
+        fun add(fact: RawFact, key: String = "${fact.sourceId}|${fact.kind}|${fact.value}") {
             facts.putIfAbsent(key, fact)
         }
 
@@ -251,20 +273,29 @@ class LeakScan(private val store: LeakStore, private val keys: KeySource) {
         if (useIndex) {
             onStage("Локальный индекс…")
             val hits = runCatching { store.lookup(query) }.getOrDefault(emptyList())
+            var sequence = 0
             hits.forEach { hit ->
+                val origin = hit.origin?.takeIf { it.isNotBlank() }
+                    ?: hit.file.substringAfterLast('/')
+                val password = hit.password?.takeIf { it.isNotBlank() }
+                val seenPassword = password != null || hit.hasSecret
                 add(
                     RawFact(
                         category = FactCategory.OTHER,
                         kind = if (hit.kind == "phone") "Утечка: телефон" else "Утечка: почта",
-                        value = hit.mask,
+                        value = query,
                         subject = query,
                         attributes = buildMap {
+                            put("where", origin)
                             put("Файл", hit.file.substringAfterLast('/'))
                             put("Строка", hit.line.toString())
-                            put("Пароль в строке", if (hit.hasSecret) "есть — см. свой файл" else "нет")
+                            put("Маска", hit.mask)
+                            put("hadPassword", seenPassword.toString())
+                            if (password != null) put("password", password)
                         },
                         sourceId = INDEX_ID
-                    )
+                    ),
+                    key = "index|${hit.file}|${hit.line}|${hit.kind}|${sequence++}"
                 )
             }
             rows += SourceRow(

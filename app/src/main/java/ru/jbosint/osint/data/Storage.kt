@@ -103,6 +103,14 @@ class SettingsStore(context: Context) {
     var leakRaw: Boolean
         get() = prefs.getBoolean("leak_raw", false)
         set(value) = prefs.edit().putBoolean("leak_raw", value).apply()
+
+    /**
+     * Показывать пароли из локального индекса дампов в отчётах утечек.
+     * По умолчанию выключено: пароль маскируется, в экспорт не попадает.
+     */
+    var showLeakPasswords: Boolean
+        get() = prefs.getBoolean("show_leak_passwords", false)
+        set(value) = prefs.edit().putBoolean("show_leak_passwords", value).apply()
 }
 
 data class HistoryEntry(

@@ -53,6 +53,23 @@ fun LeaksScreen(state: UiState, vm: AppViewModel) {
         item { ScreenHeader("Проверка утечек", "Утечки логинов", "Email или телефон · официальные API") }
 
         item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Pill(
+                    if (state.leak.showPasswords) "Пароли: вкл" else "Пароли: выкл",
+                    if (state.leak.showPasswords) JbAmber else JbFaint
+                )
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = vm::openLeakScan) {
+                    Text("Глубокий поиск по дампам", color = JbAccent2)
+                }
+            }
+        }
+
+        item {
             GlowCard {
                 OutlinedTextField(
                     value = state.leaksQuery,
@@ -104,12 +121,13 @@ fun LeaksScreen(state: UiState, vm: AppViewModel) {
                     Icon(Icons.Filled.Lock, contentDescription = null, tint = JbAccent2)
                     Spacer(Modifier.width(10.dp))
                     Column {
-                        Text("Пароли не собираются", style = MaterialTheme.typography.titleSmall, color = JbText)
+                        Text("Пароли контролируются", style = MaterialTheme.typography.titleSmall, color = JbText)
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            "Модули обращаются к официальным API Have I Been Pwned и LeakCheck. " +
-                                "В отчёт попадают только сервис, дата, набор данных и типы полей — без логинов, " +
-                                "паролей и хешей. Проверяйте только свои данные или данные с согласия владельца.",
+                            "Официальные API Have I Been Pwned и LeakCheck паролей не отдают. " +
+                                "Пароли из локального индекса дампов видны только в «Глубоком поиске» и по " +
+                                "умолчанию скрыты; в JSON они попадают лишь при включённом режиме, " +
+                                "CSV и HTML — никогда. Проверяйте только свои данные или данные с согласия владельца.",
                             style = MaterialTheme.typography.bodySmall,
                             color = JbMuted
                         )

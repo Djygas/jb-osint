@@ -76,7 +76,6 @@ private val kindLabel = mapOf(
 @Composable
 fun HomeScreen(state: UiState, vm: AppViewModel) {
     if (state.docs.open) DocumentsDialog(state, vm)
-    if (state.leak.open) LeakScanDialog(state, vm)
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()

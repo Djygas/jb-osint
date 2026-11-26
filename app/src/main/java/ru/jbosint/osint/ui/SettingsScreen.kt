@@ -66,6 +66,7 @@ import ru.jbosint.osint.data.TermuxSpec
 fun SettingsScreen(state: UiState, vm: AppViewModel) {
     var confirmWipe by remember { mutableStateOf(false) }
     var confirmHistory by remember { mutableStateOf(false) }
+    var confirmLeakPasswords by remember { mutableStateOf(false) }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().imePadding().padding(horizontal = 20.dp),
@@ -127,6 +128,21 @@ fun SettingsScreen(state: UiState, vm: AppViewModel) {
                         Text("Управление ключами", color = JbAccent2, style = MaterialTheme.typography.labelMedium)
                     }
                 }
+            }
+        }
+
+        item {
+            SectionHeader("Утечки")
+            GlowCard(modifier = Modifier.fillMaxWidth(), padding = 16) {
+                ToggleRow(
+                    title = "Показывать пароли в отчётах утечек",
+                    subtitle = "Пароль из локального индекса дампов виден в карточке и попадает в JSON-экспорт. " +
+                        "CSV и HTML не содержат пароль ни при каком режиме. По умолчанию выключено.",
+                    checked = state.leak.showPasswords,
+                    onCheckedChange = { enabled ->
+                        if (enabled) confirmLeakPasswords = true else vm.setLeakShowPasswords(false)
+                    }
+                )
             }
         }
 
@@ -273,6 +289,32 @@ fun SettingsScreen(state: UiState, vm: AppViewModel) {
             },
             dismissButton = {
                 TextButton(onClick = { confirmWipe = false }) { Text("Отмена", color = JbMuted) }
+            }
+        )
+    }
+
+    if (confirmLeakPasswords) {
+        AlertDialog(
+            onDismissRequest = { confirmLeakPasswords = false },
+            containerColor = JbSurfaceHigh,
+            titleContentColor = JbText,
+            textContentColor = JbMuted,
+            title = { Text("Показывать пароли?") },
+            text = {
+                Text(
+                    "Пароли из локального индекса дампов будут видны в карточках утечек и попадут " +
+                        "в JSON-экспорт. Их можно будет скопировать. Включайте только если понимаете " +
+                        "риск утечки: CSV и HTML пароли не содержат."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.setLeakShowPasswords(true)
+                    confirmLeakPasswords = false
+                }) { Text("Включить", color = JbAmber) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmLeakPasswords = false }) { Text("Отмена", color = JbMuted) }
             }
         )
     }

@@ -149,6 +149,7 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
                     Screen.MODULES -> ModuleAssistantScreen(state, vm)
                     Screen.PLUGINS -> PluginScreen(onBack = { vm.navigate(Screen.SETTINGS) })
                 }
+                if (state.leak.open) LeakScanDialog(state, vm)
                 if (state.userMode) {
                     UserModeBadge(
                         state = state,
