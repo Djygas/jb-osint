@@ -74,7 +74,7 @@ internal fun JSONArray?.joined(separator: String = ", "): String {
 object Connectors {
 
     val all: List<Connector> = listOf(
-        GithubConnector, HibpConnector, LeakCheckConnector, VirusTotalConnector, ShodanConnector,
+        GithubConnector, HibpConnector, LeakCheckConnector, HudsonRockConnector, VirusTotalConnector, ShodanConnector,
         NumverifyConnector, HunterConnector, IpinfoConnector, TgstatConnector,
         VkConnector, DyxlessConnector, OpenCorporatesConnector, GoogleConnector, YandexConnector,
         BraveConnector, SerpApiConnector, DdgConnector, WikipediaConnector,
@@ -399,9 +399,9 @@ private object HibpConnector : Connector {
 }
 
 /**
- * LeakCheck: участие адреса, телефона, ника или домена в утечках.
- * Публичный API отдаёт сводку — сколько записей, какие наборы данных и какие типы полей.
- * Сами записи и пароли модуль не забирает и в отчёт не выводит.
+ * LeakCheck Public API: участие адреса, телефона, ника или домена в утечках.
+ * Отдаёт только сводку — сколько записей, какие наборы данных и какие типы полей.
+ * Используется как бесплатный режим и как откат, когда тариф без полных записей.
  */
 internal object LeakCheckApi {
 
@@ -415,7 +415,7 @@ internal object LeakCheckApi {
         QueryKind.DOMAIN to "domain"
     )
 
-    private val fieldTitles = mapOf(
+    internal val fieldTitles = mapOf(
         "email" to "почта", "phone" to "телефон", "name" to "имя", "first_name" to "имя",
         "last_name" to "фамилия", "middle_name" to "отчество", "dob" to "дата рождения",
         "address" to "адрес", "city" to "город", "state" to "регион", "zip" to "индекс",
@@ -471,15 +471,225 @@ internal object LeakCheckApi {
     }
 }
 
+/**
+ * LeakCheck Pro API v2 — полные записи, включая пароли.
+ *
+ * GET https://leakcheck.io/api/v2/query/{query}?type=…&limit=…
+ * Ключ идёт заголовком X-API-Key, в адрес не попадает (адрес виден в логах и прокси).
+ * Тариф Basic отдаёт только признак пароля; Monthly/Lifetime — сами записи.
+ */
+internal object LeakCheckPro {
+
+    const val BASE = "https://leakcheck.io/api/v2/query/"
+    private const val MAX_RECORDS = 60
+    private const val MAX_LOGINS = 3
+    private const val MAX_PASSWORDS = 6
+
+    private val typeByKind = mapOf(
+        QueryKind.EMAIL to "email",
+        QueryKind.PHONE to "phone",
+        QueryKind.USERNAME to "username",
+        QueryKind.DOMAIN to "domain",
+        QueryKind.NAME to "keyword"
+    )
+
+    /** Адрес запроса или null, если сервис такой тип не ищет. */
+    fun url(query: String, kind: QueryKind, limit: Int = 100): String? {
+        val type = typeByKind[kind] ?: return null
+        return BASE + Net.urlEncode(query.trim()) + "?type=" + type + "&limit=" + limit
+    }
+
+    fun headers(key: String): Map<String, String> =
+        mapOf("X-API-Key" to key, "Accept" to "application/json")
+
+    private class SourceAcc {
+        var date: String = ""
+        val logins = LinkedHashSet<String>()
+        val passwords = LinkedHashSet<String>()
+        val extras = LinkedHashSet<String>()
+        var records = 0
+        var passwordless = 0
+    }
+
+    fun parse(body: String, subject: String, moduleId: String = "leakcheck"): List<RawFact> {
+        val json = runCatching { JSONObject(body) }.getOrNull() ?: return emptyList()
+        if (!json.optBoolean("success")) return emptyList()
+        val found = json.optInt("found", 0)
+        val result = json.optJSONArray("result") ?: return emptyList()
+        if (found <= 0 || result.length() == 0) return emptyList()
+
+        val sources = LinkedHashMap<String, SourceAcc>()
+        val shown = minOf(result.length(), MAX_RECORDS)
+        for (i in 0 until shown) {
+            val record = result.optJSONObject(i) ?: continue
+            val source = record.optJSONObject("source")
+            val name = source?.optString("name").orEmpty().trim().ifBlank { "Набор без названия" }
+            val acc = sources.getOrPut(name) { SourceAcc() }
+            acc.records++
+            if (acc.date.isBlank()) acc.date = source?.optString("breach_date").orEmpty().trim()
+            listOf("email", "username", "phone").forEach { field ->
+                record.optString(field).trim().takeIf { it.isNotBlank() }?.let { acc.logins += it }
+            }
+            val password = record.optString("password").trim()
+            if (password.isNotBlank()) acc.passwords += password
+            else if (record.optInt("passwordless", 0) == 1) acc.passwordless++
+            record.optJSONArray("fields")?.let { fields ->
+                for (j in 0 until fields.length()) {
+                    val field = fields.optString(j).trim()
+                    if (field.isBlank() || field == "email" || field == "username" ||
+                        field == "phone" || field == "password"
+                    ) continue
+                    acc.extras += LeakCheckApi.fieldTitles[field] ?: field
+                }
+            }
+        }
+
+        val facts = ArrayList<RawFact>()
+        for ((name, acc) in sources) {
+            val attrs = LinkedHashMap<String, String>()
+            if (acc.date.isNotBlank()) attrs["Дата"] = acc.date
+            if (acc.logins.isNotEmpty()) attrs["Логин"] = clipped(acc.logins, MAX_LOGINS)
+            if (acc.passwords.isNotEmpty()) attrs["Пароль"] = clipped(acc.passwords, MAX_PASSWORDS)
+            if (acc.passwordless > 0) attrs["Без пароля"] = acc.passwordless.toString()
+            if (acc.extras.isNotEmpty()) attrs["Ещё"] = acc.extras.joinToString(", ")
+            attrs["Записей"] = acc.records.toString()
+            facts += fact(FactCategory.OTHER, "Утечка", name, subject, moduleId, attrs)
+        }
+
+        val summary = LinkedHashMap<String, String>()
+        if (found > shown) summary["Показано записей"] = "$shown из $found"
+        val quota = json.optInt("quota", -1)
+        if (quota >= 0) summary["Остаток запросов"] = quota.toString()
+        facts += fact(FactCategory.OTHER, "Записей в утечках", found.toString(), subject, moduleId, summary)
+        return facts
+    }
+
+    private fun clipped(values: Set<String>, limit: Int): String {
+        val head = values.take(limit).joinToString(", ")
+        return if (values.size > limit) "$head …" else head
+    }
+}
+
+/** Служебная пометка модуля: попала в результат — значит, источник честно отказал. */
+private fun status(subject: String, moduleId: String, text: String): RawFact =
+    fact(FactCategory.OTHER, "Статус", text, subject, moduleId)
+
 private object LeakCheckConnector : Connector {
     override val id = "leakcheck"
+
     override suspend fun collect(query: String, key: KeySource): List<RawFact> {
         val subject = query.trim()
-        val url = LeakCheckApi.url(subject, QueryDetector.detect(subject), key.key(id))
-            ?: return emptyList()
-        val response = Net.fetch(url)
+        val secret = key.key(id)
+        if (secret.isBlank()) return emptyList()
+        val kind = QueryDetector.detect(subject)
+        val url = LeakCheckPro.url(subject, kind) ?: return emptyList()
+        val response = Net.fetch(url, LeakCheckPro.headers(secret), attempts = 2)
+        if (response.ok) return LeakCheckPro.parse(response.body, subject, id)
+
+        return when (response.code) {
+            401 -> listOf(status(subject, id, "Ключ LeakCheck отклонён (401) — проверьте ключ в настройках"))
+            403 -> {
+                val limited = response.body.contains("limit", ignoreCase = true)
+                val note = if (limited) "Лимит запросов по тарифу исчерпан (403)"
+                else "Тариф без полных записей (403) — показана бесплатная сводка"
+                val public = LeakCheckApi.url(subject, kind, secret)
+                    ?.let { Net.fetch(it) }
+                    ?.takeIf { it.ok }
+                    ?.let { LeakCheckApi.parse(it.body, subject, id) }
+                    .orEmpty()
+                listOf(status(subject, id, note)) + public
+            }
+            429 -> listOf(status(subject, id, "LeakCheck: слишком много запросов (429), повторите позже"))
+            else -> emptyList()
+        }
+    }
+}
+
+/**
+ * Hudson Rock Cavalier OSINT Tools — бесплатный источник без ключа.
+ *
+ * Показывает компьютеры, заражённые инфостилерами (RedLine, Lumma, Raccoon…):
+ * дату заражения, имя машины, ОС, IP, семейство вредоноса и то, что стилер увёл,
+ * — логины и пароли. Это комплементарен утечкам баз: HIBP/LeakCheck знают про
+ * взломы сервисов, Hudson Rock — про заражённые устройства.
+ *
+ * GET /api/json/v2/osint-tools/search-by-email?email=…
+ * GET /api/json/v2/osint-tools/search-by-username?username=…
+ */
+internal object HudsonRockApi {
+
+    const val BASE = "https://cavalier.hudsonrock.com/api/json/v2/osint-tools"
+    private const val MAX_STEALERS = 10
+    private const val MAX_VALUES = 8
+
+    fun url(query: String, kind: QueryKind): String? = when (kind) {
+        QueryKind.EMAIL -> "$BASE/search-by-email?email=${Net.urlEncode(query.trim())}"
+        QueryKind.USERNAME ->
+            "$BASE/search-by-username?username=${Net.urlEncode(query.trim().trimStart('@'))}"
+        else -> null
+    }
+
+    fun parse(body: String, subject: String, moduleId: String = "hudsonrock"): List<RawFact> {
+        val json = runCatching { JSONObject(body) }.getOrNull() ?: return emptyList()
+        val stealers = json.optJSONArray("stealers") ?: return emptyList()
+        if (stealers.length() == 0) return emptyList()
+
+        val facts = ArrayList<RawFact>()
+        for (i in 0 until minOf(stealers.length(), MAX_STEALERS)) {
+            val stealer = stealers.optJSONObject(i) ?: continue
+            val date = stealer.optString("date_compromised").trim().take(10)
+            val machine = stealer.optString("computer_name").trim()
+            val attrs = LinkedHashMap<String, String>()
+            if (date.isNotBlank()) attrs["Дата"] = date
+            stealer.optString("stealer").trim().ifBlank { stealer.optString("stealer_family").trim() }
+                .takeIf { it.isNotBlank() }?.let { attrs["Вредонос"] = it }
+            machine.takeIf { it.isNotBlank() }?.let { attrs["Компьютер"] = it }
+            stealer.optString("operating_system").trim().takeIf { it.isNotBlank() }
+                ?.let { attrs["ОС"] = it }
+            stealer.optString("ip").trim().takeIf { it.isNotBlank() }?.let { attrs["IP"] = it }
+            stealer.optString("malware_path").trim().takeIf { it.isNotBlank() }
+                ?.let { attrs["Файл"] = it }
+            values(stealer, "antiviruses").takeIf { it.isNotBlank() }?.let { attrs["Антивирусы"] = it }
+            values(stealer, "top_logins").takeIf { it.isNotBlank() }?.let { attrs["Логины"] = it }
+            values(stealer, "top_passwords").takeIf { it.isNotBlank() }?.let { attrs["Пароли"] = it }
+            facts += fact(
+                FactCategory.OTHER, "Заражение инфостилером",
+                machine.ifBlank { date.ifBlank { "заражённое устройство" } },
+                subject, moduleId, attrs
+            )
+        }
+        facts += fact(
+            FactCategory.OTHER, "Всего заражений", stealers.length().toString(), subject, moduleId,
+            mapOf(
+                "Корпоративных сервисов" to json.optInt("total_corporate_services", 0).toString(),
+                "Личных сервисов" to json.optInt("total_user_services", 0).toString()
+            ).filterValues { it != "0" }
+        )
+        return facts
+    }
+
+    private fun values(node: JSONObject, key: String, limit: Int = MAX_VALUES): String {
+        val array = node.optJSONArray(key) ?: return ""
+        val items = ArrayList<String>()
+        for (i in 0 until array.length()) {
+            array.optString(i).trim().takeIf { it.isNotBlank() }?.let { items += it }
+        }
+        val distinct = items.distinct()
+        if (distinct.isEmpty()) return ""
+        val head = distinct.take(limit).joinToString(", ")
+        return if (distinct.size > limit) "$head …" else head
+    }
+}
+
+private object HudsonRockConnector : Connector {
+    override val id = "hudsonrock"
+
+    override suspend fun collect(query: String, key: KeySource): List<RawFact> {
+        val subject = query.trim()
+        val url = HudsonRockApi.url(subject, QueryDetector.detect(subject)) ?: return emptyList()
+        val response = Net.fetch(url, mapOf("Accept" to "application/json"))
         if (!response.ok) return emptyList()
-        return LeakCheckApi.parse(response.body, subject, id)
+        return HudsonRockApi.parse(response.body, subject, id)
     }
 }
 
@@ -1523,7 +1733,16 @@ class SearchEngine(
                 url = ru.jbosint.osint.core.report.SourceCatalog.ref(module.id).url
             )
         }.distinctBy { it.id }
-        Aggregator.aggregate(cleanQuery, rawFacts.toList(), stats).copy(sources = sources)
+        val aggregate = Aggregator.aggregate(cleanQuery, rawFacts.toList(), stats).copy(sources = sources)
+
+        // «От одного — ко всему»: из найденных контактов берём точные идентификаторы
+        // (почта, телефон, ник) и добираем по ним утечки. Только модули утечек и только
+        // при наличии ключей, поэтому в пустой конфигурации проход ничего не стоит.
+        onStage("Проверка связанных контактов", 95)
+        val extra = runCatching { DigitalFootprintGraph(keys).expand(aggregate) }.getOrDefault(emptyList())
+        if (extra.isEmpty()) return@withContext aggregate
+        val mergedStats = stats.copy(rawFacts = extra.size)
+        Aggregator.aggregate(cleanQuery, rawFacts.toList() + extra, mergedStats).copy(sources = sources)
     }
 
     companion object {
@@ -1531,7 +1750,7 @@ class SearchEngine(
          * Открытые модули, которые запускаются даже без ключей. Именно они
          * спасают ситуацию «нет ни одного включённого модуля — поиск молчит».
          */
-        val KEYLESS_FALLBACK = listOf("ddg", "wikipedia", "gitlab", "urlscan")
+        val KEYLESS_FALLBACK = listOf("ddg", "wikipedia", "gitlab", "urlscan", "hudsonrock")
 
         /** Нужен ли запуск открытых источников вместо пустого списка модулей. */
         fun needsFallback(current: Collection<String>): Boolean =

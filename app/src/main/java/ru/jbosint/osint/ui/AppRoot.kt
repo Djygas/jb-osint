@@ -95,6 +95,7 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
         when (state.screen) {
             Screen.RESULTS, Screen.PROFILE -> vm.backHome()
             Screen.MODULES -> vm.navigate(Screen.KEYS)
+            Screen.PLUGINS -> vm.navigate(Screen.SETTINGS)
             else -> vm.navigate(Screen.HOME)
         }
     }
@@ -124,7 +125,7 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
             },
             bottomBar = {
                 if (state.screen != Screen.RESULTS && state.screen != Screen.PROFILE &&
-                    state.screen != Screen.MODULES
+                    state.screen != Screen.MODULES && state.screen != Screen.PLUGINS
                 ) {
                     JbBottomBar(current = state.screen, userMode = state.userMode, onNavigate = vm::navigate)
                 }
@@ -146,6 +147,7 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
                     Screen.PROFILE -> ProfileScreen(state, vm)
                     Screen.AGENT -> AgentScreen(state, vm)
                     Screen.MODULES -> ModuleAssistantScreen(state, vm)
+                    Screen.PLUGINS -> PluginScreen(onBack = { vm.navigate(Screen.SETTINGS) })
                 }
                 if (state.userMode) {
                     UserModeBadge(

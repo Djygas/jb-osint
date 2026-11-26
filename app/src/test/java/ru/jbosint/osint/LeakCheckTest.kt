@@ -1,16 +1,18 @@
 package ru.jbosint.osint
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.jbosint.osint.data.LeakCheckApi
+import ru.jbosint.osint.data.LeakCheckPro
 import ru.jbosint.osint.data.QueryDetector
 import ru.jbosint.osint.data.QueryKind
 
 /**
- * LeakCheck: разбор ответа и построение запроса. Проверяется, что модуль
- * не выводит пароли и не выдумывает утечки, когда сервис их не нашёл.
+ * LeakCheck Public API: разбор сводки и построение запроса. Проверяется, что модуль
+ * не выдумывает утечки, когда сервис их не нашёл, и не теряет типы данных.
  */
 class LeakCheckTest {
 
@@ -88,5 +90,81 @@ class LeakCheckTest {
         assertEquals(12, breaches.size)
         val summary = LeakCheckApi.parse(body, "x@example.com").first { it.kind == "Записей в утечках" }
         assertEquals("12 из 20", summary.attributes["Показано наборов"])
+    }
+}
+
+/**
+ * LeakCheck Pro API v2: полные записи с паролями.
+ * Проверяем адрес (ключ не в URL), склейку записей по источнику и разбор ошибок.
+ */
+class LeakCheckProTest {
+
+    private val pro = """
+        {"success":true,"found":12,"quota":197,
+         "result":[
+          {"email":"test@example.com","password":"Qwerty123","username":"tester",
+           "source":{"name":"Collection#1","breach_date":"2019-01-07"},
+           "fields":["email","password","username","ip","dob"]},
+          {"email":"test@example.com","password":"Passw0rd!","username":"tester",
+           "source":{"name":"Collection#1","breach_date":"2019-01-07"},
+           "fields":["email","password","username"]},
+          {"phone":"+79161234567","passwordless":1,
+           "source":{"name":"Mamba.ru","breach_date":"2021-03-02"},
+           "fields":["phone","name"]}
+         ]}
+    """.trimIndent()
+
+    @Test
+    fun keyGoesToHeaderNotToUrl() {
+        val url = LeakCheckPro.url("test@example.com", QueryKind.EMAIL)!!
+        assertTrue(url.startsWith(LeakCheckPro.BASE))
+        assertFalse(url.contains("key="))
+        assertEquals("secret", LeakCheckPro.headers("secret")["X-API-Key"])
+    }
+
+    @Test
+    fun typesAreMappedForEveryKind() {
+        assertTrue(LeakCheckPro.url("test@example.com", QueryKind.EMAIL)!!.contains("type=email"))
+        assertTrue(LeakCheckPro.url("+79161234567", QueryKind.PHONE)!!.contains("type=phone"))
+        assertTrue(LeakCheckPro.url("tester", QueryKind.USERNAME)!!.contains("type=username"))
+        assertTrue(LeakCheckPro.url("mamba.ru", QueryKind.DOMAIN)!!.contains("type=domain"))
+        assertTrue(LeakCheckPro.url("Иван Иванов", QueryKind.NAME)!!.contains("type=keyword"))
+        assertNull(LeakCheckPro.url("8.8.8.8", QueryKind.IP))
+    }
+
+    @Test
+    fun recordsAreGroupedBySourceWithLoginAndPassword() {
+        val facts = LeakCheckPro.parse(pro, "test@example.com")
+        val breach = facts.first { it.kind == "Утечка" && it.value == "Collection#1" }
+        assertEquals("2019-01-07", breach.attributes["Дата"])
+        assertEquals("test@example.com, tester", breach.attributes["Логин"])
+        assertEquals("Qwerty123, Passw0rd!", breach.attributes["Пароль"])
+        assertEquals("2", breach.attributes["Записей"])
+        assertTrue(breach.attributes["Ещё"]!!.contains("дата рождения"))
+    }
+
+    @Test
+    fun passwordlessRecordIsShownWithoutInventedPassword() {
+        val facts = LeakCheckPro.parse(pro, "test@example.com")
+        val mamba = facts.first { it.kind == "Утечка" && it.value == "Mamba.ru" }
+        assertEquals(null, mamba.attributes["Пароль"])
+        assertEquals("1", mamba.attributes["Без пароля"])
+        assertEquals("+79161234567", mamba.attributes["Логин"])
+    }
+
+    @Test
+    fun summaryKeepsFoundQuotaAndShown() {
+        val facts = LeakCheckPro.parse(pro, "test@example.com")
+        val summary = facts.first { it.kind == "Записей в утечках" }
+        assertEquals("12", summary.value)
+        assertEquals("197", summary.attributes["Остаток запросов"])
+        assertEquals("3 из 12", summary.attributes["Показано записей"])
+    }
+
+    @Test
+    fun emptyAndBrokenBodiesYieldNothing() {
+        assertTrue(LeakCheckPro.parse("""{"success":true,"found":0,"result":[]}""", "x@example.com").isEmpty())
+        assertTrue(LeakCheckPro.parse("""{"success":false,"error":"Not found"}""", "x@example.com").isEmpty())
+        assertTrue(LeakCheckPro.parse("<html>502</html>", "x@example.com").isEmpty())
     }
 }
