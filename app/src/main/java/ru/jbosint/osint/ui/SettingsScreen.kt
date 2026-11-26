@@ -25,6 +25,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Info
@@ -143,6 +144,18 @@ fun SettingsScreen(state: UiState, vm: AppViewModel) {
                     onCheckedChange = { enabled ->
                         if (enabled) confirmLeakPasswords = true else vm.setLeakShowPasswords(false)
                     }
+                )
+            }
+        }
+
+        item {
+            SectionHeader("Модули")
+            GlowCard(modifier = Modifier.fillMaxWidth(), padding = 16) {
+                ActionRow(
+                    icon = Icons.Filled.Build,
+                    title = "Мастер настройки модулей",
+                    subtitle = "Пошагово выбрать, проверить и настроить ключи; скрыть или удалить модули.",
+                    onClick = { vm.openModuleWizard() }
                 )
             }
         }

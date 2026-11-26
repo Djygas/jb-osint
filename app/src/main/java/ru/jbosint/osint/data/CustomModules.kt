@@ -56,6 +56,8 @@ data class CustomModule(
     val headerName: String = "X-API-Key",
     val paramName: String = "api_key",
     val enabled: Boolean = true,
+    /** Скрыт из списков, но остаётся в хранилище: можно вернуть через «Показать скрытые». */
+    val hidden: Boolean = false,
     val createdAt: Long = 0L,
     val hasKey: Boolean = false,
     val fields: List<FieldRule> = emptyList()
@@ -635,6 +637,14 @@ class CustomModuleStore(context: Context) {
         save(module.copy(enabled = enabled), null)
     }
 
+    fun setHidden(id: String, hidden: Boolean) {
+        val module = get(id) ?: return
+        save(module.copy(hidden = hidden), null)
+    }
+
+    /** Модули без скрытых — для экранов «Ключи» и поиска. */
+    fun visible(): List<CustomModule> = list().filterNot { it.hidden }
+
     fun delete(id: String) {
         secure.remove("cm_$id")
         secure.remove("cm_key_$id")
@@ -647,7 +657,7 @@ class CustomModuleStore(context: Context) {
     }
 
     fun activeModules(): List<Pair<CustomModule, String>> = list()
-        .filter { it.enabled }
+        .filter { it.enabled && !it.hidden }
         .mapNotNull { module ->
             val key = key(module.id)
             if (module.auth != CustomAuth.NONE && key.isBlank()) null else module to key
@@ -671,6 +681,7 @@ class CustomModuleStore(context: Context) {
         .put("header", module.headerName)
         .put("param", module.paramName)
         .put("enabled", module.enabled)
+        .put("hidden", module.hidden)
         .put("created", module.createdAt)
         .put("fields", JSONArray().apply {
             module.fields.forEach { rule ->
@@ -694,6 +705,7 @@ class CustomModuleStore(context: Context) {
             headerName = root.optString("header", "X-API-Key"),
             paramName = root.optString("param", "api_key"),
             enabled = root.optBoolean("enabled", true),
+            hidden = root.optBoolean("hidden", false),
             createdAt = root.optLong("created"),
             hasKey = key(id).isNotBlank(),
             fields = root.optJSONArray("fields")?.let { array ->

@@ -125,6 +125,9 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                 TextButton(onClick = { vm.checkAll() }) {
                     Text("Проверить все", color = JbAccent2, style = MaterialTheme.typography.labelMedium)
                 }
+                TextButton(onClick = { vm.openModuleWizard() }) {
+                    Text("Мастер", color = JbAccent2, style = MaterialTheme.typography.labelMedium)
+                }
                 TextButton(onClick = { vm.runDiagnostics() }) {
                     Icon(Icons.Filled.BugReport, contentDescription = null, tint = JbAccent2, modifier = Modifier.size(15.dp))
                     Spacer(Modifier.width(4.dp))
@@ -433,6 +436,28 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                             fontFamily = FontFamily.Monospace,
                             color = JbText
                         )
+                    }
+                    if (state.diagBlocks.isNotEmpty()) {
+                        Spacer(Modifier.height(10.dp))
+                        Text("НАСТРОЙКА МОДУЛЕЙ", style = MaterialTheme.typography.labelSmall, color = JbFaint)
+                        Spacer(Modifier.height(4.dp))
+                        state.diagBlocks.forEach { block ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(block.title, style = MaterialTheme.typography.bodySmall, color = JbText)
+                                    Text(
+                                        block.advice,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = JbMuted,
+                                        maxLines = 2
+                                    )
+                                }
+                                TextButton(onClick = {
+                                    vm.clearDiagnostics()
+                                    vm.openModuleWizard(block.moduleId)
+                                }) { Text("Настроить", color = JbAccent2) }
+                            }
+                        }
                     }
                 }
             },

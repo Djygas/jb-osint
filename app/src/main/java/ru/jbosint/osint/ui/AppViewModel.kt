@@ -103,6 +103,11 @@ import ru.jbosint.osint.data.KeyCheck
 import ru.jbosint.osint.data.HistoryEntry
 import ru.jbosint.osint.data.HistoryStore
 import ru.jbosint.osint.data.KeyRepository
+import ru.jbosint.osint.data.module.AppModuleRepository
+import ru.jbosint.osint.data.module.ModuleInfo
+import ru.jbosint.osint.data.module.ModuleKind
+import ru.jbosint.osint.data.module.ModuleStatus
+import ru.jbosint.osint.data.module.WizardFilter
 import ru.jbosint.osint.data.ConnectionUi
 import ru.jbosint.osint.data.TermuxCheck
 import ru.jbosint.osint.data.TermuxResults
@@ -166,9 +171,9 @@ import ru.jbosint.osint.data.WatchStore
 private const val MAX_PIN_FAILS = 5
 
 /** Экраны, доступные только администратору. */
-private val MANAGED_SCREENS = setOf(Screen.KEYS, Screen.SETTINGS, Screen.MODULES, Screen.PLUGINS, Screen.LAB)
+private val MANAGED_SCREENS = setOf(Screen.KEYS, Screen.SETTINGS, Screen.MODULES, Screen.PLUGINS, Screen.LAB, Screen.WIZARD)
 
-enum class Screen { HOME, RESULTS, TELEGRAM, LEAKS, LAB, KEYS, SETTINGS, PROFILE, AGENT, MODULES, PLUGINS }
+enum class Screen { HOME, RESULTS, TELEGRAM, LEAKS, LAB, KEYS, SETTINGS, PROFILE, AGENT, MODULES, PLUGINS, WIZARD }
 
 /** Состояние быстрой настройки модуля: прогресс или предложение ручной настройки. */
 data class AutoSetupUi(
@@ -371,6 +376,8 @@ data class UiState(
     val leak: LeakUi = LeakUi(),
     // ------------------------------------------------------------ GitHub-лаборатория
     val lab: LabUi = LabUi(),
+    // ------------------------------------------------------------ мастер модулей
+    val wizard: WizardUi = WizardUi(),
     // ------------------------------------------------------------ сверка фактов
     val crossCheck: CrossCheckUi = CrossCheckUi()
 ) {
@@ -461,6 +468,49 @@ data class LabUi(
     val setupOpen: Boolean = false
 )
 
+/** Шаг мастера настройки модулей. */
+enum class WizardStep(val number: Int, val title: String) {
+    SELECTION(1, "Выбор модулей"),
+    HEALTHCHECK(2, "Проверка доступности"),
+    CONFIG(3, "Настройка ключей"),
+    RESULT(4, "Итоговая проверка")
+}
+
+/** Состояние мастера настройки модулей. */
+data class WizardUi(
+    val open: Boolean = false,
+    val step: WizardStep = WizardStep.SELECTION,
+    val modules: List<ModuleInfo> = emptyList(),
+    val selected: Set<String> = emptySet(),
+    val statuses: Map<String, ModuleStatus> = emptyMap(),
+    val currentId: String? = null,
+    val keyInput: String = "",
+    val secondInput: String = "",
+    val busy: Boolean = false,
+    val stage: String = "",
+    val progress: Int = 0,
+    val showHidden: Boolean = false,
+    val filter: WizardFilter = WizardFilter.ALL,
+    val error: String? = null,
+    val note: String? = null,
+    val checkedAt: Long = 0L
+) {
+    fun statusOf(id: String): ModuleStatus =
+        statuses[id] ?: modules.firstOrNull { it.id == id }?.status ?: ModuleStatus.UNKNOWN
+
+    val visibleModules: List<ModuleInfo>
+        get() = modules.filter { module ->
+            (showHidden || !module.isHidden) && filter.matches(module, statusOf(module.id))
+        }
+
+    val current: ModuleInfo? get() = modules.firstOrNull { it.id == currentId }
+
+    val selectedModules: List<ModuleInfo> get() = modules.filter { it.id in selected }
+
+    val needsKeyModules: List<ModuleInfo>
+        get() = selectedModules.filter { statusOf(it.id) == ModuleStatus.NEEDS_KEY || it.needsKey }
+}
+
 data class TermuxUi(
     val enabled: Boolean = false,
     val home: String = TermuxSpec.DEFAULT_HOME,
@@ -499,6 +549,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val validator = KeyValidator(keys)
     private val customStore = CustomModuleStore(app)
     private val customChecker = CustomModuleChecker(customStore)
+    private val moduleRepo = AppModuleRepository(app, keys, customStore, validator, customChecker)
     private val engine = SearchEngine(keys, settings)
     private val assistantStore = AssistantStore(app)
     private val assistantService = AssistantService(assistantStore)
@@ -559,7 +610,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             autoWipeDays = settings.autoWipeDays,
             history = emptyList(),
             providers = buildProviders(),
-            customModules = customStore.list(),
+            customModules = customStore.visible(),
             assistantConfigured = assistantStore.configured(),
             assistantProvider = assistantStore.provider,
             assistantBaseUrl = assistantStore.customBaseUrl,
@@ -610,20 +661,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun countStoredKeys(): Int =
         keys.activeCount() + customStore.list().count { customStore.key(it.id).isNotBlank() }
 
-    private fun buildProviders(): List<ProviderUi> = ProviderCatalog.all.map { spec ->
-        ProviderUi(
-            spec = spec,
-            enabled = keys.isEnabled(spec.id),
-            hasKey = spec.keyless || keys.key(spec.id).isNotBlank(),
-            hasSecond = keys.secondField(spec.id).isNotBlank(),
-            state = keys.state(spec.id),
-            checkedAt = keys.checkedAt(spec.id)
-        )
-    }
+    private fun buildProviders(): List<ProviderUi> = ProviderCatalog.all
+        .filterNot { keys.isHidden(it.id) }
+        .map { spec ->
+            ProviderUi(
+                spec = spec,
+                enabled = keys.isEnabled(spec.id),
+                hasKey = spec.keyless || keys.key(spec.id).isNotBlank(),
+                hasSecond = keys.secondField(spec.id).isNotBlank(),
+                state = keys.state(spec.id),
+                checkedAt = keys.checkedAt(spec.id)
+            )
+        }
 
     private fun refreshProviders() = _state.update { it.copy(providers = buildProviders()) }
 
-    private fun refreshCustom() = _state.update { it.copy(customModules = customStore.list()) }
+    private fun refreshCustom() = _state.update { it.copy(customModules = customStore.visible()) }
 
     // ---------------------------------------------------------------- навигация
 
@@ -2017,7 +2070,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 it.copy(
                     customChecking = it.customChecking - id,
                     customChecks = it.customChecks + (id to result),
-                    customModules = customStore.list(),
+                    customModules = customStore.visible(),
                     toast = when {
                         failed -> result.detail + " — модуль отключён"
                         resolved != null -> "Модуль настроен успешно: ${resolved.method}, ${resolved.auth.title.lowercase()}"
@@ -2595,7 +2648,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(
                 providers = buildProviders(),
-                customModules = customStore.list(),
+                customModules = customStore.visible(),
                 assistantConfigured = assistantStore.configured(),
                 assistantProvider = assistantStore.provider,
                 assistantKeyed = keyedProviders(),
@@ -4715,6 +4768,321 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
         next?.invoke()
         if (autoInstall != null) installLabDeps()
+    }
+
+    // ------------------------------------------------------- мастер модулей
+
+    private fun wizardModules(): List<ModuleInfo> = moduleRepo.all(includeHidden = true)
+
+    fun openModuleWizard(moduleId: String? = null) {
+        val current = _state.value
+        if (!current.canManage) {
+            _state.update { it.copy(toast = "Разблокируйте режим администратора") }
+            return
+        }
+        val modules = wizardModules()
+        val selected = when {
+            moduleId != null -> setOf(moduleId)
+            current.wizard.selected.isNotEmpty() ->
+                current.wizard.selected.filter { id -> modules.any { it.id == id } }.toSet()
+            else -> modules.filter { it.isActive }.map { it.id }.toSet()
+        }
+        _state.update {
+            it.copy(
+                screen = Screen.WIZARD,
+                wizard = WizardUi(
+                    open = true,
+                    step = if (moduleId != null) WizardStep.CONFIG else WizardStep.SELECTION,
+                    modules = modules,
+                    selected = selected,
+                    statuses = modules.associate { module -> module.id to module.status },
+                    currentId = moduleId,
+                    showHidden = current.wizard.showHidden,
+                    filter = current.wizard.filter
+                )
+            )
+        }
+    }
+
+    fun closeModuleWizard() {
+        _state.update { it.copy(wizard = WizardUi(), screen = Screen.KEYS) }
+    }
+
+    fun wizardBack() {
+        val wizard = _state.value.wizard
+        when (wizard.step) {
+            WizardStep.SELECTION -> closeModuleWizard()
+            WizardStep.HEALTHCHECK -> _state.update {
+                it.copy(wizard = it.wizard.copy(step = WizardStep.SELECTION, busy = false, stage = "", error = null))
+            }
+            WizardStep.CONFIG -> _state.update {
+                it.copy(wizard = it.wizard.copy(step = WizardStep.HEALTHCHECK, keyInput = "", secondInput = "", error = null))
+            }
+            WizardStep.RESULT -> _state.update {
+                it.copy(wizard = it.wizard.copy(step = WizardStep.HEALTHCHECK, error = null))
+            }
+        }
+    }
+
+    fun setWizardFilter(filter: WizardFilter) =
+        _state.update { it.copy(wizard = it.wizard.copy(filter = filter)) }
+
+    fun setWizardShowHidden(show: Boolean) =
+        _state.update { it.copy(wizard = it.wizard.copy(showHidden = show)) }
+
+    fun toggleWizardModule(id: String) {
+        _state.update {
+            val selected = it.wizard.selected
+            it.copy(wizard = it.wizard.copy(selected = if (id in selected) selected - id else selected + id))
+        }
+    }
+
+    fun setWizardKeyInput(value: String) =
+        _state.update { it.copy(wizard = it.wizard.copy(keyInput = value.trim(), error = null)) }
+
+    fun setWizardSecondInput(value: String) =
+        _state.update { it.copy(wizard = it.wizard.copy(secondInput = value.trim(), error = null)) }
+
+    fun wizardNext() {
+        val wizard = _state.value.wizard
+        when (wizard.step) {
+            WizardStep.SELECTION -> {
+                if (wizard.selected.isEmpty()) {
+                    _state.update { it.copy(wizard = it.wizard.copy(error = "Отметьте хотя бы один модуль")) }
+                } else {
+                    _state.update { it.copy(wizard = it.wizard.copy(step = WizardStep.HEALTHCHECK, error = null, progress = 0)) }
+                    startWizardHealth()
+                }
+            }
+            WizardStep.HEALTHCHECK -> {
+                val need = wizard.needsKeyModules
+                if (need.isEmpty()) {
+                    _state.update { it.copy(wizard = it.wizard.copy(step = WizardStep.RESULT, progress = 0)) }
+                    startWizardHealth()
+                } else {
+                    val first = need.first()
+                    _state.update {
+                        it.copy(
+                            wizard = it.wizard.copy(
+                                step = WizardStep.CONFIG,
+                                currentId = first.id,
+                                keyInput = "",
+                                secondInput = "",
+                                error = null,
+                                note = null
+                            )
+                        )
+                    }
+                }
+            }
+            WizardStep.CONFIG -> wizardNextModule()
+            WizardStep.RESULT -> Unit
+        }
+    }
+
+    /** Переход к следующему модулю, которому нужен ключ, или к итогу. */
+    fun wizardNextModule() {
+        val wizard = _state.value.wizard
+        val pending = wizard.needsKeyModules.filter { it.id != wizard.currentId }
+        if (pending.isEmpty()) {
+            _state.update {
+                it.copy(wizard = it.wizard.copy(step = WizardStep.RESULT, progress = 0, stage = "", note = null, error = null))
+            }
+            startWizardHealth()
+        } else {
+            val next = pending.first()
+            _state.update {
+                it.copy(
+                    wizard = it.wizard.copy(
+                        currentId = next.id,
+                        keyInput = "",
+                        secondInput = "",
+                        note = null,
+                        error = null
+                    )
+                )
+            }
+        }
+    }
+
+    /** Последовательная проверка выбранных модулей (шаг 2 и повтор на шаге 4). */
+    private fun startWizardHealth() {
+        val snapshot = _state.value.wizard
+        if (snapshot.busy) return
+        val ids = snapshot.selected.toList()
+        if (ids.isEmpty()) return
+        val step = snapshot.step
+        _state.update {
+            it.copy(wizard = it.wizard.copy(busy = true, stage = "Проверяю модули…", progress = 0, error = null))
+        }
+        viewModelScope.launch {
+            var worked = 0
+            ids.forEachIndexed { index, id ->
+                val current = _state.value.wizard
+                if (!current.open || current.step != step) return@launch
+                val name = current.modules.firstOrNull { it.id == id }?.name ?: id
+                _state.update {
+                    it.copy(
+                        wizard = it.wizard.copy(
+                            stage = "Проверяю: $name",
+                            progress = if (ids.isEmpty()) 100 else index * 100 / ids.size
+                        )
+                    )
+                }
+                val check = runCatching {
+                    kotlinx.coroutines.withTimeout(20_000) { moduleRepo.checkKey(id) }
+                }.getOrElse { KeyCheck(KeyState.OFFLINE, it.message ?: "нет ответа") }
+                val status = ModuleStatus.fromKeyState(check.state)
+                if (status == ModuleStatus.ACTIVE) worked++
+                _state.update { state ->
+                    state.copy(
+                        wizard = state.wizard.copy(
+                            statuses = state.wizard.statuses + (id to status),
+                            modules = state.wizard.modules.map { module ->
+                                if (module.id == id) module.copy(hasKey = moduleRepo.hasKey(id)) else module
+                            },
+                            stage = "${check.state.title}: ${check.detail}".take(180)
+                        )
+                    )
+                }
+            }
+            val modules = wizardModules()
+            _state.update { state ->
+                state.copy(
+                    wizard = state.wizard.copy(
+                        modules = modules,
+                        busy = false,
+                        progress = 100,
+                        stage = "Проверено: $worked из ${ids.size}",
+                        checkedAt = System.currentTimeMillis()
+                    )
+                )
+            }
+        }
+    }
+
+    /** Сохранить введённый ключ и сразу проверить модуль. */
+    fun wizardApplyKey() {
+        val wizard = _state.value.wizard
+        val module = wizard.current ?: return
+        if (wizard.busy) return
+        if (!module.keyless && wizard.keyInput.isBlank() && !module.hasKey) {
+            _state.update { it.copy(wizard = it.wizard.copy(error = "Введите API-ключ")) }
+            return
+        }
+        _state.update {
+            it.copy(wizard = it.wizard.copy(busy = true, stage = "Сохраняю ключ…", error = null, note = null))
+        }
+        viewModelScope.launch {
+            runCatching {
+                if (wizard.keyInput.isNotBlank()) moduleRepo.saveApiKey(module.id, wizard.keyInput)
+                if (module.requiresSecondField != null && wizard.secondInput.isNotBlank()) {
+                    moduleRepo.saveSecondField(module.id, wizard.secondInput)
+                }
+                val check = kotlinx.coroutines.withTimeout(20_000) { moduleRepo.checkKey(module.id) }
+                val status = ModuleStatus.fromKeyState(check.state)
+                _state.update { state ->
+                    state.copy(
+                        wizard = state.wizard.copy(
+                            modules = state.wizard.modules.map { item ->
+                                if (item.id == module.id) {
+                                    item.copy(
+                                        hasKey = moduleRepo.hasKey(module.id),
+                                        secondFieldFilled = moduleRepo.secondField(module.id).isNotBlank()
+                                    )
+                                } else item
+                            },
+                            statuses = state.wizard.statuses + (module.id to status),
+                            busy = false,
+                            stage = "${check.state.title}: ${check.detail}".take(180),
+                            note = if (status == ModuleStatus.ACTIVE) "Ключ принят" else check.detail,
+                            error = if (status == ModuleStatus.FAILED || status == ModuleStatus.NO_NETWORK) check.detail else null
+                        )
+                    )
+                }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(wizard = it.wizard.copy(busy = false, stage = "", error = error.message ?: "Ошибка"))
+                }
+            }
+        }
+    }
+
+    fun wizardSetActive(id: String, active: Boolean) {
+        moduleRepo.setActive(id, active)
+        refreshProviders()
+        refreshCustom()
+        _state.update { state ->
+            state.copy(wizard = state.wizard.copy(
+                modules = state.wizard.modules.map { if (it.id == id) it.copy(isActive = active) else it }
+            ))
+        }
+    }
+
+    fun wizardSetHidden(id: String, hidden: Boolean) {
+        moduleRepo.setHidden(id, hidden)
+        refreshProviders()
+        refreshCustom()
+        _state.update { state ->
+            state.copy(
+                wizard = state.wizard.copy(
+                    modules = state.wizard.modules.map { if (it.id == id) it.copy(isHidden = hidden) else it },
+                    selected = if (hidden) state.wizard.selected - id else state.wizard.selected,
+                    currentId = if (hidden && state.wizard.currentId == id) null else state.wizard.currentId
+                ),
+                toast = if (hidden) "Модуль скрыт" else "Модуль показан"
+            )
+        }
+    }
+
+    /** Удаление пользовательского модуля; встроенный — только скрывается. */
+    fun wizardDelete(id: String) {
+        val module = _state.value.wizard.modules.firstOrNull { it.id == id }
+        moduleRepo.delete(id)
+        refreshProviders()
+        refreshCustom()
+        val modules = wizardModules()
+        _state.update { state ->
+            state.copy(
+                wizard = state.wizard.copy(
+                    modules = modules,
+                    selected = state.wizard.selected - id,
+                    statuses = state.wizard.statuses - id,
+                    currentId = if (state.wizard.currentId == id) null else state.wizard.currentId
+                ),
+                toast = if (module?.kind == ModuleKind.BUILT_IN) "Модуль скрыт" else "Модуль удалён"
+            )
+        }
+    }
+
+    fun wizardConfigure(id: String) = _state.update {
+        it.copy(
+            wizard = it.wizard.copy(
+                step = WizardStep.CONFIG,
+                currentId = id,
+                keyInput = "",
+                secondInput = "",
+                error = null,
+                note = null
+            )
+        )
+    }
+
+    fun wizardRecheck() = startWizardHealth()
+
+    fun wizardRunDiagnostics() {
+        _state.update { it.copy(wizard = WizardUi(), screen = Screen.KEYS) }
+        runDiagnostics()
+    }
+
+    fun wizardFinish() {
+        _state.update {
+            it.copy(wizard = WizardUi(), screen = Screen.KEYS, toast = "Настройка модулей сохранена")
+        }
+    }
+
+    fun wizardClose() {
+        _state.update { it.copy(wizard = WizardUi(), screen = Screen.KEYS) }
     }
 
     fun openCrossCheck() {

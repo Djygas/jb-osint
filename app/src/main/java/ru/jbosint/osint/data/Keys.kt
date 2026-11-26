@@ -209,6 +209,13 @@ class KeyRepository(context: Context) : KeySource {
         flags.edit().putBoolean("enabled_$id", enabled).apply()
     }
 
+    /** Скрытый встроенный модуль не показывается и не запускается, но остаётся в коде. */
+    fun isHidden(id: String): Boolean = flags.getBoolean("hidden_$id", false)
+
+    fun setHidden(id: String, hidden: Boolean) {
+        flags.edit().putBoolean("hidden_$id", hidden).apply()
+    }
+
     override fun key(id: String): String = secure.get(keyName(id)).orEmpty()
 
     fun saveKey(id: String, value: String) {
@@ -223,6 +230,13 @@ class KeyRepository(context: Context) : KeySource {
 
     fun saveSecondField(id: String, value: String) {
         secure.put(secondName(id), value.trim())
+    }
+
+    /** Удаление ключа и состояния одного модуля (не всего хранилища). */
+    fun clearKey(id: String) {
+        secure.remove(keyName(id))
+        secure.remove(secondName(id))
+        flags.edit().remove("state_$id").remove("checked_$id").apply()
     }
 
     fun state(id: String): KeyState {
@@ -240,10 +254,11 @@ class KeyRepository(context: Context) : KeySource {
 
     override fun enabledWithKeys(): Map<String, String> =
         ProviderCatalog.all
-            .filter { isEnabled(it.id) && isReady(it) }
+            .filter { isEnabled(it.id) && !isHidden(it.id) && isReady(it) }
             .associate { it.id to key(it.id) }
 
-    fun activeCount(): Int = ProviderCatalog.all.count { isEnabled(it.id) && isReady(it) }
+    fun activeCount(): Int =
+        ProviderCatalog.all.count { isEnabled(it.id) && !isHidden(it.id) && isReady(it) }
 
     fun wipeKeys() {
         ProviderCatalog.all.forEach {
