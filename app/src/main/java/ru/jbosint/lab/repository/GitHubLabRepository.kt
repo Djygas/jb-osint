@@ -5,6 +5,7 @@ import ru.jbosint.lab.model.LabApiConfig
 import ru.jbosint.lab.model.LabProject
 import ru.jbosint.lab.model.LabRunResult
 import ru.jbosint.lab.network.TermuxApiClient
+import ru.jbosint.lab.LabToken
 import ru.jbosint.osint.data.SecureStore
 
 /**
@@ -20,11 +21,11 @@ class GitHubLabRepository(context: Context) {
     private val prefs = appContext.getSharedPreferences("jb_lab_api", Context.MODE_PRIVATE)
     private val api = TermuxApiClient()
 
-    fun config(): LabApiConfig {
-        val base = prefs.getString(KEY_BASE_URL, null).orEmpty()
-            .ifBlank { LabApiConfig.DEFAULT_BASE_URL }
-        return LabApiConfig(baseUrl = base, token = secure.get(KEY_TOKEN).orEmpty())
-    }
+    /** Встроенный сервер всегда на loopback; токен создаётся автоматически. */
+    fun config(): LabApiConfig = LabApiConfig(
+        baseUrl = LabApiConfig.DEFAULT_BASE_URL,
+        token = LabToken.ensure(appContext)
+    )
 
     fun saveBaseUrl(value: String) {
         prefs.edit().putString(KEY_BASE_URL, value.trim().take(200)).apply()

@@ -19,10 +19,11 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -31,16 +32,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Dispatchers
+import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import ru.jbosint.lab.model.LabApiConfig
+import ru.jbosint.lab.LabViewModel
 import ru.jbosint.lab.model.LabLogLine
 import ru.jbosint.lab.model.LabProject
+import ru.jbosint.lab.model.LabScript
 import ru.jbosint.lab.repository.GitHubLabRepository
 import ru.jbosint.osint.ui.GlowCard
 import ru.jbosint.osint.ui.JbAccent
@@ -55,20 +54,17 @@ import ru.jbosint.osint.ui.Pill
 import ru.jbosint.osint.ui.ScreenHeader
 
 /**
- * GitHub-лаборатория v1.0.0. Работает через локальный API-сервер в Termux:
- * клонирование, скан исполняемых файлов, запуск команд с таймаутом и экспорт.
- *
- * Клиент ходит только на loopback и передаёт токен заголовком `X-Lab-Token`.
+ * Встроенная GitHub-лаборатория. Сервер работает внутри приложения
+ * (Foreground Service, 127.0.0.1:8081) — Termux и ручная настройка не нужны.
  */
 @Composable
 fun GitHubLabScreen() {
     val context = LocalContext.current
     val repository = remember { GitHubLabRepository(context) }
+    val labVm: LabViewModel = viewModel()
+    val server by labVm.state.collectAsState()
     val scope = rememberCoroutineScope()
 
-    var baseUrl by remember { mutableStateOf(LabApiConfig.DEFAULT_BASE_URL) }
-    var token by remember { mutableStateOf("") }
-    var tokenVisible by remember { mutableStateOf(false) }
     var repoUrl by remember { mutableStateOf("") }
     var ref by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
@@ -77,44 +73,10 @@ fun GitHubLabScreen() {
     var logs by remember { mutableStateOf<List<LabLogLine>>(emptyList()) }
     var project by remember { mutableStateOf<LabProject?>(null) }
     var command by remember { mutableStateOf("") }
-
-    LaunchedEffect(Unit) {
-        val config = repository.config()
-        baseUrl = config.baseUrl
-        token = config.token
-    }
+    var params by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
     val addLog: (String, Boolean) -> Unit = { text, isError ->
         logs = (logs + LabLogLine(text = text, error = isError)).takeLast(400)
-    }
-
-    suspend fun persist() {
-        withContext(Dispatchers.IO) {
-            repository.saveBaseUrl(baseUrl)
-            repository.saveToken(token)
-        }
-    }
-
-    val checkServer: () -> Unit = {
-        if (!busy) {
-            busy = true
-            stage = "Проверяю сервер…"
-            note = null
-            scope.launch {
-                try {
-                    persist()
-                    val ok = repository.health()
-                    note = if (ok) "Сервер отвечает" else "Сервер не ответил"
-                    addLog(if (ok) "health: ok" else "health: fail", !ok)
-                } catch (t: Throwable) {
-                    note = t.message ?: "Ошибка"
-                    addLog(t.message ?: "Ошибка", true)
-                } finally {
-                    busy = false
-                    stage = ""
-                }
-            }
-        }
     }
 
     val clone: () -> Unit = {
@@ -123,13 +85,12 @@ fun GitHubLabScreen() {
             repoUrl.isBlank() -> note = "Укажите ссылку https://github.com/owner/repo"
             else -> {
                 busy = true
-                stage = "Клонирую репозиторий…"
+                stage = "Скачиваю репозиторий…"
                 note = null
                 logs = emptyList()
                 project = null
                 scope.launch {
                     try {
-                        persist()
                         val result = repository.clone(repoUrl, ref)
                         project = result
                         command = result.scripts.firstOrNull()?.command().orEmpty()
@@ -137,11 +98,11 @@ fun GitHubLabScreen() {
                             append("Готово: ").append(result.type.title)
                             if (result.scripts.isNotEmpty()) append(" · скриптов: ").append(result.scripts.size)
                         }
-                        addLog("Клонировано: ${result.dir}", false)
+                        addLog("Репозиторий готов: ${result.dir}", false)
                         result.scripts.forEach { addLog("• ${it.path} (${it.type.title})", false) }
                     } catch (t: Throwable) {
-                        note = t.message ?: "Ошибка клонирования"
-                        addLog(t.message ?: "Ошибка клонирования", true)
+                        note = t.message ?: "Ошибка загрузки"
+                        addLog(t.message ?: "Ошибка загрузки", true)
                     } finally {
                         busy = false
                         stage = ""
@@ -156,7 +117,7 @@ fun GitHubLabScreen() {
         val text = raw.trim()
         when {
             busy -> Unit
-            target == null -> note = "Сначала клонируйте репозиторий"
+            target == null -> note = "Сначала скачайте репозиторий"
             text.isBlank() -> note = "Введите команду"
             else -> {
                 busy = true
@@ -165,7 +126,6 @@ fun GitHubLabScreen() {
                 addLog("$ $text", false)
                 scope.launch {
                     try {
-                        persist()
                         val result = repository.run(target.dir, text)
                         if (result.stdout.isNotBlank()) addLog(result.stdout.trimEnd(), false)
                         if (result.stderr.isNotBlank()) addLog(result.stderr.trimEnd(), true)
@@ -236,58 +196,69 @@ fun GitHubLabScreen() {
         ScreenHeader(
             eyebrow = "Инструменты",
             title = "GitHub-лаборатория",
-            subtitle = "Локальный сервер Termux · клон, скрипты, артефакты"
+            subtitle = "Встроенный сервер · без Termux и ручной настройки"
         )
         Spacer(Modifier.height(12.dp))
 
         GlowCard(modifier = Modifier.fillMaxWidth(), padding = 14) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "Сервер Termux",
+                    "Встроенная лаборатория",
                     style = MaterialTheme.typography.titleSmall,
                     color = JbText,
                     modifier = Modifier.weight(1f)
                 )
-                if (busy) {
-                    Pill("работает", JbAmber)
-                } else {
-                    Pill("127.0.0.1:8081", JbFaint)
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                value = baseUrl,
-                onValueChange = { baseUrl = it },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                label = { Text("Адрес сервера") }
-            )
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                value = token,
-                onValueChange = { token = it },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                label = { Text("Токен сервера") },
-                visualTransformation = if (tokenVisible) VisualTransformation.None
-                else PasswordVisualTransformation(),
-                trailingIcon = {
-                    TextButton(onClick = { tokenVisible = !tokenVisible }) {
-                        Text(if (tokenVisible) "Скрыть" else "Показать", color = JbAccent2)
+                Pill(
+                    when {
+                        server.starting -> "запуск…"
+                        server.running -> "запущена"
+                        else -> "выключена"
+                    },
+                    when {
+                        server.starting -> JbAmber
+                        server.running -> JbGreen
+                        else -> JbFaint
                     }
-                }
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Сервер работает внутри приложения на 127.0.0.1:8081. Termux не нужен.",
+                style = MaterialTheme.typography.bodySmall,
+                color = JbMuted
             )
-            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Включить лабораторию",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = JbText,
+                    modifier = Modifier.weight(1f)
+                )
+                Switch(
+                    checked = server.running,
+                    onCheckedChange = labVm::setEnabled,
+                    enabled = !server.starting
+                )
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Button(onClick = checkServer, enabled = !busy) {
+                Button(onClick = labVm::check, enabled = !server.starting) {
+                    if (server.starting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
+                            color = JbText
+                        )
+                        Spacer(Modifier.width(6.dp))
+                    }
                     Text("Проверить сервер")
                 }
                 Spacer(Modifier.width(8.dp))
-                Text(
-                    "Токен печатает setup_lab.sh",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = JbFaint
-                )
+                server.note?.let {
+                    Text(it, style = MaterialTheme.typography.labelSmall, color = JbMuted)
+                }
             }
         }
 
@@ -324,7 +295,7 @@ fun GitHubLabScreen() {
                     )
                     Spacer(Modifier.width(8.dp))
                 }
-                Text("Клонировать и просканировать")
+                Text("Загрузить и просканировать")
             }
         }
 
@@ -346,36 +317,24 @@ fun GitHubLabScreen() {
                 Spacer(Modifier.height(8.dp))
                 if (current.scripts.isEmpty()) {
                     Text(
-                        "Исполняемые файлы (.py/.sh/.js) не найдены",
+                        "Скрипты (.sh/.py) не найдены",
                         style = MaterialTheme.typography.bodySmall,
                         color = JbFaint
                     )
                 } else {
                     current.scripts.forEach { script ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    script.path,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = JbText,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    script.type.title,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = JbFaint
-                                )
+                        ScriptRow(
+                            script = script,
+                            value = params[script.path].orEmpty(),
+                            onValue = { value -> params = params + (script.path to value) },
+                            enabled = !busy,
+                            onRun = { value ->
+                                val suffix = if (script.param != null && value.isNotBlank()) {
+                                    " " + quoteArg(value)
+                                } else ""
+                                runCommand(script.command() + suffix)
                             }
-                            TextButton(
-                                onClick = { runCommand(script.command()) },
-                                enabled = !busy
-                            ) { Text("Запустить", color = JbAccent2) }
-                        }
+                        )
                     }
                 }
             }
@@ -438,7 +397,7 @@ fun GitHubLabScreen() {
                 onValueChange = { command = it },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("Команда в каталоге проекта") },
-                placeholder = { Text("например: python3 script.py") }
+                placeholder = { Text("например: sh script.sh") }
             )
             Spacer(Modifier.height(8.dp))
             Button(
@@ -455,19 +414,58 @@ fun GitHubLabScreen() {
                 }
                 Spacer(Modifier.weight(1f))
                 TextButton(onClick = exportEnv, enabled = !busy && project != null) {
-                    Text("Экспорт → Download/JB-Osint/reports", color = JbAccent2)
+                    Text("Экспорт → JB-Osint/reports", color = JbAccent2)
                 }
             }
         }
 
         Spacer(Modifier.height(10.dp))
         Text(
-            "Сервер слушает только 127.0.0.1 и требует X-Lab-Token. Каталоги проектов — " +
-                "внутри ~/.jb_osint/lab с правами 700. Белый список команд и таймаут 10 минут; " +
-                "sudo/su/doas и `bash -c` запрещены. Код репозитория запускается только по кнопке.",
+            "Сервер слушает только 127.0.0.1 и работает внутри приложения (foreground service). " +
+                "Скрипты запускаются по кнопке, с таймаутом 10 минут и белым списком команд. " +
+                "Android-shell (.sh) работает нативно; .py требует установленный Python — обычно его нет.",
             style = MaterialTheme.typography.labelSmall,
             color = JbFaint
         )
         Spacer(Modifier.height(24.dp))
     }
 }
+
+@Composable
+private fun ScriptRow(
+    script: LabScript,
+    value: String,
+    onValue: (String) -> Unit,
+    enabled: Boolean,
+    onRun: (String) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    script.button ?: script.path,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = JbText,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(script.path, style = MaterialTheme.typography.labelSmall, color = JbFaint)
+            }
+            TextButton(onClick = { onRun(value) }, enabled = enabled) {
+                Text("Запустить", color = JbAccent2)
+            }
+        }
+        script.param?.let { label ->
+            OutlinedTextField(
+                value = value,
+                onValueChange = onValue,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text(label) }
+            )
+        }
+    }
+}
+
+private fun quoteArg(value: String): String =
+    "'" + value.replace("'", "'\\''") + "'"

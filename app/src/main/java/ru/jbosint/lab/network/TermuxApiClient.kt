@@ -139,7 +139,7 @@ class TermuxApiClient {
             base.startsWith("http://localhost") ||
             base.startsWith("http://[::1]")
         if (!loopback) throw LabException("Адрес должен быть локальным: http://127.0.0.1:8081")
-        if (config.token.isBlank()) throw LabException("Укажите токен сервера из setup_lab.sh")
+        if (config.token.isBlank()) throw LabException("Внутренний токен не создан — включите лабораторию")
         return base + path
     }
 
@@ -152,7 +152,9 @@ class TermuxApiClient {
             LabScript(
                 name = item.optString("name").ifBlank { path.substringAfterLast('/') },
                 path = path,
-                type = LabProjectType.from(item.optString("type"))
+                type = LabProjectType.from(item.optString("type")),
+                button = item.optString("button").takeIf { it.isNotBlank() && !item.isNull("button") },
+                param = item.optString("param").takeIf { it.isNotBlank() && !item.isNull("param") }
             )
         }
     }
@@ -163,7 +165,7 @@ class TermuxApiClient {
 
     private fun error(t: Throwable): Nothing = when (t) {
         is LabException -> throw t
-        is IOException -> throw LabException("Сервер Termux недоступен: ${t.message ?: "нет соединения"}")
+        is IOException -> throw LabException("Локальный сервер недоступен — включите лабораторию")
         else -> throw LabException(t.message ?: "Ошибка сети")
     }
 

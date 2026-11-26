@@ -18,7 +18,11 @@ enum class LabProjectType(val wire: String, val title: String) {
 data class LabScript(
     val name: String,
     val path: String,
-    val type: LabProjectType
+    val type: LabProjectType,
+    /** Заголовок кнопки из `# JB_BUTTON` (если размечен). */
+    val button: String? = null,
+    /** Имя параметра из `# JB_PARAM` (если скрипт принимает аргумент). */
+    val param: String? = null
 ) {
     /** Команда запуска с уже подставленным путём (cwd на сервере = каталог проекта). */
     fun command(): String = when (type) {
