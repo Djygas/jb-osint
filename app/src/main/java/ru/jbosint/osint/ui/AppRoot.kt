@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VpnKey
@@ -142,6 +143,7 @@ fun AppRoot(state: UiState, vm: AppViewModel) {
                     Screen.RESULTS -> ResultsScreen(state, vm)
                     Screen.TELEGRAM -> TelegramScreen(state, vm)
                     Screen.LEAKS -> LeaksScreen(state, vm)
+                    Screen.LAB -> GitHubLabScreen(state, vm)
                     Screen.KEYS -> KeysScreen(state, vm)
                     Screen.SETTINGS -> SettingsScreen(state, vm)
                     Screen.PROFILE -> ProfileScreen(state, vm)
@@ -188,6 +190,7 @@ private fun JbBottomBar(current: Screen, userMode: Boolean, onNavigate: (Screen)
         Triple(Screen.AGENT, "Агент", Icons.Filled.AutoAwesome),
         Triple(Screen.TELEGRAM, "Telegram", Icons.Filled.Forum),
         Triple(Screen.LEAKS, "Утечки", Icons.Filled.Lock),
+        Triple(Screen.LAB, "GitHub", Icons.Filled.Science),
         Triple(Screen.KEYS, "Ключи", Icons.Filled.VpnKey),
         Triple(Screen.SETTINGS, "Настройки", Icons.Filled.Settings)
     )

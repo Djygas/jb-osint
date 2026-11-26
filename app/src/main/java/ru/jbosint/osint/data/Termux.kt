@@ -302,6 +302,20 @@ object TermuxSpec {
         return start(context, path, args, normalizeHome(home), background, requestId)
     }
 
+    /**
+     * Запуск произвольного bash-скрипта (одним аргументом `bash -lc`), без записи
+     * файла: путь и содержимое передаются через ARGUMENTS. Используется лабораторией,
+     * где команда запускается только по явному действию пользователя.
+     */
+    fun startScriptText(
+        context: Context,
+        home: String,
+        script: String,
+        background: Boolean = true,
+        requestId: String
+    ): Result<Unit> =
+        start(context, BASH, arrayOf("-lc", script), normalizeHome(home), background, requestId)
+
     private fun start(
         context: Context,
         path: String,

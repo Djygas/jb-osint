@@ -111,6 +111,26 @@ class SettingsStore(context: Context) {
     var showLeakPasswords: Boolean
         get() = prefs.getBoolean("show_leak_passwords", false)
         set(value) = prefs.edit().putBoolean("show_leak_passwords", value).apply()
+
+    // ------------------------------------------------------- GitHub-лаборатория
+
+    var labRepoUrl: String
+        get() = prefs.getString("lab_repo_url", "").orEmpty()
+        set(value) = prefs.edit().putString("lab_repo_url", value.trim().take(300)).apply()
+
+    var labRepoRef: String
+        get() = prefs.getString("lab_repo_ref", "").orEmpty()
+        set(value) = prefs.edit().putString("lab_repo_ref", value.trim().take(100)).apply()
+
+    /** Устанавливать зависимости сразу после клонирования (выполняет сторонний код). */
+    var labInstallDeps: Boolean
+        get() = prefs.getBoolean("lab_install_deps", false)
+        set(value) = prefs.edit().putBoolean("lab_install_deps", value).apply()
+
+    /** Проверять GPG-подпись HEAD после клонирования. */
+    var labVerifyGpg: Boolean
+        get() = prefs.getBoolean("lab_verify_gpg", false)
+        set(value) = prefs.edit().putBoolean("lab_verify_gpg", value).apply()
 }
 
 data class HistoryEntry(

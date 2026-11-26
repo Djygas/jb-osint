@@ -75,6 +75,9 @@ import ru.jbosint.osint.data.LeakReportSource
 import ru.jbosint.osint.data.LeakRows
 import ru.jbosint.osint.data.LeakScan
 import ru.jbosint.osint.data.LeakStore
+import ru.jbosint.osint.data.GitHubLabConfig
+import ru.jbosint.osint.data.GitHubLabSpec
+import ru.jbosint.osint.data.LabProject
 import ru.jbosint.osint.data.DocumentText
 import ru.jbosint.osint.data.DocHints
 import ru.jbosint.osint.data.SourceLink
@@ -163,9 +166,9 @@ import ru.jbosint.osint.data.WatchStore
 private const val MAX_PIN_FAILS = 5
 
 /** Экраны, доступные только администратору. */
-private val MANAGED_SCREENS = setOf(Screen.KEYS, Screen.SETTINGS, Screen.MODULES, Screen.PLUGINS)
+private val MANAGED_SCREENS = setOf(Screen.KEYS, Screen.SETTINGS, Screen.MODULES, Screen.PLUGINS, Screen.LAB)
 
-enum class Screen { HOME, RESULTS, TELEGRAM, LEAKS, KEYS, SETTINGS, PROFILE, AGENT, MODULES, PLUGINS }
+enum class Screen { HOME, RESULTS, TELEGRAM, LEAKS, LAB, KEYS, SETTINGS, PROFILE, AGENT, MODULES, PLUGINS }
 
 /** Состояние быстрой настройки модуля: прогресс или предложение ручной настройки. */
 data class AutoSetupUi(
@@ -366,6 +369,8 @@ data class UiState(
     val docs: DocsUi = DocsUi(),
     // ------------------------------------------------------------ индекс утечек
     val leak: LeakUi = LeakUi(),
+    // ------------------------------------------------------------ GitHub-лаборатория
+    val lab: LabUi = LabUi(),
     // ------------------------------------------------------------ сверка фактов
     val crossCheck: CrossCheckUi = CrossCheckUi()
 ) {
@@ -433,6 +438,29 @@ typealias LeakSourceUi = LeakReportSource
 
 typealias LeakRowUi = LeakReportRow
 
+/** Строка лога GitHub-лаборатории. */
+data class LabLogLine(
+    val at: Long = System.currentTimeMillis(),
+    val text: String,
+    val error: Boolean = false
+)
+
+/** Состояние вкладки «GitHub-лаборатория». */
+data class LabUi(
+    val repoUrl: String = "",
+    val ref: String = "",
+    val busy: Boolean = false,
+    val stage: String = "",
+    val note: String? = null,
+    val log: List<LabLogLine> = emptyList(),
+    val command: String = "",
+    val project: LabProject? = null,
+    val installDeps: Boolean = false,
+    val verifyGpg: Boolean = false,
+    val configured: Boolean = false,
+    val setupOpen: Boolean = false
+)
+
 data class TermuxUi(
     val enabled: Boolean = false,
     val home: String = TermuxSpec.DEFAULT_HOME,
@@ -489,6 +517,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var importedMessages: List<ru.jbosint.osint.profile.ProfileMessage> = emptyList()
     private var termuxDiagRequest: String? = null
     private var termuxScriptRequest: String? = null
+    private var labRequest: String? = null
+    private var labAction: String? = null
+    private var labPending: LabProject? = null
 
     private val _state = MutableStateFlow(UiState())
     val state = _state.asStateFlow()
@@ -564,7 +595,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 url = settings.serverUrl,
                 keyed = secure.get("server_key")?.isNotBlank() == true
             ),
-            leak = LeakUi(showPasswords = settings.showLeakPasswords)
+            leak = LeakUi(showPasswords = settings.showLeakPasswords),
+            lab = LabUi(
+                repoUrl = settings.labRepoUrl,
+                ref = settings.labRepoRef,
+                installDeps = settings.labInstallDeps,
+                verifyGpg = settings.labVerifyGpg
+            )
         )
         detectBackupOffer()
     }
@@ -2152,6 +2189,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun onTermuxResult(result: ru.jbosint.osint.data.TermuxResult) {
+        val lab = labRequest
+        if (lab != null && result.requestId == lab) {
+            handleLabResult(result)
+            return
+        }
         when (result.requestId) {
             termuxDiagRequest -> {
                 termuxDiagRequest = null
@@ -4330,6 +4372,254 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }.onFailure { error ->
             _state.update { it.copy(toast = "Экспорт не удался: ${error.message ?: "ошибка"}") }
         }
+    }
+
+    // ------------------------------------------------------- GitHub-лаборатория
+
+    fun setLabRepo(value: String) {
+        settings.labRepoUrl = value
+        _state.update { it.copy(lab = it.lab.copy(repoUrl = value.take(300), note = null)) }
+    }
+
+    fun setLabRef(value: String) {
+        settings.labRepoRef = value
+        _state.update { it.copy(lab = it.lab.copy(ref = value.take(100), note = null)) }
+    }
+
+    fun setLabInstallDeps(value: Boolean) {
+        settings.labInstallDeps = value
+        _state.update { it.copy(lab = it.lab.copy(installDeps = value)) }
+    }
+
+    fun setLabVerifyGpg(value: Boolean) {
+        settings.labVerifyGpg = value
+        _state.update { it.copy(lab = it.lab.copy(verifyGpg = value)) }
+    }
+
+    fun setLabCommand(value: String) =
+        _state.update { it.copy(lab = it.lab.copy(command = value.take(GitHubLabSpec.MAX_COMMAND))) }
+
+    fun clearLabLog() =
+        _state.update { it.copy(lab = it.lab.copy(log = emptyList(), note = null)) }
+
+    private fun labConfig() = GitHubLabConfig()
+
+    private fun labPermissionOk(): Boolean {
+        if (TermuxSpec.isPermissionGranted(getApplication())) return true
+        _state.update {
+            it.copy(
+                lab = it.lab.copy(note = "Нет разрешения com.termux.permission.RUN_COMMAND"),
+                toast = "Разрешите RUN_COMMAND для JB OSINT в Termux"
+            )
+        }
+        return false
+    }
+
+    fun setupLab() {
+        if (!labPermissionOk()) return
+        startLab("setup", "Настройка Termux…", GitHubLabSpec.setupScript(labConfig()))
+    }
+
+    fun cloneLab() {
+        val current = _state.value.lab
+        if (current.busy) return
+        val config = labConfig()
+        val project = GitHubLabSpec.projectFor(config, current.repoUrl, current.ref)
+        if (project == null) {
+            _state.update {
+                it.copy(
+                    lab = it.lab.copy(
+                        note = "Нужна ссылка https://github.com/owner/repo и корректная ветка/тег"
+                    )
+                )
+            }
+            return
+        }
+        if (!labPermissionOk()) return
+        labPending = project
+        val suffix = if (project.ref.isBlank()) "" else " (${project.ref})"
+        appendLabLog("Клонирование ${project.url}$suffix…")
+        startLab(
+            "clone",
+            "Клонирую ${project.url}…",
+            GitHubLabSpec.cloneScript(config, project, current.verifyGpg)
+        )
+    }
+
+    fun installLabDeps() {
+        val current = _state.value.lab
+        if (current.busy) return
+        val project = current.project ?: run {
+            _state.update { it.copy(toast = "Сначала клонируйте репозиторий") }
+            return
+        }
+        if (!labPermissionOk()) return
+        appendLabLog("Установка зависимостей (${project.type.title})…")
+        startLab(
+            "install",
+            "Устанавливаю зависимости…",
+            GitHubLabSpec.installScript(labConfig(), project)
+        )
+    }
+
+    fun runLabCommand() {
+        val current = _state.value.lab
+        if (current.busy) return
+        val project = current.project ?: run {
+            _state.update { it.copy(toast = "Сначала клонируйте репозиторий") }
+            return
+        }
+        val command = current.command.trim()
+        if (command.isBlank()) {
+            _state.update { it.copy(toast = "Введите команду") }
+            return
+        }
+        if (command.length > GitHubLabSpec.MAX_COMMAND) {
+            _state.update { it.copy(toast = "Команда слишком длинная") }
+            return
+        }
+        if (GitHubLabSpec.isCommandForbidden(command)) {
+            _state.update { it.copy(toast = "sudo/su/doas запрещены в лаборатории") }
+            return
+        }
+        if (!labPermissionOk()) return
+        appendLabLog("$ $command")
+        startLab("run", "Выполняю команду…", GitHubLabSpec.runScript(labConfig(), project, command))
+    }
+
+    fun clearLabEnv() {
+        val current = _state.value.lab
+        if (current.busy) return
+        val project = current.project ?: run {
+            _state.update { it.copy(toast = "Среда ещё не создана") }
+            return
+        }
+        if (!labPermissionOk()) return
+        appendLabLog("Удаляю ${project.dir}")
+        startLab("clear", "Удаляю среду…", GitHubLabSpec.clearScript(labConfig(), project))
+    }
+
+    fun exportLab() {
+        val current = _state.value.lab
+        if (current.busy) return
+        val project = current.project ?: run {
+            _state.update { it.copy(toast = "Сначала клонируйте репозиторий") }
+            return
+        }
+        if (!labPermissionOk()) return
+        appendLabLog("Экспорт в Download/JB-Osint/reports…")
+        startLab("export", "Экспорт…", GitHubLabSpec.exportScript(project))
+    }
+
+    private fun appendLabLog(text: String, error: Boolean = false) {
+        _state.update {
+            it.copy(
+                lab = it.lab.copy(
+                    log = (it.lab.log + LabLogLine(text = text, error = error)).takeLast(600)
+                )
+            )
+        }
+    }
+
+    private fun startLab(action: String, stage: String, script: String) {
+        val requestId = "lab-$action-${System.currentTimeMillis()}"
+        labRequest = requestId
+        labAction = action
+        _state.update { it.copy(lab = it.lab.copy(busy = true, stage = stage, note = null)) }
+        val result = TermuxSpec.startScriptText(
+            getApplication(),
+            settings.termuxHome,
+            script,
+            background = true,
+            requestId = requestId
+        )
+        if (result.isFailure) {
+            labRequest = null
+            labAction = null
+            labPending = null
+            val message = result.exceptionOrNull()?.message ?: "Termux не запустился"
+            _state.update {
+                it.copy(lab = it.lab.copy(busy = false, stage = "", note = message), toast = message)
+            }
+        }
+    }
+
+    private fun markerOf(text: String, prefix: String): String =
+        text.lineSequence().firstOrNull { it.startsWith(prefix) }
+            ?.removePrefix(prefix)?.trim().orEmpty()
+
+    private fun handleLabResult(result: ru.jbosint.osint.data.TermuxResult) {
+        val action = labAction
+        labRequest = null
+        labAction = null
+        val lines = ArrayList<LabLogLine>()
+        result.stdout.lineSequence().filter { it.isNotBlank() }.forEach { lines += LabLogLine(text = it) }
+        result.stderr.lineSequence().filter { it.isNotBlank() }.forEach {
+            lines += LabLogLine(text = it, error = true)
+        }
+        if (result.error.isNotBlank()) lines += LabLogLine(text = result.error, error = true)
+
+        var project = _state.value.lab.project
+        var configured = _state.value.lab.configured
+        var note: String? = null
+        var autoInstall: LabProject? = null
+        when (action) {
+            "clone" -> {
+                val pending = labPending
+                labPending = null
+                val ok = result.exitCode == 0 && result.stdout.contains("JB_LAB_CLONE_OK")
+                if (ok && pending != null) {
+                    val type = GitHubLabSpec.typeFromMarker(markerOf(result.stdout, "JB_LAB_TYPE="))
+                    val dir = markerOf(result.stdout, "JB_LAB_DIR=").ifBlank { pending.dir }
+                    project = pending.copy(dir = dir, type = type)
+                    val gpg = markerOf(result.stdout, "JB_LAB_GPG=")
+                    note = buildString {
+                        append("Готово: ").append(type.title)
+                        if (gpg == "ok") append(" · GPG верна")
+                        if (gpg == "fail") append(" · GPG не подтверждена")
+                    }
+                    if (settings.labInstallDeps) autoInstall = project
+                } else {
+                    note = "Клонирование не удалось (код ${result.exitCode})"
+                }
+            }
+            "install" -> {
+                note = if (result.exitCode == 0 && result.stdout.contains("JB_LAB_INSTALL_OK")) {
+                    "Зависимости установлены"
+                } else {
+                    "Установка зависимостей: код ${result.exitCode}"
+                }
+            }
+            "run" -> {
+                val exit = markerOf(result.stdout, "JB_LAB_EXIT=").toIntOrNull() ?: result.exitCode
+                note = "Команда завершена (код $exit)"
+            }
+            "clear" -> {
+                project = null
+                note = "Среда удалена"
+            }
+            "export" -> {
+                val out = markerOf(result.stdout, "JB_LAB_EXPORT=")
+                note = if (out.isNotBlank()) "Экспорт: $out" else "Экспорт не удался (код ${result.exitCode})"
+            }
+            "setup" -> {
+                configured = result.stdout.contains("JB_LAB_SETUP_OK")
+                note = if (configured) "Конфиг Termux записан" else "Настройка не удалась (код ${result.exitCode})"
+            }
+        }
+        _state.update {
+            it.copy(
+                lab = it.lab.copy(
+                    log = (it.lab.log + lines).takeLast(600),
+                    busy = false,
+                    stage = "",
+                    note = note,
+                    project = project,
+                    configured = configured
+                )
+            )
+        }
+        if (autoInstall != null) installLabDeps()
     }
 
     fun openCrossCheck() {
