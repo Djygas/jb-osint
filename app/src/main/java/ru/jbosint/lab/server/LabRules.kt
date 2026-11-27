@@ -171,10 +171,13 @@ object LabRules {
         }
         val line = firstLine?.trim().orEmpty()
         if (!line.startsWith("#!")) return LabLanguage.OTHER
-        val interpreter = line.removePrefix("#!").trim()
-            .substringBefore(' ')
-            .substringAfterLast('/')
-            .lowercase(Locale.US)
+        val parts = line.removePrefix("#!").trim()
+            .split(Regex("\\s+"))
+            .filter { it.isNotBlank() && !it.startsWith("-") }
+        var interpreter = parts.firstOrNull()?.substringAfterLast('/')?.lowercase(Locale.US).orEmpty()
+        if (interpreter == "env") {
+            interpreter = parts.getOrNull(1)?.substringAfterLast('/')?.lowercase(Locale.US).orEmpty()
+        }
         return when {
             interpreter.startsWith("python") -> LabLanguage.PYTHON
             interpreter == "node" || interpreter == "nodejs" -> LabLanguage.NODE
