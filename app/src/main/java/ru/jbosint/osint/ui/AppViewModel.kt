@@ -4388,8 +4388,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 LabLaunch.request(dir.absolutePath, "Дамп: $name")
                 _state.update { it.copy(screen = Screen.LAB, leak = it.leak.copy(open = false)) }
             }
-            .onFailure {
-                _state.update { it.copy(toast = "Не удалось открыть дамп: ${it.message ?: "ошибка"}") }
+            .onFailure { error ->
+                _state.update { it.copy(toast = "Не удалось открыть дамп: ${error.message ?: "ошибка"}") }
             }
     }
 
