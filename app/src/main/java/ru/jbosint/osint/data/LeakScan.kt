@@ -156,7 +156,10 @@ object LeakRules {
         var sourceUrl = ""
         var consumed = 0
         val first = after.firstOrNull()
-        if (first != null && !emailRe.matches(first)) {
+        // В TXT-формате `email:password@service` токен после email может выглядеть
+        // как почта — это пароль и сервис, а не дубль адреса.
+        val structured = delimiter != ':'
+        if (first != null && !(structured && emailRe.matches(first))) {
             if (first.contains('@') && !first.contains(' ')) {
                 val candidate = first.substringBeforeLast('@')
                 val tail = first.substringAfterLast('@')
