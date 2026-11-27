@@ -12,6 +12,7 @@ import ru.jbosint.osint.data.LeakReportCodec
 import ru.jbosint.osint.data.LeakReportRow
 import ru.jbosint.osint.data.LeakReportSource
 import ru.jbosint.osint.data.LeakRows
+import ru.jbosint.osint.data.PasswordStatus
 import ru.jbosint.osint.data.LeakRules
 import ru.jbosint.osint.data.source.LeakOrigin
 import ru.jbosint.osint.data.source.LeakRecord
@@ -55,7 +56,9 @@ class LeakReportTest {
             attributes = mapOf(
                 "where" to "Collection #1 (2019)",
                 "password" to "secret1",
-                "hadPassword" to "true"
+                "hadPassword" to "true",
+                "Файл" to "Collection #1.txt",
+                "Строка" to "42"
             ),
             sourceId = "leak_index"
         )
@@ -63,7 +66,12 @@ class LeakReportTest {
         assertEquals("user@x.ru", row?.value)
         assertEquals("secret1", row?.password)
         assertEquals("Collection #1 (2019)", row?.where)
+        assertEquals("Collection #1 (2019)", row?.resource)
         assertEquals("leak_index", row?.source)
+        assertEquals(PasswordStatus.FOUND, row?.passwordStatus)
+        assertEquals("local_index", row?.passwordSource)
+        assertEquals("leaks/Collection #1.txt · строка 42", row?.sourceRef)
+        assertEquals("Collection #1.txt:42", row?.recordId)
         assertTrue(row?.hadPassword == true)
     }
 
@@ -83,21 +91,64 @@ class LeakReportTest {
         assertEquals("hibp", row?.source)
         assertEquals("2012-05-05", row?.date)
         assertFalse(row?.hadPassword == true)
+        assertEquals(PasswordStatus.API_WITHOUT_PASSWORD, row?.passwordStatus)
     }
 
     @Test
-    fun apiRowMarksPasswordPresenceWithoutValue() {
+    fun apiRowCanFillPasswordFromFullResponse() {
         val fact = RawFact(
             category = FactCategory.OTHER,
             kind = "Утечка",
             value = "SomeBreach",
             subject = "user@x.ru",
-            attributes = mapOf("Пароль" to "Qwerty123"),
+            attributes = mapOf("Пароль" to "Qwerty123", "Дата" to "2020-01"),
             sourceId = "leakcheck"
         )
         val row = LeakRows.fromFact(fact)
-        assertNull(row?.password)
+        assertEquals("Qwerty123", row?.password)
+        assertEquals(PasswordStatus.FOUND, row?.passwordStatus)
+        assertEquals("leakcheck", row?.passwordSource)
         assertTrue(row?.hadPassword == true)
+    }
+
+    @Test
+    fun paywalledSourceExplainsMissingPassword() {
+        val fact = RawFact(
+            category = FactCategory.OTHER,
+            kind = "Утечка",
+            value = "LinkedIn",
+            subject = "user@x.ru",
+            attributes = mapOf("Дата" to "2012-05-05"),
+            sourceId = "leakcheck"
+        )
+        val row = LeakRows.fromFact(
+            fact,
+            sourceStatus = "Тариф без полных записей (403) — показана бесплатная сводка"
+        )
+        assertNull(row?.password)
+        assertEquals(PasswordStatus.PAYWALLED, row?.passwordStatus)
+        assertEquals("LinkedIn", row?.resource)
+    }
+
+    @Test
+    fun dedupeMergesSameResourceAndDate() {
+        val first = LeakReportRow(value = "a@x.ru", where = "Tele2.ru", date = "2022-06")
+        val second = LeakReportRow(
+            value = "a@x.ru",
+            where = "Tele2.ru",
+            date = "2022-06",
+            password = "pw",
+            passwordStatus = PasswordStatus.FOUND
+        )
+        val other = LeakReportRow(
+            value = "a@x.ru",
+            where = "Tele2.ru",
+            date = "2022-06",
+            recordId = "r2"
+        )
+        val merged = LeakRows.dedupe(listOf(first, second, other))
+        assertEquals(2, merged.size)
+        assertEquals("pw", merged.first { it.recordId.isBlank() }.password)
     }
 
     @Test
@@ -150,6 +201,9 @@ class LeakReportTest {
             .getJSONArray("rows").getJSONObject(0)
         assertEquals("topsecret", row.getString("password"))
         assertTrue(json.getBoolean("passwordMode"))
+        assertTrue(row.has("password_status"))
+        assertTrue(row.has("resource"))
+        assertTrue(row.has("breach_date"))
     }
 
     @Test
@@ -189,8 +243,12 @@ class LeakReportTest {
         val csv = LeakReportCodec.toCsv(sources)
         assertFalse(csv.contains("TOP_SECRET_VALUE"))
         assertTrue(csv.contains("true"))
+        assertTrue(csv.contains("Ресурс утечки"))
+        assertTrue(csv.contains("Статус пароля"))
         val html = LeakReportCodec.toHtml("a@x.ru", 1L, sources)
         assertFalse(html.contains("TOP_SECRET_VALUE"))
+        assertTrue(html.contains("Ресурс утечки"))
+        assertTrue(html.contains("Статус пароля"))
     }
 
     @Test

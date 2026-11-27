@@ -30,6 +30,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -43,9 +45,11 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,7 +61,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import ru.jbosint.osint.data.LeakRules
+import ru.jbosint.osint.data.PasswordStatus
 
 /**
  * «Утечки»: глубокий поиск по локальным дампам и каскаду API.
@@ -114,7 +121,11 @@ fun LeakScanDialog(state: UiState, vm: AppViewModel) {
                 LeakDetailScreen(
                     row = selected,
                     showPasswords = leak.showPasswords,
-                    onBack = vm::closeLeakRow
+                    onBack = vm::closeLeakRow,
+                    onOpenSettings = {
+                        vm.closeLeakScan()
+                        vm.navigate(Screen.SETTINGS)
+                    }
                 )
             } else {
                 Column(
@@ -228,7 +239,11 @@ fun LeakScanDialog(state: UiState, vm: AppViewModel) {
                                 SourceBlock(
                                     source = source,
                                     showPasswords = leak.showPasswords,
-                                    onRow = vm::openLeakRow
+                                    onRow = vm::openLeakRow,
+                                    onOpenSettings = {
+                                        vm.closeLeakScan()
+                                        vm.navigate(Screen.SETTINGS)
+                                    }
                                 )
                             }
                             item { ExportRow(vm) }
@@ -299,7 +314,8 @@ private fun SourceFilterRow(state: UiState, vm: AppViewModel) {
 private fun SourceBlock(
     source: LeakSourceUi,
     showPasswords: Boolean,
-    onRow: (LeakRowUi) -> Unit
+    onRow: (LeakRowUi) -> Unit,
+    onOpenSettings: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -324,13 +340,17 @@ private fun SourceBlock(
             }
             Pill("${source.hits}", if (source.hits > 0) JbGreen else JbFaint)
         }
+        source.status?.let { status ->
+            Spacer(Modifier.height(4.dp))
+            Text(status, style = MaterialTheme.typography.labelSmall, color = JbAmber)
+        }
         source.note?.let { note ->
             Spacer(Modifier.height(4.dp))
             Text(note, style = MaterialTheme.typography.labelSmall, color = JbMuted)
         }
         source.rows.forEach { row ->
             Spacer(Modifier.height(8.dp))
-            LeakRecordRow(row, showPasswords, onRow)
+            LeakRecordRow(row, showPasswords, onRow, onOpenSettings)
         }
         if (source.hits > source.rows.size && source.rows.isNotEmpty()) {
             Spacer(Modifier.height(4.dp))
@@ -347,9 +367,10 @@ private fun SourceBlock(
 private fun LeakRecordRow(
     row: LeakRowUi,
     showPasswords: Boolean,
-    onRow: (LeakRowUi) -> Unit
+    onRow: (LeakRowUi) -> Unit,
+    onOpenSettings: () -> Unit
 ) {
-    val clipboard = LocalClipboardManager.current
+    val copy = rememberClipboardCopier()
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -359,12 +380,18 @@ private fun LeakRecordRow(
             .padding(10.dp)
     ) {
         LabeledValue("Значение", row.value)
-        LabeledValue("Пароль", passwordText(row, showPasswords))
-        LabeledValue("Источник", row.where.ifBlank { "источник не указан" })
+        LabeledValue("Ресурс", row.resource.ifBlank { "источник не указан" })
+        if (row.breachDate.isNotBlank()) LabeledValue("Дата", row.breachDate)
+        if (row.dataTypes.isNotEmpty()) LabeledValue("Типы данных", row.dataTypesText)
+        PasswordLine(row, showPasswords, onOpenSettings)
+        if (row.passwordSource.isNotBlank() || row.hadPassword) {
+            LabeledValue("Источник пароля", passwordSourceLabel(row))
+        }
+        if (row.sourceRef.isNotBlank()) LabeledValue("Ссылка", row.sourceRef)
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-                onClick = { clipboard.setText(AnnotatedString(row.value)) }
+                onClick = { copy(row.value) }
             ) {
                 Icon(Icons.Filled.ContentCopy, null, tint = JbAccent2, modifier = Modifier.size(15.dp))
                 Spacer(Modifier.width(5.dp))
@@ -376,9 +403,7 @@ private fun LeakRecordRow(
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
                 enabled = showPasswords && !pair.isNullOrBlank(),
                 onClick = {
-                    if (showPasswords && !pair.isNullOrBlank()) {
-                        clipboard.setText(AnnotatedString("${row.value}:$pair"))
-                    }
+                    if (showPasswords && !pair.isNullOrBlank()) copy("${row.value}:$pair")
                 }
             ) {
                 Text(
@@ -391,31 +416,115 @@ private fun LeakRecordRow(
 }
 
 @Composable
-private fun LabeledValue(label: String, value: String) {
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
+private fun PasswordLine(
+    row: LeakRowUi,
+    showPasswords: Boolean,
+    onOpenSettings: () -> Unit
+) {
+    if (row.password != null) {
+        if (!showPasswords) {
+            LabeledValue("Пароль", "••••••••")
+            TextButton(
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                onClick = onOpenSettings
+            ) {
+                Text("Пароли скрыты — включите показ в настройках", color = JbAmber)
+            }
+            return
+        }
+        var revealed by remember(row.recordId, row.value) { mutableStateOf(false) }
+        LaunchedEffect(revealed) {
+            if (revealed) {
+                delay(60_000)
+                revealed = false
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            LabeledValue(
+                "Пароль",
+                if (revealed) row.password.orEmpty() else "••••••••",
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = { revealed = !revealed }) {
+                Icon(
+                    if (revealed) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                    contentDescription = if (revealed) "Скрыть" else "Показать",
+                    tint = JbAccent2,
+                    modifier = Modifier.size(15.dp)
+                )
+                Spacer(Modifier.width(5.dp))
+                Text(if (revealed) "Скрыть" else "Показать", color = JbAccent2)
+            }
+        }
+    } else {
+        LabeledValue("Пароль", passwordReason(row.passwordStatus), color = statusColor(row.passwordStatus))
+    }
+}
+
+@Composable
+private fun LabeledValue(label: String, value: String, modifier: Modifier = Modifier, color: androidx.compose.ui.graphics.Color = JbText) {
+    Row(modifier = modifier.fillMaxWidth().padding(vertical = 1.dp)) {
         Text(
             label,
             style = MaterialTheme.typography.labelSmall,
             color = JbFaint,
-            modifier = Modifier.width(78.dp)
+            modifier = Modifier.width(86.dp)
         )
-        Text(value, style = MaterialTheme.typography.bodySmall, color = JbText)
+        Text(value, style = MaterialTheme.typography.bodySmall, color = color)
     }
 }
 
-private fun passwordText(row: LeakRowUi, showPasswords: Boolean): String = when {
-    showPasswords && !row.password.isNullOrBlank() -> row.password.orEmpty()
-    row.password != null || row.hadPassword -> "**********"
-    else -> "—"
+private fun passwordSourceLabel(row: LeakRowUi): String {
+    val source = when (row.passwordSource) {
+        "local_index" -> "Локальный индекс"
+        "hibp" -> "Have I Been Pwned"
+        "leakcheck" -> "LeakCheck"
+        "hudsonrock" -> "Hudson Rock"
+        "dyxless" -> "Dyxless"
+        else -> row.passwordSource.ifBlank { row.source }
+    }
+    return if (row.sourceRef.isNotBlank()) "$source · ${row.sourceRef}" else source
+}
+
+private fun passwordReason(status: PasswordStatus): String = when (status) {
+    PasswordStatus.FOUND -> "Пароль найден"
+    PasswordStatus.MASKED -> "Пароль найден, но не сохранён в кэше — повторите поиск"
+    PasswordStatus.PAYWALLED -> "Полные записи недоступны на текущем тарифе источника"
+    PasswordStatus.NOT_IN_INDEX -> "В локальных дампах пароля не найдено"
+    PasswordStatus.API_WITHOUT_PASSWORD -> "Источник подтверждает факт утечки, пароли не передаёт"
+    PasswordStatus.NONE -> "Совпадений не найдено"
+}
+
+private fun statusColor(status: PasswordStatus): androidx.compose.ui.graphics.Color = when (status) {
+    PasswordStatus.PAYWALLED -> JbAmber
+    PasswordStatus.NOT_IN_INDEX, PasswordStatus.API_WITHOUT_PASSWORD -> JbMuted
+    PasswordStatus.FOUND, PasswordStatus.MASKED -> JbGreen
+    PasswordStatus.NONE -> JbFaint
+}
+
+@Composable
+private fun rememberClipboardCopier(): (String) -> Unit {
+    val clipboard = LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
+    return remember(clipboard, scope) {
+        { text: String ->
+            clipboard.setText(AnnotatedString(text))
+            scope.launch {
+                delay(60_000)
+                if (clipboard.getText()?.text == text) clipboard.setText(AnnotatedString(""))
+            }
+        }
+    }
 }
 
 @Composable
 private fun LeakDetailScreen(
     row: LeakRowUi,
     showPasswords: Boolean,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenSettings: () -> Unit
 ) {
-    val clipboard = LocalClipboardManager.current
+    val copy = rememberClipboardCopier()
     val uri = LocalUriHandler.current
     Column(
         modifier = Modifier
@@ -433,14 +542,19 @@ private fun LeakDetailScreen(
         }
         Spacer(Modifier.height(12.dp))
         DetailField("Значение", row.value)
-        DetailField("Пароль", passwordText(row, showPasswords))
-        DetailField("Источник", row.where.ifBlank { "источник не указан" })
-        if (row.date.isNotBlank()) DetailField("Дата утечки", row.date)
+        DetailField("Ресурс", row.resource.ifBlank { "источник не указан" })
+        if (row.breachDate.isNotBlank()) DetailField("Дата утечки", row.breachDate)
+        if (row.dataTypes.isNotEmpty()) DetailField("Типы данных", row.dataTypesText)
+        PasswordLine(row, showPasswords, onOpenSettings)
+        DetailField("Статус пароля", row.passwordStatus.title)
+        if (row.passwordSource.isNotBlank() || row.hadPassword) {
+            DetailField("Источник пароля", passwordSourceLabel(row))
+        }
         DetailField("Модуль", row.source.ifBlank { "не указан" })
 
         Spacer(Modifier.height(14.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Button(onClick = { clipboard.setText(AnnotatedString(row.value)) }) {
+            Button(onClick = { copy(row.value) }) {
                 Icon(Icons.Filled.ContentCopy, null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("Копировать значение")
@@ -450,9 +564,7 @@ private fun LeakDetailScreen(
             TextButton(
                 enabled = showPasswords && !pair.isNullOrBlank(),
                 onClick = {
-                    if (showPasswords && !pair.isNullOrBlank()) {
-                        clipboard.setText(AnnotatedString("${row.value}:$pair"))
-                    }
+                    if (showPasswords && !pair.isNullOrBlank()) copy("${row.value}:$pair")
                 }
             ) { Text("Копировать логин:пароль", color = if (showPasswords) JbAccent2 else JbFaint) }
         }
@@ -464,14 +576,13 @@ private fun LeakDetailScreen(
                 Text("Открыть источник", color = JbAccent2)
             }
         }
-        if (!showPasswords && row.hadPassword) {
-            Spacer(Modifier.height(10.dp))
-            Text(
-                "Пароль скрыт. Включите «Показывать пароли в отчётах утечек» в Настройки → Утечки.",
-                style = MaterialTheme.typography.labelSmall,
-                color = JbAmber
-            )
-        }
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "Проверяйте только свои данные или данные с согласия владельца. " +
+                "Пароль скрывается автоматически через 60 секунд; буфер обмена очищается по таймеру.",
+            style = MaterialTheme.typography.labelSmall,
+            color = JbFaint
+        )
     }
 }
 

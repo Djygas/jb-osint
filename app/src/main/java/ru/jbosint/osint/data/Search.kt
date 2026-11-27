@@ -1069,7 +1069,12 @@ internal object DyxlessApi {
         "city" to "Город",
         "table_name" to "База",
         "username" to "Никнейм",
-        "telegram_id" to "Telegram ID"
+        "telegram_id" to "Telegram ID",
+        "password" to "Пароль",
+        "passwd" to "Пароль",
+        "date" to "Дата",
+        "breach_date" to "Дата",
+        "leak_date" to "Дата"
     )
 
     fun absolute(path: String): String =

@@ -187,7 +187,9 @@ class LeakScan(private val store: LeakStore, private val keys: KeySource) {
         val title: String,
         val hits: Int,
         val cached: Boolean = false,
-        val error: String? = null
+        val error: String? = null,
+        /** Сообщение источника (например, 403 «полные записи только на тарифе»). */
+        val status: String? = null
     )
 
     data class Result(
@@ -327,7 +329,10 @@ class LeakScan(private val store: LeakStore, private val keys: KeySource) {
                 fromCache = true
             } else {
                 // Шаг 3 — цепочка API: первый ответивший закрывает вопрос, остальные не дёргаются.
-                val chain = CHAIN.filter { keys.key(it).isNotBlank() }
+                val chain = CHAIN.filter { id ->
+                    val spec = ProviderCatalog.byId(id)
+                    spec?.keyless == true || keys.key(id).isNotBlank()
+                }
                 if (chain.isEmpty()) {
                     rows += SourceRow(
                         id = "api",
@@ -354,10 +359,27 @@ class LeakScan(private val store: LeakStore, private val keys: KeySource) {
                         )
                         emptyList()
                     }
-                    if (items.isNotEmpty()) {
-                        collected += items
-                        rows += SourceRow(id = id, title = title(id), hits = items.size)
-                        break
+                    val statusFact = items.firstOrNull { it.kind == "Статус" || it.kind == "status" }
+                    val data = items.filterNot { it.kind == "Статус" || it.kind == "status" }
+                    if (data.isNotEmpty()) {
+                        collected += data
+                        rows += SourceRow(
+                            id = id,
+                            title = title(id),
+                            hits = data.size,
+                            status = statusFact?.value?.takeIf { it.isNotBlank() }
+                        )
+                        // Останавливаемся, когда найден пароль; метаданные HIBP
+                        // без пароля не закрывают вопрос — идём дальше по цепочке.
+                        if (data.any { factHasPassword(it) }) break
+                    } else if (statusFact != null) {
+                        // Статус без записей (например, 403): показываем причину и идём дальше.
+                        rows += SourceRow(
+                            id = id,
+                            title = title(id),
+                            hits = 0,
+                            status = statusFact.value.takeIf { it.isNotBlank() }
+                        )
                     } else if (outcome.isSuccess) {
                         rows += SourceRow(id = id, title = title(id), hits = 0, error = "пусто")
                     }
@@ -366,7 +388,9 @@ class LeakScan(private val store: LeakStore, private val keys: KeySource) {
                 }
                 if (collected.isNotEmpty()) {
                     collected.forEach(::add)
-                    runCatching { store.cachePut("leak:" + LeakRules.hash(query), encodeFacts(collected)) }
+                    // Кэш не хранит значения паролей — только факт утечки и статус.
+                    val safe = collected.map(::sanitizeForCache)
+                    runCatching { store.cachePut("leak:" + LeakRules.hash(query), encodeFacts(safe)) }
                 }
                 offline = chain.isNotEmpty() && networkFailures == chain.size
             }
@@ -387,5 +411,21 @@ class LeakScan(private val store: LeakStore, private val keys: KeySource) {
             note = note,
             tookMs = System.currentTimeMillis() - started
         )
+    }
+
+    private fun factHasPassword(fact: RawFact): Boolean =
+        !fact.attributes["password"].isNullOrBlank() ||
+            !fact.attributes["Пароль"].isNullOrBlank() ||
+            !fact.attributes["Пароли"].isNullOrBlank()
+
+    /** Копия факта без значения пароля: в кэш попадает только признак. */
+    private fun sanitizeForCache(fact: RawFact): RawFact {
+        val attrs = fact.attributes
+        val had = attrs["password"] != null ||
+            attrs["Пароль"]?.isNotBlank() == true ||
+            attrs["Пароли"]?.isNotBlank() == true ||
+            attrs["hadPassword"]?.equals("true", true) == true
+        val cleaned = attrs.filterKeys { it !in setOf("password", "Пароль", "Пароли") }
+        return fact.copy(attributes = cleaned + ("hadPassword" to had.toString()))
     }
 }

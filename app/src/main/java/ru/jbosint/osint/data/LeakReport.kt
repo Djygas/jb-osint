@@ -7,11 +7,27 @@ import ru.jbosint.osint.data.source.DataSourceRegistry
 import ru.jbosint.osint.data.source.LeakOrigin
 import ru.jbosint.osint.data.source.LeakRecord
 
+/** Причина, почему пароль показан или отсутствует. */
+enum class PasswordStatus(val wire: String, val title: String) {
+    FOUND("found", "Пароль найден"),
+    MASKED("masked", "Пароль найден, но не сохранён в кэше"),
+    PAYWALLED("paywalled", "Полные записи недоступны на текущем тарифе источника"),
+    NOT_IN_INDEX("not_in_index", "В локальных дампах пароля не найдено"),
+    API_WITHOUT_PASSWORD("api_without_password", "Источник подтверждает факт утечки, пароли не передаёт"),
+    NONE("none", "Совпадений не найдено");
+
+    companion object {
+        fun fromWire(value: String?): PasswordStatus =
+            entries.firstOrNull { it.wire.equals(value, ignoreCase = true) } ?: NONE
+    }
+}
+
 /**
  * Запись отчёта утечек (схема `jb-osint/leak-scan/2.0`).
  *
- * [password] берётся ТОЛЬКО из локального индекса дампов. Для онлайн-источников
- * пароль всегда null, а факт его наличия показывается через [hadPassword].
+ * [password] приходит из локального индекса дампов и из API, которые отдают
+ * полные записи (LeakCheck с полным тарифом, Dyxless). В JSON значение попадает
+ * только при включённом показе паролей; CSV/HTML его не содержат никогда.
  */
 data class LeakReportRow(
     val value: String,
@@ -20,8 +36,18 @@ data class LeakReportRow(
     val source: String = "",
     val hadPassword: Boolean = false,
     val date: String = "",
-    val url: String = ""
-)
+    val url: String = "",
+    /** Название набора/утечки (Tele2.ru, Collection #1…). */
+    val dataTypes: List<String> = emptyList(),
+    val passwordStatus: PasswordStatus = PasswordStatus.NONE,
+    val passwordSource: String = "",
+    val sourceRef: String = "",
+    val recordId: String = ""
+) {
+    val resource: String get() = where
+    val breachDate: String get() = date
+    val dataTypesText: String get() = dataTypes.joinToString(", ")
+}
 
 /** Источник в отчёте утечек: карточка с записями. */
 data class LeakReportSource(
@@ -30,7 +56,9 @@ data class LeakReportSource(
     val hits: Int,
     val cached: Boolean = false,
     val note: String? = null,
-    val rows: List<LeakReportRow> = emptyList()
+    val rows: List<LeakReportRow> = emptyList(),
+    /** Причина на уровне источника: например, 403/тариф. */
+    val status: String? = null
 )
 
 /** Разобранный отчёт: версия 2.0 или совместимая 1.0. */
@@ -48,53 +76,128 @@ data class LeakReport(
 /** Преобразование сырого факта источника в запись отчёта. Чистые правила без Android. */
 object LeakRows {
 
-    /**
-     * null — факт не является записью утечки (сводка, статус, тип данных).
-     * Пароль подставляется только для [indexId].
-     */
-    fun fromFact(fact: RawFact, indexId: String = "leak_index"): LeakReportRow? {
+    fun fromFact(
+        fact: RawFact,
+        indexId: String = "leak_index",
+        sourceStatus: String? = null
+    ): LeakReportRow? {
         if (!fact.kind.startsWith("Утечка")) return null
         val attrs = fact.attributes
         val isIndex = fact.sourceId == indexId
-        val password = if (isIndex) attrs["password"]?.takeIf { it.isNotBlank() } else null
-        val where = if (isIndex) {
+        val rawPassword = when {
+            isIndex -> attrs["password"]
+            else -> (attrs["Пароль"] ?: attrs["Пароли"])
+                ?.substringBefore(',')
+                ?.trim()
+        }?.takeIf { it.isNotBlank() && it != "null" }
+        val hadPassword = rawPassword != null ||
+            attrs["hadPassword"]?.equals("true", ignoreCase = true) == true ||
+            attrs["Пароль"]?.isNotBlank() == true ||
+            attrs["Пароли"]?.isNotBlank() == true
+
+        val resource = if (isIndex) {
             attrs["where"].orEmpty()
                 .ifBlank { attrs["Файл"].orEmpty() }
                 .ifBlank { attrs["file"].orEmpty() }
         } else {
-            val record = LeakRecord(fact.value, fact.sourceId, attrs, fact.sourceUrl)
-            val source = DataSourceRegistry.all.firstOrNull { it.info.id == fact.sourceId }
-            (source?.resolveOrigin(record) ?: LeakOrigin.from(record)).ifBlank {
-                // У HIBP/LeakCheck значение факта — название утечки, это и есть происхождение.
-                // У остальных без явных метаданных происхождение неизвестно.
-                when (fact.sourceId) {
-                    "hibp", "leakcheck" -> fact.value
-                    else -> ""
+            attrs["База"]?.takeIf { it.isNotBlank() }
+                ?: attrs["Наборы данных"]?.takeIf { it.isNotBlank() }
+                ?: when (fact.sourceId) {
+                    "dyxless" -> fact.kind.takeIf { it.isNotBlank() && it != "Запись" } ?: ""
+                    else -> fact.value
+                }
+        }
+
+        val baseTypes = if (isIndex) {
+            listOf(if (fact.kind.contains("телефон", ignoreCase = true)) "телефон" else "email")
+        } else {
+            val raw = attrs["Данные"] ?: attrs["Ещё"] ?: attrs["fields"]
+                ?: if (fact.sourceId == "dyxless") {
+                    attrs.keys.filterNot { it in setOf("Дата", "База", "Пароль") }.joinToString(", ")
+                } else ""
+            raw.split(',', ';').map { it.trim() }.filter { it.isNotBlank() }
+        }
+        val dataTypes = (baseTypes + if (rawPassword != null) listOf("пароль") else emptyList())
+            .distinct()
+
+        val paywalled = sourceStatus?.let {
+            it.contains("403", true) || it.contains("тариф", true) ||
+                it.contains("полные записи", true)
+        } == true
+        val status = when {
+            rawPassword != null -> PasswordStatus.FOUND
+            isIndex -> PasswordStatus.NOT_IN_INDEX
+            paywalled -> PasswordStatus.PAYWALLED
+            hadPassword -> PasswordStatus.MASKED
+            else -> PasswordStatus.API_WITHOUT_PASSWORD
+        }
+
+        val file = attrs["Файл"] ?: attrs["file"] ?: ""
+        val line = attrs["Строка"] ?: attrs["line"] ?: ""
+        val sourceRef = if (isIndex) {
+            buildString {
+                if (file.isNotBlank()) append("leaks/").append(file)
+                if (line.isNotBlank()) {
+                    if (isNotEmpty()) append(" · ")
+                    append("строка ").append(line)
                 }
             }
+        } else {
+            fact.sourceUrl
         }
-        val hadPassword = password != null ||
-            attrs["hadPassword"]?.equals("true", ignoreCase = true) == true ||
-            attrs["Пароль"]?.isNotBlank() == true ||
-            attrs["Пароли"]?.isNotBlank() == true
+        val recordId = if (isIndex) "$file:$line" else attrs["record_id"].orEmpty()
+
         return LeakReportRow(
             value = fact.subject.ifBlank { fact.value },
-            password = password,
-            where = where,
+            password = rawPassword,
+            where = resource,
             source = fact.sourceId,
             hadPassword = hadPassword,
-            date = attrs["Дата"].orEmpty(),
-            url = fact.sourceUrl
+            date = attrs["Дата"].orEmpty().ifBlank { attrs["breach_date"].orEmpty() },
+            url = fact.sourceUrl,
+            dataTypes = dataTypes,
+            passwordStatus = status,
+            passwordSource = if (isIndex) "local_index" else fact.sourceId,
+            sourceRef = sourceRef,
+            recordId = recordId
         )
+    }
+
+    /**
+     * Дедупликация: `resource + breach_date + record_id`, а если record_id нет —
+     * `resource + breach_date`. Пароль и полезные поля сливаются.
+     */
+    fun dedupe(rows: List<LeakReportRow>): List<LeakReportRow> {
+        val merged = LinkedHashMap<String, LeakReportRow>()
+        rows.forEach { row ->
+            val key = if (row.recordId.isNotBlank()) {
+                "${row.resource}|${row.breachDate}|${row.recordId}"
+            } else {
+                "${row.resource}|${row.breachDate}"
+            }
+            val previous = merged[key]
+            merged[key] = if (previous == null) row else previous.copy(
+                password = previous.password ?: row.password,
+                passwordStatus = when {
+                    previous.password != null -> previous.passwordStatus
+                    row.password != null -> row.passwordStatus
+                    previous.passwordStatus != PasswordStatus.NONE -> previous.passwordStatus
+                    else -> row.passwordStatus
+                },
+                hadPassword = previous.hadPassword || row.hadPassword,
+                dataTypes = (previous.dataTypes + row.dataTypes).distinct(),
+                sourceRef = previous.sourceRef.ifBlank { row.sourceRef },
+                url = previous.url.ifBlank { row.url },
+                passwordSource = previous.passwordSource.ifBlank { row.passwordSource }
+            )
+        }
+        return merged.values.toList()
     }
 }
 
 /**
- * Кодек отчёта утечек.
- *
- * Экспорт всегда пишется в схему 2.0. Пароль включается в файл только при
- * включённом режиме показа; иначе поле `password` равно null. Парсер читает
- * и 2.0, и старую 1.0 без ошибок.
+ * Кодек отчёта утечек. Экспорт всегда в схему 2.0; пароль включается только при
+ * включённом режиме. CSV и HTML пароль не содержат никогда.
  */
 object LeakReportCodec {
 
@@ -124,10 +227,17 @@ object LeakReportCodec {
             source.rows.forEach { row ->
                 val obj = JSONObject()
                     .put("value", row.value)
-                    .put("where", row.where)
+                    .put("resource", row.resource)
+                    .put("where", row.resource)
+                    .put("breach_date", row.breachDate)
+                    .put("date", row.breachDate)
+                    .put("data_types", JSONArray(row.dataTypes))
                     .put("source", row.source.ifBlank { source.id })
                     .put("hadPassword", row.hadPassword || row.password != null)
-                    .put("date", row.date)
+                    .put("password_status", row.passwordStatus.wire)
+                    .put("password_source", row.passwordSource)
+                    .put("source_ref", row.sourceRef)
+                    .put("record_id", row.recordId)
                     .put("url", row.url)
                 if (showPasswords && !row.password.isNullOrBlank()) {
                     obj.put("password", row.password)
@@ -143,6 +253,7 @@ object LeakReportCodec {
                     .put("hits", source.hits)
                     .put("cached", source.cached)
                     .put("note", source.note.orEmpty())
+                    .put("status", source.status.orEmpty())
                     .put("rows", rows)
             )
         }
@@ -165,14 +276,24 @@ object LeakReportCodec {
                 val password = if (row.has("password") && !row.isNull("password")) {
                     row.optString("password").takeIf { it.isNotBlank() }
                 } else null
+                val types = row.optJSONArray("data_types")?.let { typesArray ->
+                    (0 until typesArray.length()).mapNotNull { index ->
+                        typesArray.optString(index).takeIf { it.isNotBlank() }
+                    }
+                } ?: row.optString("data_types").split(',').map { it.trim() }.filter { it.isNotBlank() }
                 rows += LeakReportRow(
                     value = row.optString("value"),
                     password = password,
-                    where = row.optString("where"),
+                    where = row.optString("resource").ifBlank { row.optString("where") },
                     source = row.optString("source").ifBlank { id },
                     hadPassword = row.optBoolean("hadPassword", false) || password != null,
-                    date = row.optString("date"),
-                    url = row.optString("url")
+                    date = row.optString("breach_date").ifBlank { row.optString("date") },
+                    url = row.optString("url"),
+                    dataTypes = types,
+                    passwordStatus = PasswordStatus.fromWire(row.optString("password_status")),
+                    passwordSource = row.optString("password_source"),
+                    sourceRef = row.optString("source_ref"),
+                    recordId = row.optString("record_id")
                 )
             }
             sources += LeakReportSource(
@@ -181,7 +302,8 @@ object LeakReportCodec {
                 hits = source.optInt("hits", rows.size),
                 cached = source.optBoolean("cached", false),
                 note = source.optString("note").takeIf { it.isNotBlank() },
-                rows = rows
+                rows = rows,
+                status = source.optString("status").takeIf { it.isNotBlank() }
             )
         }
         return LeakReport(
@@ -196,31 +318,33 @@ object LeakReportCodec {
         )
     }
 
-    /**
-     * CSV без паролей: только факт наличия (`hadPassword`), значение, происхождение
-     * и источник. Опасные для формул значения экранируются апострофом.
-     */
+    /** CSV без паролей: значение, ресурс, дата, типы, статус, источник, ссылка. */
     fun toCsv(sources: List<LeakReportSource>): String {
         val rows = ArrayList<List<String>>()
-        rows += listOf("value", "hadPassword", "where", "source", "date", "url")
+        rows += listOf(
+            "Значение", "Есть пароль", "Ресурс утечки", "Дата утечки", "Типы данных",
+            "Статус пароля", "Источник пароля", "Источник", "Ссылка", "URL"
+        )
         sources.forEach { source ->
             source.rows.forEach { row ->
                 rows += listOf(
                     formulaSafe(row.value),
                     (row.hadPassword || row.password != null).toString(),
-                    formulaSafe(row.where),
+                    formulaSafe(row.resource),
+                    formulaSafe(row.breachDate),
+                    formulaSafe(row.dataTypesText),
+                    row.passwordStatus.title,
+                    formulaSafe(row.passwordSource),
                     formulaSafe(row.source.ifBlank { source.id }),
-                    formulaSafe(row.date),
+                    formulaSafe(row.sourceRef),
                     formulaSafe(row.url)
                 )
             }
         }
-        return rows.joinToString("\r\n") { line ->
-            line.joinToString(";") { cell(it) }
-        } + "\r\n"
+        return rows.joinToString("\r\n") { line -> line.joinToString(";") { cell(it) } } + "\r\n"
     }
 
-    /** HTML без паролей: показываем «есть/нет», но не значение. */
+    /** HTML без паролей: показываем «есть/нет» и статус, но не значение. */
     fun toHtml(
         query: String,
         createdAt: Long,
@@ -238,23 +362,28 @@ object LeakReportCodec {
         append("<h1>JB OSINT — отчёт об утечках</h1>")
         append("<p>Объект: <b>").append(esc(query)).append("</b><br>")
         append("Сформировано: ").append(esc(stamp(createdAt))).append("</p>")
-        append("<p>Пароли в этом файле не выводятся — показан только факт наличия.</p>")
+        append("<p>Пароли в этом файле не выводятся — показан только статус.</p>")
         sources.forEach { source ->
             append("<h2>").append(esc(source.title)).append("</h2>")
+            source.status?.let { append("<p class=\"muted\">").append(esc(it)).append("</p>") }
             if (source.rows.isEmpty()) {
                 append("<p>Записей нет.</p>")
             } else {
-                append("<table><thead><tr><th>Значение</th><th>Пароль</th><th>Источник</th>")
-                append("<th>Дата</th><th>Ссылка</th></tr></thead><tbody>")
+                append("<table><thead><tr><th>Значение</th><th>Ресурс утечки</th><th>Дата</th>")
+                append("<th>Типы данных</th><th>Пароль</th><th>Статус пароля</th><th>Источник</th></tr></thead><tbody>")
                 source.rows.forEach { row ->
                     append("<tr><td>").append(esc(row.value)).append("</td>")
-                    append("<td>").append(if (row.hadPassword || row.password != null) "есть" else "нет").append("</td>")
-                    append("<td>").append(esc(row.where.ifBlank { "источник не указан" })).append("</td>")
-                    append("<td>").append(esc(row.date)).append("</td>")
+                    append("<td>").append(esc(row.resource.ifBlank { "источник не указан" })).append("</td>")
+                    append("<td>").append(esc(row.breachDate)).append("</td>")
+                    append("<td>").append(esc(row.dataTypesText)).append("</td>")
+                    append("<td>").append(if (row.hadPassword || row.password != null) "есть" else "—").append("</td>")
+                    append("<td>").append(esc(row.passwordStatus.title)).append("</td>")
                     append("<td>")
                     if (row.url.startsWith("http")) {
                         append("<a href=\"").append(esc(row.url)).append("\" rel=\"noopener noreferrer\">")
-                            .append(esc(row.url)).append("</a>")
+                            .append(esc(row.passwordSource.ifBlank { row.source })).append("</a>")
+                    } else {
+                        append(esc(row.passwordSource.ifBlank { row.source }))
                     }
                     append("</td></tr>")
                 }

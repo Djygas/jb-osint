@@ -3203,6 +3203,31 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------------ экспорт
 
+    /** В отчёты не попадают пароли, если показ паролей выключен. */
+    private fun reportEntry(entry: HistoryEntry): HistoryEntry =
+        if (settings.showLeakPasswords) entry
+        else entry.copy(data = sanitizeLeakPasswords(entry.data))
+
+    private fun sanitizeLeakPasswords(data: AggregatedData): AggregatedData {
+        val hasSecrets = data.facts.any { fact -> fact.attributes.keys.any { key -> isPasswordKey(key) } }
+        if (!hasSecrets) return data
+        return data.copy(
+            facts = data.facts.map { fact ->
+                if (fact.attributes.keys.none { key -> isPasswordKey(key) }) fact
+                else fact.copy(
+                    attributes = fact.attributes.mapValues { (key, value) ->
+                        if (isPasswordKey(key)) "••••••••" else value
+                    } + ("Статус пароля" to "скрыт (пароли выключены)")
+                )
+            }
+        )
+    }
+
+    private fun isPasswordKey(key: String): Boolean {
+        val clean = key.lowercase()
+        return clean.contains("парол") || clean.contains("password") || clean.contains("passwd")
+    }
+
     fun export(format: ReportExporter.Format) {
         val current = _state.value
         val entry = current.resultEntry
@@ -3213,7 +3238,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (current.exporting) return
         _state.update { it.copy(exporting = true) }
         viewModelScope.launch {
-            val outcome = runCatching { exporter.export(entry, format) }
+            val outcome = runCatching { exporter.export(reportEntry(entry), format) }
             _state.update { it.copy(exporting = false) }
             outcome.onSuccess { exported ->
                 val where = exported.publicFolder
@@ -3650,7 +3675,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 },
                 queryType = report.target.title
             )
-            val outcome = runCatching { exporter.export(entry, format) }
+            val outcome = runCatching { exporter.export(reportEntry(entry), format) }
             _state.update { it.copy(exporting = false) }
             outcome.onSuccess { exported ->
                 _state.update { it.copy(toast = "${format.label} готов") }
@@ -4317,19 +4342,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             outcome.onSuccess { result ->
-                val groups = result.sources.map { row ->
+                                val groups = result.sources.map { row ->
                     val rows = result.facts
                         .filter { it.sourceId == row.id }
-                        .mapNotNull { LeakRows.fromFact(it) }
-                        .distinctBy { "${it.value}|${it.where}|${it.source}|${it.password}" }
-                        .take(50)
+                        .mapNotNull { LeakRows.fromFact(it, sourceStatus = row.status) }
                     LeakSourceUi(
                         id = row.id,
                         title = row.title,
                         hits = row.hits,
                         cached = row.cached,
                         note = row.error,
-                        rows = rows
+                        rows = LeakRows.dedupe(rows).take(50),
+                        status = row.status
                     )
                 }
                 _state.update {

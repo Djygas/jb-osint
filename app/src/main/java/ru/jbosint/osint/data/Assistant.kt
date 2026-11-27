@@ -256,6 +256,14 @@ object AssistantPrompts {
             "JSON определяешь причину сбоя модуля и даёшь короткие шаги настройки. Отвечаешь только JSON."
     }
 
+    /** Пароли, токены и cookie не уходят в модель даже как «атрибуты факта». */
+    private fun isSecretAttribute(key: String): Boolean {
+        val clean = key.lowercase()
+        return clean.contains("парол") || clean.contains("password") || clean.contains("passwd") ||
+            clean.contains("secret") || clean.contains("token") || clean.contains("cookie") ||
+            clean.contains("authorization")
+    }
+
     private fun factsPayload(facts: List<Fact>, limit: Int = 160): JSONArray {
         val array = JSONArray()
         facts.take(limit).forEach { fact ->
@@ -268,9 +276,10 @@ object AssistantPrompts {
             obj.put("sources", fact.sourceCount)
             if (fact.attributes.isNotEmpty()) {
                 val attrs = JSONObject()
-                fact.attributes.entries.take(6).forEach { (k, v) ->
-                    attrs.put(k.take(60), v.take(300))
-                }
+                fact.attributes.entries
+                    .filterNot { isSecretAttribute(it.key) }
+                    .take(6)
+                    .forEach { (k, v) -> attrs.put(k.take(60), v.take(300)) }
                 obj.put("attributes", attrs)
             }
             array.put(obj)
