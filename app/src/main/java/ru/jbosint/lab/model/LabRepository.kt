@@ -33,7 +33,9 @@ data class LabScript(
     /** Есть ли системный интерпретатор для этого языка. */
     val available: Boolean = true,
     /** Команда установки интерпретатора (Termux). */
-    val installHint: String? = null
+    val installHint: String? = null,
+    /** Описание из `# JB_MODULE` (второе поле). */
+    val description: String? = null
 ) {
     /** Команда запуска с уже подставленным путём (cwd на сервере = каталог проекта). */
     fun command(): String = when (type) {

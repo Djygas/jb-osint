@@ -70,6 +70,8 @@ import ru.jbosint.osint.data.DocumentStore
 import ru.jbosint.osint.data.LeakIndexReport
 import ru.jbosint.osint.data.LeakRules
 import ru.jbosint.osint.data.LeakReportCodec
+import ru.jbosint.osint.data.LeakRepoImport
+import ru.jbosint.lab.LabLaunch
 import ru.jbosint.osint.data.LeakReportRow
 import ru.jbosint.osint.data.LeakReportSource
 import ru.jbosint.osint.data.LeakRows
@@ -4280,33 +4282,40 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun importLeakFile(uri: Uri) {
         viewModelScope.launch {
             _state.update {
-                it.copy(leak = it.leak.copy(busy = true, stage = "Копирую файл…", note = null))
+                it.copy(leak = it.leak.copy(busy = true, stage = "Читаю файл…", note = null))
             }
             val outcome = runCatching {
                 withContext(Dispatchers.IO) {
-                    val resolver = getApplication<Application>().contentResolver
+                    val app = getApplication<Application>()
+                    val resolver = app.contentResolver
                     val name = LeakStore.safeName(displayName(uri) ?: "leak.txt")
-                    if (!LeakRules.indexable(name)) {
-                        error("Поддерживаются CSV, TSV, TXT, SQL и JSON")
+                    if (name.endsWith(".zip", ignoreCase = true)) {
+                        val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                            ?: error("Не удалось прочитать архив")
+                        LeakRepoImport.importZip(app, bytes) to "Из ZIP добавлено файлов"
+                    } else {
+                        if (!LeakRules.indexable(name)) {
+                            error("Поддерживаются CSV, TSV, TXT, SQL, JSON и ZIP")
+                        }
+                        val target = java.io.File(LeakStore.leaksDir(app), name)
+                        resolver.openInputStream(uri)?.use { input ->
+                            target.outputStream().use { output -> input.copyTo(output, 1 shl 16) }
+                        } ?: error("Не удалось прочитать файл")
+                        1 to "Добавлено"
                     }
-                    val target = java.io.File(LeakStore.leaksDir(getApplication()), name)
-                    resolver.openInputStream(uri)?.use { input ->
-                        target.outputStream().use { output -> input.copyTo(output, 1 shl 16) }
-                    } ?: error("Не удалось прочитать файл")
-                    target
                 }
             }
-            outcome.onSuccess { file ->
+            outcome.onSuccess { (count, label) ->
                 _state.update {
                     it.copy(
                         leak = it.leak.copy(
                             busy = false,
-                            stage = "Добавлено: ${file.name}",
-                            note = "Файл ${file.length() / 1024} КБ в папке leaks/"
+                            stage = "$label: $count",
+                            note = "Файлов в папке leaks/ добавлено: $count"
                         )
                     )
                 }
-                indexLeaks()
+                if (count > 0) indexLeaks()
             }
             outcome.onFailure { error ->
                 _state.update {
@@ -4314,6 +4323,74 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+    }
+
+    /** Импорт дампов из публичного GitHub-репозитория (ZIP). */
+    fun importLeakRepo(url: String, ref: String) {
+        if (!_state.value.canManage) {
+            _state.update { it.copy(toast = "Разблокируйте режим администратора") }
+            return
+        }
+        if (_state.value.leak.busy) return
+        if (url.isBlank()) {
+            _state.update { it.copy(toast = "Укажите ссылку на репозиторий") }
+            return
+        }
+        _state.update {
+            it.copy(leak = it.leak.copy(busy = true, stage = "Скачиваю репозиторий…", note = null))
+        }
+        viewModelScope.launch {
+            val outcome = runCatching {
+                withContext(Dispatchers.IO) { LeakRepoImport.importRepo(getApplication(), url, ref) }
+            }
+            outcome.onSuccess { count ->
+                _state.update {
+                    it.copy(
+                        leak = it.leak.copy(
+                            busy = false,
+                            stage = "Импорт: $count файлов",
+                            note = if (count > 0) "Дампы из репозитория добавлены" else "В репозитории нет дампов"
+                        ),
+                        toast = "Импортировано файлов: $count"
+                    )
+                }
+                if (count > 0) indexLeaks()
+            }
+            outcome.onFailure { error ->
+                _state.update {
+                    it.copy(leak = it.leak.copy(busy = false, note = error.message ?: "Импорт не удался"))
+                }
+            }
+        }
+    }
+
+    /** Копирует файл дампа в лабораторию и открывает вкладку GitHub. */
+    fun openLeakInLab(sourceRef: String) {
+        if (!_state.value.canManage) {
+            _state.update { it.copy(toast = "Разблокируйте режим администратора") }
+            return
+        }
+        val name = sourceRef.removePrefix("leaks/").substringBefore(" · ").trim()
+        if (name.isBlank()) {
+            _state.update { it.copy(toast = "У этой записи нет локального дампа") }
+            return
+        }
+        val app = getApplication<Application>()
+        val source = java.io.File(LeakStore.leaksDir(app), name)
+        if (!source.isFile) {
+            _state.update { it.copy(toast = "Файл дампа не найден: $name") }
+            return
+        }
+        val dir = java.io.File(app.filesDir, "lab/leak-${name.hashCode().toUInt()}").apply { mkdirs() }
+        val target = java.io.File(dir, name)
+        runCatching { source.copyTo(target, overwrite = true) }
+            .onSuccess {
+                LabLaunch.request(dir.absolutePath, "Дамп: $name")
+                _state.update { it.copy(screen = Screen.LAB, leak = it.leak.copy(open = false)) }
+            }
+            .onFailure {
+                _state.update { it.copy(toast = "Не удалось открыть дамп: ${it.message ?: "ошибка"}") }
+            }
     }
 
     /** Одна кнопка: индекс + кэш + каскад API, без дублей. */

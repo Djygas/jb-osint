@@ -211,6 +211,7 @@ object LabApiModule {
                     .put("install", language.install ?: JSONObject.NULL)
                     .put("button", meta.title ?: JSONObject.NULL)
                     .put("param", meta.param ?: JSONObject.NULL)
+                    .put("description", meta.description)
             )
         }
         return array

@@ -41,9 +41,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
+import ru.jbosint.lab.LabLaunch
 import ru.jbosint.lab.LabViewModel
 import ru.jbosint.lab.model.LabLogLine
 import ru.jbosint.lab.model.LabProject
+import ru.jbosint.lab.model.LabProjectType
 import ru.jbosint.lab.model.LabResultExport
 import ru.jbosint.lab.model.LabResultParser
 import ru.jbosint.lab.model.LabRuntime
@@ -105,6 +107,20 @@ fun GitHubLabScreen() {
     LaunchedEffect(server.running) {
         if (server.running) {
             runCatching { repository.runtimes() }.onSuccess { runtimes = it }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        LabLaunch.consume()?.let { request ->
+            project = LabProject(
+                url = request.title,
+                ref = "",
+                dir = request.dir,
+                type = LabProjectType.OTHER
+            )
+            command = ""
+            lastOutput = ""
+            note = "Открыт дамп в лаборатории: ${request.title}"
         }
     }
 
@@ -700,6 +716,15 @@ private fun ScriptRow(
                     style = MaterialTheme.typography.labelSmall,
                     color = if (script.available) JbFaint else JbAmber
                 )
+                script.description?.let { description ->
+                    Text(
+                        description,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = JbMuted,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
             if (!script.available && script.installHint != null) {
                 TextButton(onClick = onInstall) { Text("Установить", color = JbAccent2) }

@@ -180,7 +180,8 @@ class TermuxApiClient {
                 button = item.optString("button").takeIf { it.isNotBlank() && !item.isNull("button") },
                 param = item.optString("param").takeIf { it.isNotBlank() && !item.isNull("param") },
                 available = item.optBoolean("available", true),
-                installHint = item.optString("install").takeIf { it.isNotBlank() && !item.isNull("install") }
+                installHint = item.optString("install").takeIf { it.isNotBlank() && !item.isNull("install") },
+                description = item.optString("description").takeIf { it.isNotBlank() && !item.isNull("description") }
             )
         }
     }

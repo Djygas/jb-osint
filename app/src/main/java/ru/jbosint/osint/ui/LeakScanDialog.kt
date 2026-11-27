@@ -112,6 +112,59 @@ fun LeakScanDialog(state: UiState, vm: AppViewModel) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) vm.importLeakFile(uri)
     }
+    var githubOpen by remember { mutableStateOf(false) }
+    var repoUrl by remember { mutableStateOf("") }
+    var repoRef by remember { mutableStateOf("") }
+    val openLab = { ref: String ->
+        vm.closeLeakScan()
+        vm.openLeakInLab(ref)
+    }
+
+    if (githubOpen) {
+        AlertDialog(
+            onDismissRequest = { githubOpen = false },
+            containerColor = JbSurfaceHigh,
+            title = { Text("Импорт дампов из GitHub") },
+            text = {
+                Column {
+                    Text(
+                        "Публичный репозиторий с .txt/.csv/.json/.sql. " +
+                            "Файлы копируются в leaks/ и индексируются.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = JbMuted
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = repoUrl,
+                        onValueChange = { repoUrl = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("https://github.com/owner/repo") }
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = repoRef,
+                        onValueChange = { repoRef = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Ветка или тег (необязательно)") }
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = repoUrl.isNotBlank() && !leak.busy,
+                    onClick = {
+                        vm.importLeakRepo(repoUrl, repoRef)
+                        githubOpen = false
+                    }
+                ) { Text("Импорт", color = JbAccent2) }
+            },
+            dismissButton = {
+                TextButton(onClick = { githubOpen = false }) { Text("Отмена", color = JbMuted) }
+            }
+        )
+    }
 
     Dialog(
         onDismissRequest = vm::closeLeakScan,
@@ -128,7 +181,8 @@ fun LeakScanDialog(state: UiState, vm: AppViewModel) {
                     onOpenSettings = {
                         vm.closeLeakScan()
                         vm.navigate(Screen.SETTINGS)
-                    }
+                    },
+                    onOpenLab = openLab
                 )
             } else {
                 Column(
@@ -195,9 +249,12 @@ fun LeakScanDialog(state: UiState, vm: AppViewModel) {
                                 }
                                 Spacer(Modifier.width(8.dp))
                                 TextButton(
-                                    onClick = { picker.launch(arrayOf("text/*", "application/octet-stream", "application/json")) },
+                                    onClick = { picker.launch(arrayOf("text/*", "application/octet-stream", "application/json", "application/zip")) },
                                     enabled = !leak.busy
                                 ) { Text("Добавить дамп", color = JbAccent2) }
+                                TextButton(onClick = { githubOpen = true }, enabled = !leak.busy) {
+                                    Text("Из GitHub", color = JbAccent2)
+                                }
                                 Spacer(Modifier.weight(1f))
                                 TextButton(
                                     onClick = vm::indexLeaks,
@@ -254,7 +311,8 @@ fun LeakScanDialog(state: UiState, vm: AppViewModel) {
                                     onOpenSettings = {
                                         vm.closeLeakScan()
                                         vm.navigate(Screen.SETTINGS)
-                                    }
+                                    },
+                                    onOpenLab = openLab
                                 )
                             }
                             item { ExportRow(vm, show) }
@@ -368,7 +426,8 @@ private fun SourceBlock(
     source: LeakSourceUi,
     showPasswords: Boolean,
     onRow: (LeakRowUi) -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onOpenLab: (String) -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -403,7 +462,7 @@ private fun SourceBlock(
         }
         source.rows.forEach { row ->
             Spacer(Modifier.height(8.dp))
-            LeakRecordRow(row, showPasswords, onRow, onOpenSettings)
+            LeakRecordRow(row, showPasswords, onRow, onOpenSettings, onOpenLab)
         }
         if (source.hits > source.rows.size && source.rows.isNotEmpty()) {
             Spacer(Modifier.height(4.dp))
@@ -421,7 +480,8 @@ private fun LeakRecordRow(
     row: LeakRowUi,
     showPasswords: Boolean,
     onRow: (LeakRowUi) -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onOpenLab: (String) -> Unit
 ) {
     val copy = rememberClipboardCopier()
     Column(
@@ -463,6 +523,13 @@ private fun LeakRecordRow(
                     "Логин:пароль",
                     color = if (showPasswords && !pair.isNullOrBlank()) JbAccent2 else JbFaint
                 )
+            }
+            if (row.sourceRef.startsWith("leaks/")) {
+                Spacer(Modifier.width(12.dp))
+                TextButton(
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                    onClick = { onOpenLab(row.sourceRef) }
+                ) { Text("В лаборатории", color = JbAccent2) }
             }
         }
     }
@@ -600,7 +667,8 @@ private fun LeakDetailScreen(
     row: LeakRowUi,
     showPasswords: Boolean,
     onBack: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onOpenLab: (String) -> Unit
 ) {
     val copy = rememberClipboardCopier()
     val uri = LocalUriHandler.current
@@ -652,6 +720,12 @@ private fun LeakDetailScreen(
                 Icon(Icons.Filled.OpenInNew, null, tint = JbAccent2, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("Открыть источник", color = JbAccent2)
+            }
+        }
+        if (row.sourceRef.startsWith("leaks/")) {
+            Spacer(Modifier.height(4.dp))
+            TextButton(onClick = { onOpenLab(row.sourceRef) }) {
+                Text("Открыть в лаборатории", color = JbAccent2)
             }
         }
         Spacer(Modifier.height(12.dp))

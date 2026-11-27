@@ -29,7 +29,7 @@ enum class LabLanguage(
 }
 
 /** Метаданные кнопки из комментариев скрипта (`# JB_BUTTON`, `# JB_PARAM`). */
-data class LabButtonMeta(val title: String?, val param: String?)
+data class LabButtonMeta(val title: String?, val param: String?, val description: String = "")
 
 /**
  * Чистые правила встроенной лаборатории: разбор ссылки, команд и метаданных.
@@ -132,19 +132,26 @@ object LabRules {
     fun buttonMeta(lines: List<String>): LabButtonMeta {
         var title: String? = null
         var param: String? = null
+        var description: String? = null
         for (line in lines) {
             val text = line.trim()
             if (!text.startsWith("#")) continue
             val upper = text.uppercase(Locale.US)
-            if (upper.startsWith("# JB_BUTTON")) {
-                val value = text.removePrefix("# JB_BUTTON").trimStart(':', ' ', '\t').trim()
-                if (value.isNotEmpty()) title = value.take(80)
+            if (upper.startsWith("# JB_MODULE") || upper.startsWith("# JB_BUTTON")) {
+                val prefix = if (upper.startsWith("# JB_MODULE")) "# JB_MODULE".length else "# JB_BUTTON".length
+                val value = text.substring(prefix).trimStart(':', ' ', '\t').trim()
+                if (value.isNotEmpty()) {
+                    val parts = value.split('|').map { it.trim() }
+                    if (parts.firstOrNull()?.isNotBlank() == true) title = parts[0].take(80)
+                    if (parts.size >= 2 && parts[1].isNotBlank()) description = parts[1].take(160)
+                    if (parts.size >= 3 && parts[2].isNotBlank()) param = parts[2].take(60)
+                }
             } else if (upper.startsWith("# JB_PARAM")) {
-                val value = text.removePrefix("# JB_PARAM").trimStart(':', ' ', '\t').trim()
+                val value = text.substring("# JB_PARAM".length).trimStart(':', ' ', '\t').trim()
                 if (value.isNotEmpty()) param = value.take(60)
             }
         }
-        return LabButtonMeta(title, param)
+        return LabButtonMeta(title, param, description.orEmpty())
     }
 
     fun projectType(files: Set<String>): String {

@@ -58,6 +58,19 @@ class LabRulesTest {
     }
 
     @Test
+    fun readsModuleMetadata() {
+        val meta = LabRules.buttonMeta(
+            listOf(
+                "# JB_MODULE: Leak scan | Ищет утечки по email | email",
+                "#!/usr/bin/env python3"
+            )
+        )
+        assertEquals("Leak scan", meta.title)
+        assertEquals("Ищет утечки по email", meta.description)
+        assertEquals("email", meta.param)
+    }
+
+    @Test
     fun detectsScriptAndProjectTypes() {
         assertEquals("bash", LabRules.scriptType("tools/run.sh"))
         assertEquals("python", LabRules.scriptType("scan.py"))

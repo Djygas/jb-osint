@@ -174,6 +174,15 @@ object LeakRules {
             }
             if (password != null) consumed = 1
         }
+        if (at > 0) {
+            val before = parts[at - 1]
+            if (!before.contains('@') && !phoneRe.matches(before) &&
+                !before.all { it.isDigit() } && !before.startsWith("http") &&
+                before.length in 2..80
+            ) {
+                service = before
+            }
+        }
         after.drop(consumed).forEach { token ->
             when {
                 (token.startsWith("http://") || token.startsWith("https://")) && sourceUrl.isEmpty() ->
