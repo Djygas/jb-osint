@@ -26,7 +26,7 @@ class LabModelTest {
             LabScript("a.py", "tools/a.py", LabProjectType.PYTHON).command()
         )
         assertEquals(
-            "bash dir/a.sh",
+            "sh dir/a.sh",
             LabScript("a.sh", "dir/a.sh", LabProjectType.BASH).command()
         )
         assertEquals(
@@ -38,6 +38,6 @@ class LabModelTest {
     @Test
     fun defaultServerIsLoopback() {
         assertEquals("http://127.0.0.1:8081", LabApiConfig().baseUrl)
-        assertEquals(600, LabApiConfig.DEFAULT_TIMEOUT_SEC)
+        assertEquals(300, LabApiConfig.DEFAULT_TIMEOUT_SEC)
     }
 }

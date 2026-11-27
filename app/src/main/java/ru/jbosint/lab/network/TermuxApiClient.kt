@@ -13,6 +13,7 @@ import ru.jbosint.lab.model.LabException
 import ru.jbosint.lab.model.LabProject
 import ru.jbosint.lab.model.LabProjectType
 import ru.jbosint.lab.model.LabRunResult
+import ru.jbosint.lab.model.LabRuntime
 import ru.jbosint.lab.model.LabScript
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -73,13 +74,36 @@ class TermuxApiClient {
             .put("command", command)
             .put("timeout", timeoutSec.coerceIn(1, 1800))
         val json = post(config, "/run", body, totalTimeoutSec = timeoutSec.toLong() + 30)
-        LabRunResult(
-            exitCode = json.optInt("exit_code", -1),
-            stdout = json.optString("stdout"),
-            stderr = json.optString("stderr"),
-            tookMs = json.optLong("took_ms")
-        )
+        parseRun(json)
     }
+
+    private fun parseRun(json: JSONObject): LabRunResult = LabRunResult(
+        exitCode = json.optInt("exit_code", -1),
+        stdout = json.optString("stdout"),
+        stderr = json.optString("stderr"),
+        tookMs = json.optLong("took_ms")
+    )
+
+    suspend fun dependencies(config: LabApiConfig, dir: String): LabRunResult =
+        withContext(Dispatchers.IO) {
+            val json = post(config, "/deps", JSONObject().put("dir", dir), totalTimeoutSec = 930)
+            parseRun(json)
+        }
+
+    suspend fun runtimes(config: LabApiConfig): List<LabRuntime> =
+        withContext(Dispatchers.IO) {
+            val array = get(config, "/runtimes").optJSONArray("runtimes")
+            if (array == null) emptyList()
+            else (0 until array.length()).mapNotNull { index ->
+                val item = array.optJSONObject(index) ?: return@mapNotNull null
+                LabRuntime(
+                    id = item.optString("id"),
+                    title = item.optString("title"),
+                    available = item.optBoolean("available", false),
+                    install = item.optString("install").takeIf { it.isNotBlank() && !item.isNull("install") }
+                )
+            }
+        }
 
     suspend fun clear(config: LabApiConfig, dir: String) = withContext(Dispatchers.IO) {
         post(config, "/clear", JSONObject().put("dir", dir))
@@ -154,7 +178,9 @@ class TermuxApiClient {
                 path = path,
                 type = LabProjectType.from(item.optString("type")),
                 button = item.optString("button").takeIf { it.isNotBlank() && !item.isNull("button") },
-                param = item.optString("param").takeIf { it.isNotBlank() && !item.isNull("param") }
+                param = item.optString("param").takeIf { it.isNotBlank() && !item.isNull("param") },
+                available = item.optBoolean("available", true),
+                installHint = item.optString("install").takeIf { it.isNotBlank() && !item.isNull("install") }
             )
         }
     }

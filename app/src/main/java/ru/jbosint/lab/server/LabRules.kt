@@ -5,6 +5,29 @@ import java.util.Locale
 /** Разобранная ссылка на репозиторий GitHub. */
 data class LabRepo(val owner: String, val name: String, val ref: String)
 
+
+/** Язык скрипта и способ его запуска. */
+enum class LabLanguage(
+    val wire: String,
+    val title: String,
+    val interpreter: String,
+    val install: String?
+) {
+    PYTHON("python", "Python", "python3", "pkg install -y python"),
+    NODE("node", "Node.js", "node", "pkg install -y nodejs"),
+    BASH("bash", "Bash", "sh", null),
+    GO("go", "Go", "go", "pkg install -y golang"),
+    PHP("php", "PHP", "php", "pkg install -y php"),
+    PERL("perl", "Perl", "perl", "pkg install -y perl"),
+    RUBY("ruby", "Ruby", "ruby", "pkg install -y ruby"),
+    OTHER("other", "Другой", "sh", null);
+
+    companion object {
+        fun fromWire(value: String?): LabLanguage =
+            entries.firstOrNull { it.wire.equals(value, ignoreCase = true) } ?: OTHER
+    }
+}
+
 /** Метаданные кнопки из комментариев скрипта (`# JB_BUTTON`, `# JB_PARAM`). */
 data class LabButtonMeta(val title: String?, val param: String?)
 
@@ -133,6 +156,70 @@ object LabRules {
             else -> "other"
         }
     }
+
+    /** Язык по расширению, а для файлов без расширения/с shebang — по первой строке. */
+    fun language(path: String, firstLine: String? = null): LabLanguage {
+        val ext = path.substringAfterLast('.', "").lowercase(Locale.US)
+        when (ext) {
+            "py" -> return LabLanguage.PYTHON
+            "js", "mjs", "cjs" -> return LabLanguage.NODE
+            "sh", "bash" -> return LabLanguage.BASH
+            "go" -> return LabLanguage.GO
+            "php" -> return LabLanguage.PHP
+            "pl" -> return LabLanguage.PERL
+            "rb" -> return LabLanguage.RUBY
+        }
+        val line = firstLine?.trim().orEmpty()
+        if (!line.startsWith("#!")) return LabLanguage.OTHER
+        val interpreter = line.removePrefix("#!").trim()
+            .substringBefore(' ')
+            .substringAfterLast('/')
+            .lowercase(Locale.US)
+        return when {
+            interpreter.startsWith("python") -> LabLanguage.PYTHON
+            interpreter == "node" || interpreter == "nodejs" -> LabLanguage.NODE
+            interpreter in setOf("sh", "bash", "dash") -> LabLanguage.BASH
+            interpreter == "php" -> LabLanguage.PHP
+            interpreter.startsWith("perl") -> LabLanguage.PERL
+            interpreter.startsWith("ruby") -> LabLanguage.RUBY
+            else -> LabLanguage.OTHER
+        }
+    }
+
+    /** Кандидаты на системный интерпретатор (Termux не используем из-за SELinux). */
+    fun runtimePaths(language: LabLanguage): List<String> = when (language) {
+        LabLanguage.BASH -> listOf("/system/bin/sh", "/system/xbin/sh")
+        LabLanguage.PYTHON -> listOf("/system/bin/python3", "/system/xbin/python3", "/system/bin/python")
+        LabLanguage.NODE -> listOf("/system/bin/node", "/system/xbin/node", "/system/bin/nodejs")
+        LabLanguage.GO -> listOf("/system/bin/go", "/system/xbin/go")
+        LabLanguage.PHP -> listOf("/system/bin/php", "/system/xbin/php")
+        LabLanguage.PERL -> listOf("/system/bin/perl", "/system/xbin/perl")
+        LabLanguage.RUBY -> listOf("/system/bin/ruby", "/system/xbin/ruby")
+        LabLanguage.OTHER -> listOf("/system/bin/sh", "/system/xbin/sh")
+    }
+
+    fun runtime(language: LabLanguage): String? =
+        runtimePaths(language).firstOrNull { java.io.File(it).canExecute() }
+
+    fun runtimeAvailable(language: LabLanguage): Boolean = runtime(language) != null
+
+    /** Опасные конструкции, которые блокируем до запуска. */
+    private val dangerousPatterns = listOf(
+        Regex("(?i)\\brm\\s+(-[a-z]*[rf][a-z]*\\s+)+/(\\s|$|\\*)"),
+        Regex("(?i)\\bmkfs(\\.|\\s|$)"),
+        Regex("(?i)\\bdd\\s+if=/dev/(zero|random|urandom)"),
+        Regex("(?i):\\(\\)\\s*\\{"),
+        Regex("(?i)\\bchmod\\s+-R\\s+777\\s+/"),
+        Regex("(?i)\\b(shutdown|reboot|halt|poweroff)\\b"),
+        Regex("(?i)(^|[;&|])\\s*(sudo|su|doas)\\b"),
+        Regex("(?i)>\\s*/dev/(sd|block|mmcblk)"),
+        Regex("(?i)\\b(cat|dd)\\s+/dev/zero")
+    )
+
+    fun isDangerous(command: String): Boolean = dangerousPatterns.any { it.containsMatchIn(command) }
+
+    fun hasDependencyFiles(names: Set<String>): Boolean =
+        names.any { it in setOf("requirements.txt", "package.json", "go.mod", "composer.json", "Gemfile") }
 
     fun scriptType(path: String): String? = when (path.substringAfterLast('.', "").lowercase(Locale.US)) {
         "sh" -> "bash"

@@ -1,5 +1,6 @@
 package ru.jbosint.lab.ui.screen
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,12 +18,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -31,7 +34,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -39,12 +44,16 @@ import kotlinx.coroutines.launch
 import ru.jbosint.lab.LabViewModel
 import ru.jbosint.lab.model.LabLogLine
 import ru.jbosint.lab.model.LabProject
+import ru.jbosint.lab.model.LabResultExport
+import ru.jbosint.lab.model.LabResultParser
+import ru.jbosint.lab.model.LabRuntime
 import ru.jbosint.lab.model.LabScript
 import ru.jbosint.lab.repository.GitHubLabRepository
 import ru.jbosint.osint.ui.GlowCard
 import ru.jbosint.osint.ui.JbAccent
 import ru.jbosint.osint.ui.JbAccent2
 import ru.jbosint.osint.ui.JbAmber
+import ru.jbosint.osint.ui.JbBorderSoft
 import ru.jbosint.osint.ui.JbFaint
 import ru.jbosint.osint.ui.JbGreen
 import ru.jbosint.osint.ui.JbMuted
@@ -52,10 +61,16 @@ import ru.jbosint.osint.ui.JbRed
 import ru.jbosint.osint.ui.JbText
 import ru.jbosint.osint.ui.Pill
 import ru.jbosint.osint.ui.ScreenHeader
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+private data class LabHistoryItem(val command: String, val at: Long, val exitCode: Int)
 
 /**
- * Встроенная GitHub-лаборатория. Сервер работает внутри приложения
- * (Foreground Service, 127.0.0.1:8081) — Termux и ручная настройка не нужны.
+ * Встроенная GitHub-лаборатория: сервер в foreground service, языки по расширению
+ * и shebang, ручной терминал с историей, JSON-результаты и экспорт.
  */
 @Composable
 fun GitHubLabScreen() {
@@ -64,6 +79,7 @@ fun GitHubLabScreen() {
     val labVm: LabViewModel = viewModel()
     val server by labVm.state.collectAsState()
     val scope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
 
     var repoUrl by remember { mutableStateOf("") }
     var ref by remember { mutableStateOf("") }
@@ -73,10 +89,35 @@ fun GitHubLabScreen() {
     var logs by remember { mutableStateOf<List<LabLogLine>>(emptyList()) }
     var project by remember { mutableStateOf<LabProject?>(null) }
     var command by remember { mutableStateOf("") }
+    var timeoutSec by remember { mutableStateOf("300") }
     var params by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var history by remember { mutableStateOf<List<LabHistoryItem>>(emptyList()) }
+    var runtimes by remember { mutableStateOf<List<LabRuntime>>(emptyList()) }
+    var lastOutput by remember { mutableStateOf("") }
+
+    val cards = remember(lastOutput) { LabResultParser.parse(lastOutput) }
 
     val addLog: (String, Boolean) -> Unit = { text, isError ->
         logs = (logs + LabLogLine(text = text, error = isError)).takeLast(400)
+    }
+    val copy: (String) -> Unit = { text -> clipboard.setText(AnnotatedString(text)) }
+
+    LaunchedEffect(server.running) {
+        if (server.running) {
+            runCatching { repository.runtimes() }.onSuccess { runtimes = it }
+        }
+    }
+
+    fun refreshRuntimes() {
+        if (!server.running) {
+            note = "Сначала включите лабораторию"
+            return
+        }
+        scope.launch {
+            runCatching { repository.runtimes() }
+                .onSuccess { runtimes = it; note = "Рантаймы обновлены" }
+                .onFailure { note = it.message ?: "Не удалось получить рантаймы" }
+        }
     }
 
     val clone: () -> Unit = {
@@ -89,17 +130,25 @@ fun GitHubLabScreen() {
                 note = null
                 logs = emptyList()
                 project = null
+                lastOutput = ""
                 scope.launch {
                     try {
                         val result = repository.clone(repoUrl, ref)
                         project = result
-                        command = result.scripts.firstOrNull()?.command().orEmpty()
+                        command = result.scripts.firstOrNull { it.available }?.command()
+                            ?: result.scripts.firstOrNull()?.command().orEmpty()
                         note = buildString {
                             append("Готово: ").append(result.type.title)
                             if (result.scripts.isNotEmpty()) append(" · скриптов: ").append(result.scripts.size)
                         }
                         addLog("Репозиторий готов: ${result.dir}", false)
-                        result.scripts.forEach { addLog("• ${it.path} (${it.type.title})", false) }
+                        result.scripts.forEach {
+                            addLog(
+                                "• ${it.path} (${it.type.title}${if (!it.available) ", нет рантайма" else ""})",
+                                !it.available
+                            )
+                        }
+                        runCatching { repository.runtimes() }.onSuccess { runtimes = it }
                     } catch (t: Throwable) {
                         note = t.message ?: "Ошибка загрузки"
                         addLog(t.message ?: "Ошибка загрузки", true)
@@ -120,16 +169,20 @@ fun GitHubLabScreen() {
             target == null -> note = "Сначала скачайте репозиторий"
             text.isBlank() -> note = "Введите команду"
             else -> {
+                val timeout = timeoutSec.toIntOrNull()?.coerceIn(30, 1800) ?: 300
                 busy = true
                 stage = "Выполняю…"
                 note = null
                 addLog("$ $text", false)
                 scope.launch {
                     try {
-                        val result = repository.run(target.dir, text)
-                        if (result.stdout.isNotBlank()) addLog(result.stdout.trimEnd(), false)
+                        val result = repository.run(target.dir, text, timeout)
+                        lastOutput = result.stdout
+                        if (result.stdout.isNotBlank()) addLog(result.stdout.trimEnd(), result.exitCode != 0)
                         if (result.stderr.isNotBlank()) addLog(result.stderr.trimEnd(), true)
                         note = "Код ${result.exitCode} · ${result.tookMs} мс"
+                        history = (listOf(LabHistoryItem(text, System.currentTimeMillis(), result.exitCode)) + history)
+                            .take(50)
                     } catch (t: Throwable) {
                         note = t.message ?: "Ошибка выполнения"
                         addLog(t.message ?: "Ошибка выполнения", true)
@@ -137,6 +190,31 @@ fun GitHubLabScreen() {
                         busy = false
                         stage = ""
                     }
+                }
+            }
+        }
+    }
+
+    val installDeps: () -> Unit = {
+        val target = project
+        if (!busy && target != null) {
+            busy = true
+            stage = "Устанавливаю зависимости…"
+            addLog("$ dependencies", false)
+            scope.launch {
+                try {
+                    val result = repository.dependencies(target.dir)
+                    lastOutput = result.stdout
+                    if (result.stdout.isNotBlank()) addLog(result.stdout.trimEnd(), result.exitCode != 0)
+                    note = if (result.exitCode == 0) "Зависимости: готово" else "Зависимости: код ${result.exitCode}"
+                    history = (listOf(LabHistoryItem("dependencies", System.currentTimeMillis(), result.exitCode)) + history)
+                        .take(50)
+                } catch (t: Throwable) {
+                    note = t.message ?: "Ошибка установки"
+                    addLog(t.message ?: "Ошибка установки", true)
+                } finally {
+                    busy = false
+                    stage = ""
                 }
             }
         }
@@ -152,6 +230,7 @@ fun GitHubLabScreen() {
                     repository.clear(target.dir)
                     addLog("Среда удалена: ${target.dir}", false)
                     project = null
+                    lastOutput = ""
                     note = "Среда удалена"
                 } catch (t: Throwable) {
                     note = t.message ?: "Ошибка"
@@ -185,6 +264,27 @@ fun GitHubLabScreen() {
         }
     }
 
+    val exportResults: (String) -> Unit = { kind ->
+        val parsed = LabResultParser.parse(lastOutput)
+        if (parsed.isNullOrEmpty()) {
+            note = "Нет JSON-результатов для экспорта"
+        } else {
+            val payload = when (kind) {
+                "JSON" -> LabResultExport.toJson(parsed)
+                "CSV" -> "\uFEFF" + LabResultExport.toCsv(parsed)
+                else -> LabResultExport.toHtml(parsed)
+            }
+            val folder = File(context.getExternalFilesDir(null) ?: context.filesDir, "JB-Osint/reports")
+                .apply { mkdirs() }
+            val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
+            val file = File(folder, "lab-results-$stamp.${kind.lowercase()}")
+            runCatching {
+                file.writeBytes(payload.toByteArray(Charsets.UTF_8))
+                note = "Экспорт: ${file.absolutePath}"
+            }.onFailure { note = "Экспорт не удался: ${it.message}" }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -196,7 +296,7 @@ fun GitHubLabScreen() {
         ScreenHeader(
             eyebrow = "Инструменты",
             title = "GitHub-лаборатория",
-            subtitle = "Встроенный сервер · без Termux и ручной настройки"
+            subtitle = "Встроенный сервер · языки, терминал и JSON-результаты"
         )
         Spacer(Modifier.height(12.dp))
 
@@ -221,7 +321,6 @@ fun GitHubLabScreen() {
                     }
                 )
             }
-            Spacer(Modifier.height(4.dp))
             Text(
                 "Сервер работает внутри приложения на 127.0.0.1:8081. Termux не нужен.",
                 style = MaterialTheme.typography.bodySmall,
@@ -237,11 +336,7 @@ fun GitHubLabScreen() {
                     color = JbText,
                     modifier = Modifier.weight(1f)
                 )
-                Switch(
-                    checked = server.running,
-                    onCheckedChange = labVm::setEnabled,
-                    enabled = !server.starting
-                )
+                Switch(checked = server.running, onCheckedChange = labVm::setEnabled, enabled = !server.starting)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Button(onClick = labVm::check, enabled = !server.starting) {
@@ -256,10 +351,57 @@ fun GitHubLabScreen() {
                     Text("Проверить сервер")
                 }
                 Spacer(Modifier.width(8.dp))
-                server.note?.let {
-                    Text(it, style = MaterialTheme.typography.labelSmall, color = JbMuted)
+                server.note?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = JbMuted) }
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+        GlowCard(modifier = Modifier.fillMaxWidth(), padding = 14) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Языки и рантаймы",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = JbText,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = { refreshRuntimes() }, enabled = !busy) {
+                    Text("Обновить", color = JbAccent2)
                 }
             }
+            if (runtimes.isEmpty()) {
+                Text(
+                    if (server.running) "Загрузка…" else "Включите лабораторию, чтобы проверить рантаймы",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = JbFaint
+                )
+            } else {
+                runtimes.forEach { runtime ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            runtime.title,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = JbText,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (runtime.available) {
+                            Pill("есть", JbGreen)
+                        } else {
+                            Pill("нет", JbFaint)
+                            runtime.install?.let { install ->
+                                TextButton(onClick = { copy(install) }) {
+                                    Text("Команда", color = JbAccent2)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Text(
+                "Python/Node не встроены в APK: Android не даёт запускать бинарники из filesDir. " +
+                    "Установите интерпретатор через Termux/систему и нажмите «Обновить».",
+                style = MaterialTheme.typography.labelSmall,
+                color = JbFaint
+            )
         }
 
         Spacer(Modifier.height(10.dp))
@@ -317,7 +459,7 @@ fun GitHubLabScreen() {
                 Spacer(Modifier.height(8.dp))
                 if (current.scripts.isEmpty()) {
                     Text(
-                        "Скрипты (.sh/.py) не найдены",
+                        "Скрипты (.py/.js/.sh/.go/.php/.pl/.rb) не найдены",
                         style = MaterialTheme.typography.bodySmall,
                         color = JbFaint
                     )
@@ -333,9 +475,14 @@ fun GitHubLabScreen() {
                                     " " + quoteArg(value)
                                 } else ""
                                 runCommand(script.command() + suffix)
-                            }
+                            },
+                            onInstall = { script.installHint?.let(copy) }
                         )
                     }
+                }
+                Spacer(Modifier.height(6.dp))
+                TextButton(onClick = installDeps, enabled = !busy && current.scripts.isNotEmpty()) {
+                    Text("Установить зависимости", color = JbAccent2)
                 }
             }
         }
@@ -344,7 +491,7 @@ fun GitHubLabScreen() {
         GlowCard(modifier = Modifier.fillMaxWidth(), padding = 14) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "Терминал",
+                    "Ручной терминал",
                     style = MaterialTheme.typography.titleSmall,
                     color = JbText,
                     modifier = Modifier.weight(1f)
@@ -353,24 +500,68 @@ fun GitHubLabScreen() {
                     Text(stage, style = MaterialTheme.typography.labelSmall, color = JbMuted)
                     Spacer(Modifier.width(8.dp))
                 }
-                TextButton(onClick = { logs = emptyList() }) {
-                    Text("Очистить", color = JbMuted)
+                TextButton(onClick = { logs = emptyList() }) { Text("Очистить", color = JbMuted) }
+            }
+            if (busy) {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().height(3.dp),
+                    color = JbAccent2,
+                    trackColor = JbBorderSoft
+                )
+                Spacer(Modifier.height(6.dp))
+            }
+            project?.let { current ->
+                if (current.scripts.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        current.scripts.take(8).forEach { script ->
+                            TextButton(onClick = { command = script.command() }) {
+                                Text(script.path, style = MaterialTheme.typography.labelSmall, color = JbAccent2)
+                            }
+                        }
+                    }
                 }
             }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = command,
+                    onValueChange = { command = it },
+                    modifier = Modifier.weight(1f),
+                    label = { Text("Команда в каталоге проекта") },
+                    placeholder = { Text("например: sh script.sh | head") }
+                )
+                Spacer(Modifier.width(8.dp))
+                OutlinedTextField(
+                    value = timeoutSec,
+                    onValueChange = { timeoutSec = it.filter { ch -> ch.isDigit() }.take(4) },
+                    modifier = Modifier.width(96.dp),
+                    singleLine = true,
+                    label = { Text("Таймаут, с") }
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = { runCommand(command) },
+                enabled = !busy && project != null && command.isNotBlank()
+            ) { Text("Выполнить") }
             if (logs.isEmpty()) {
+                Spacer(Modifier.height(8.dp))
                 Text(
-                    "Вывод появится здесь. Команды выполняются в каталоге проекта.",
+                    "Вывод появится здесь. Поддерживаются пайпы, редиректы и переменные.",
                     style = MaterialTheme.typography.bodySmall,
                     color = JbFaint
                 )
             } else {
+                Spacer(Modifier.height(8.dp))
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(max = 280.dp)
                         .verticalScroll(rememberScrollState())
                 ) {
-                    logs.takeLast(150).forEach { line ->
+                    logs.takeLast(200).forEach { line ->
                         Text(
                             line.text,
                             style = MaterialTheme.typography.labelSmall,
@@ -391,19 +582,73 @@ fun GitHubLabScreen() {
                     color = if (problem) JbAmber else JbGreen
                 )
             }
+            if (history.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Text("История", style = MaterialTheme.typography.labelSmall, color = JbFaint)
+                history.take(10).forEach { item ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                item.command,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = JbText,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                "${time(item.at)} · код ${item.exitCode}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (item.exitCode == 0) JbMuted else JbRed
+                            )
+                        }
+                        TextButton(onClick = { runCommand(item.command) }, enabled = !busy) {
+                            Text("Повторить", color = JbAccent2)
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!cards.isNullOrEmpty()) {
             Spacer(Modifier.height(10.dp))
-            OutlinedTextField(
-                value = command,
-                onValueChange = { command = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Команда в каталоге проекта") },
-                placeholder = { Text("например: sh script.sh") }
-            )
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = { runCommand(command) },
-                enabled = !busy && project != null && command.isNotBlank()
-            ) { Text("Выполнить") }
+            GlowCard(modifier = Modifier.fillMaxWidth(), padding = 14) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Результаты (${cards.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = JbText,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { exportResults("JSON") }) { Text("JSON", color = JbAccent2) }
+                    TextButton(onClick = { exportResults("CSV") }) { Text("CSV", color = JbAccent2) }
+                    TextButton(onClick = { exportResults("HTML") }) { Text("HTML", color = JbAccent2) }
+                }
+                cards.forEach { card ->
+                    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                        if (card.service.isNotBlank()) {
+                            Text(card.service, style = MaterialTheme.typography.bodyMedium, color = JbText)
+                        }
+                        if (card.password.isNotBlank()) {
+                            Text("Пароль/хеш: ${card.password}", style = MaterialTheme.typography.bodySmall, color = JbAmber)
+                        }
+                        if (card.date.isNotBlank()) {
+                            Text("Дата: ${card.date}", style = MaterialTheme.typography.labelSmall, color = JbMuted)
+                        }
+                        if (card.url.isNotBlank()) {
+                            Text(
+                                card.url,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = JbAccent2,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        card.extra.forEach { (key, value) ->
+                            Text("$key: $value", style = MaterialTheme.typography.labelSmall, color = JbFaint)
+                        }
+                    }
+                }
+            }
         }
 
         Spacer(Modifier.height(10.dp))
@@ -414,16 +659,16 @@ fun GitHubLabScreen() {
                 }
                 Spacer(Modifier.weight(1f))
                 TextButton(onClick = exportEnv, enabled = !busy && project != null) {
-                    Text("Экспорт → JB-Osint/reports", color = JbAccent2)
+                    Text("Экспорт лога и артефактов", color = JbAccent2)
                 }
             }
         }
 
         Spacer(Modifier.height(10.dp))
         Text(
-            "Сервер слушает только 127.0.0.1 и работает внутри приложения (foreground service). " +
-                "Скрипты запускаются по кнопке, с таймаутом 10 минут и белым списком команд. " +
-                "Android-shell (.sh) работает нативно; .py требует установленный Python — обычно его нет.",
+            "Сервер слушает только 127.0.0.1. Опасные команды (rm -rf /, mkfs, dd if=/dev/zero, sudo/su/doas) " +
+                "блокируются, таймаут по умолчанию 300 с, память ограничена ulimit. " +
+                "Скрипты запускаются только по кнопке; вывод может содержать чувствительные данные.",
             style = MaterialTheme.typography.labelSmall,
             color = JbFaint
         )
@@ -437,7 +682,8 @@ private fun ScriptRow(
     value: String,
     onValue: (String) -> Unit,
     enabled: Boolean,
-    onRun: (String) -> Unit
+    onRun: (String) -> Unit,
+    onInstall: () -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -449,10 +695,17 @@ private fun ScriptRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Text(script.path, style = MaterialTheme.typography.labelSmall, color = JbFaint)
+                Text(
+                    script.type.title + if (script.available) "" else " · нет интерпретатора",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (script.available) JbFaint else JbAmber
+                )
             }
-            TextButton(onClick = { onRun(value) }, enabled = enabled) {
-                Text("Запустить", color = JbAccent2)
+            if (!script.available && script.installHint != null) {
+                TextButton(onClick = onInstall) { Text("Установить", color = JbAccent2) }
+            }
+            TextButton(onClick = { onRun(value) }, enabled = enabled && script.available) {
+                Text("Запустить", color = if (script.available) JbAccent2 else JbFaint)
             }
         }
         script.param?.let { label ->
@@ -469,3 +722,6 @@ private fun ScriptRow(
 
 private fun quoteArg(value: String): String =
     "'" + value.replace("'", "'\\''") + "'"
+
+private fun time(millis: Long): String =
+    SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(millis))

@@ -68,6 +68,8 @@ object LabApiModule {
                 path == "/run" && method == "POST" -> runCommand(context, JSONObject(body))
                 path == "/clear" && method == "POST" -> clearProject(context, JSONObject(body))
                 path == "/export" && method == "POST" -> exportProject(context, JSONObject(body))
+                path == "/runtimes" && method == "GET" -> runtimes()
+                path == "/deps" && method == "POST" -> dependencies(context, JSONObject(body))
                 else -> error(404, "Неизвестный маршрут")
             }
         }
@@ -194,14 +196,19 @@ object LabApiModule {
             if (!file.isFile) return@forEach
             val relative = file.relativeTo(dir).path.replace(File.separatorChar, '/')
             if (relative.split('/').any { it in skip }) return@forEach
-            val type = LabRules.scriptType(relative) ?: return@forEach
             val lines = runCatching { file.useLines { it.take(40).toList() } }.getOrDefault(emptyList())
+            val firstLine = lines.firstOrNull()
+            val language = LabRules.language(relative, firstLine)
+            if (language == LabLanguage.OTHER && LabRules.scriptType(relative) == null) return@forEach
             val meta = LabRules.buttonMeta(lines)
             array.put(
                 JSONObject()
                     .put("name", file.name)
                     .put("path", relative)
-                    .put("type", type)
+                    .put("type", language.wire)
+                    .put("language", language.title)
+                    .put("available", LabRules.runtimeAvailable(language))
+                    .put("install", language.install ?: JSONObject.NULL)
                     .put("button", meta.title ?: JSONObject.NULL)
                     .put("param", meta.param ?: JSONObject.NULL)
             )
@@ -213,49 +220,22 @@ object LabApiModule {
 
     private fun runCommand(context: Context, body: JSONObject): LabHttpResponse {
         val dir = safeDir(context, body.optString("dir"))
-        val timeout = body.optInt("timeout", 600).coerceIn(1, 1800)
+        val timeout = body.optInt("timeout", 300).coerceIn(30, 1800)
         val command = body.optString("command").trim()
         if (command.isEmpty()) throw LabException("Пустая команда")
         if (command.length > 4000) throw LabException("Команда слишком длинная")
-        val args = LabRules.splitArgs(command)
-        if (args.isEmpty()) throw LabException("Пустая команда")
-        val first = args[0]
-        val name = first.substringAfterLast('/').lowercase(Locale.US)
-        if (LabRules.isBlocked(first)) throw LabException("sudo/su/doas/rm запрещены")
-
-        val argv: List<String>
-        when {
-            name == "sh" || name == "bash" -> {
-                val script = resolveInside(dir, args.getOrNull(1))
-                argv = listOf("/system/bin/sh", script.absolutePath) + args.drop(2)
-            }
-            first.startsWith("./") -> {
-                val script = resolveInside(dir, first)
-                argv = listOf("/system/bin/sh", script.absolutePath) + args.drop(1)
-            }
-            name == "python" || name == "python3" -> {
-                val python = listOf("/system/bin/python3", "/system/bin/python", "/usr/bin/python3")
-                    .firstOrNull { File(it).canExecute() }
-                    ?: return ok(
-                        JSONObject()
-                            .put("exit_code", 127)
-                            .put("stdout", "Python не установлен на устройстве. Поддерживаются .sh-скрипты Android shell.")
-                            .put("stderr", "")
-                            .put("took_ms", 0)
-                    )
-                val script = resolveInside(dir, args.getOrNull(1))
-                argv = listOf(python, script.absolutePath) + args.drop(2)
-            }
-            else -> {
-                if (!LabRules.isAllowed(first)) throw LabException("Команда $name не в белом списке")
-                val binary = findBinary(name) ?: throw LabException("Команда $name недоступна на устройстве")
-                argv = listOf(binary) + args.drop(1)
-            }
+        if (LabRules.isDangerous(command)) {
+            throw LabException("Команда заблокирована: опасная операция")
         }
+        return runShell(dir, command, timeout)
+    }
 
+    /** Запуск через /system/bin/sh -c: пайпы, редиректы и переменные работают. */
+    private fun runShell(dir: File, command: String, timeoutSec: Int): LabHttpResponse {
+        val wrapped = "ulimit -v 1048576 2>/dev/null || true; " + command
         val started = System.currentTimeMillis()
         val process = runCatching {
-            ProcessBuilder(argv)
+            ProcessBuilder(listOf("/system/bin/sh", "-c", wrapped))
                 .directory(dir)
                 .redirectErrorStream(true)
                 .apply { environment()["PATH"] = "/system/bin:/system/xbin" }
@@ -273,7 +253,7 @@ object LabApiModule {
             }
         }.apply { isDaemon = true; start() }
 
-        val finished = process.waitFor(timeout.toLong(), TimeUnit.SECONDS)
+        val finished = process.waitFor(timeoutSec.toLong(), TimeUnit.SECONDS)
         if (!finished) process.destroyForcibly()
         reader.join(2000)
         val took = System.currentTimeMillis() - started
@@ -290,18 +270,57 @@ object LabApiModule {
         )
     }
 
-    private fun resolveInside(dir: File, raw: String?): File {
-        if (raw.isNullOrBlank()) throw LabException("Укажите файл скрипта")
-        val candidate = File(raw)
-        val file = if (candidate.isAbsolute) candidate.canonicalFile else File(dir, raw).canonicalFile
-        val root = dir.canonicalFile
-        if (!file.path.startsWith(root.path + File.separator)) throw LabException("Скрипт вне проекта")
-        if (!file.isFile) throw LabException("Файл не найден: $raw")
-        return file
+    private fun dependencies(context: Context, body: JSONObject): LabHttpResponse {
+        val dir = safeDir(context, body.optString("dir"))
+        val commands = ArrayList<String>()
+        if (File(dir, "requirements.txt").isFile) {
+            LabRules.runtime(LabLanguage.PYTHON)?.let { python ->
+                commands += "${q(python)} -m pip install -r requirements.txt"
+            }
+        }
+        if (File(dir, "package.json").isFile) {
+            val npm = binary("npm")
+            if (npm != null) commands += "${q(npm)} ci --ignore-scripts || ${q(npm)} install --ignore-scripts"
+        }
+        if (File(dir, "go.mod").isFile) {
+            LabRules.runtime(LabLanguage.GO)?.let { go -> commands += "${q(go)} mod download" }
+        }
+        if (File(dir, "composer.json").isFile) {
+            binary("composer")?.let { composer -> commands += "${q(composer)} install --no-interaction" }
+        }
+        if (File(dir, "Gemfile").isFile) {
+            binary("bundle")?.let { bundle -> commands += "${q(bundle)} install" }
+        }
+        if (commands.isEmpty()) {
+            return ok(
+                JSONObject()
+                    .put("exit_code", 0)
+                    .put("stdout", "Нет файлов зависимостей или не найдены pip/npm/go/composer/bundle.")
+                    .put("stderr", "")
+                    .put("took_ms", 0)
+            )
+        }
+        return runShell(dir, commands.joinToString(" && "), 900)
     }
 
-    private fun findBinary(name: String): String? =
+    private fun runtimes(): LabHttpResponse {
+        val array = JSONArray()
+        LabLanguage.entries.filter { it != LabLanguage.OTHER }.forEach { language ->
+            array.put(
+                JSONObject()
+                    .put("id", language.wire)
+                    .put("title", language.title)
+                    .put("available", LabRules.runtimeAvailable(language))
+                    .put("install", language.install ?: JSONObject.NULL)
+            )
+        }
+        return ok(JSONObject().put("runtimes", array))
+    }
+
+    private fun binary(name: String): String? =
         listOf("/system/bin/$name", "/system/xbin/$name").firstOrNull { File(it).canExecute() }
+
+    private fun q(value: String): String = "'" + value.replace("'", "'\\''") + "'"
 
     // ------------------------------------------------------------------ clear
 

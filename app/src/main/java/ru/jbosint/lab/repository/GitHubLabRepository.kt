@@ -4,6 +4,7 @@ import android.content.Context
 import ru.jbosint.lab.model.LabApiConfig
 import ru.jbosint.lab.model.LabProject
 import ru.jbosint.lab.model.LabRunResult
+import ru.jbosint.lab.model.LabRuntime
 import ru.jbosint.lab.network.TermuxApiClient
 import ru.jbosint.lab.LabToken
 import ru.jbosint.osint.data.SecureStore
@@ -48,6 +49,10 @@ class GitHubLabRepository(context: Context) {
         command: String,
         timeoutSec: Int = LabApiConfig.DEFAULT_TIMEOUT_SEC
     ): LabRunResult = api.run(config(), dir, command, timeoutSec)
+
+    suspend fun dependencies(dir: String): LabRunResult = api.dependencies(config(), dir)
+
+    suspend fun runtimes(): List<LabRuntime> = api.runtimes(config())
 
     suspend fun clear(dir: String) = api.clear(config(), dir)
 
