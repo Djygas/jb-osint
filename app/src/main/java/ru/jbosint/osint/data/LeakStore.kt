@@ -25,7 +25,7 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
 
     companion object {
         private const val DB_NAME = "leaks.db"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 3
 
         /** Папка дампов внутри приватного хранилища приложения. */
         fun leaksDir(context: Context): File =
@@ -67,7 +67,11 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
                 "mask TEXT NOT NULL," +
                 "has_secret INTEGER NOT NULL DEFAULT 0," +
                 "password TEXT," +
-                "origin TEXT)"
+                "origin TEXT," +
+                "service TEXT," +
+                "leak_date TEXT," +
+                "data_type TEXT," +
+                "source_url TEXT)"
         )
         db.execSQL("CREATE INDEX idx_leak_hash ON hits(hash)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_leak_origin ON hits(origin)")
@@ -81,6 +85,13 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
             db.execSQL("ALTER TABLE hits ADD COLUMN origin TEXT")
             // Старые строки индекса не содержат пароль/происхождение — помечаем файлы
             // изменёнными, чтобы ближайшая индексация перечитала их (таблицу не пересоздаём).
+            runCatching { db.execSQL("UPDATE files SET mtime = -1") }
+        }
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE hits ADD COLUMN service TEXT")
+            db.execSQL("ALTER TABLE hits ADD COLUMN leak_date TEXT")
+            db.execSQL("ALTER TABLE hits ADD COLUMN data_type TEXT")
+            db.execSQL("ALTER TABLE hits ADD COLUMN source_url TEXT")
             runCatching { db.execSQL("UPDATE files SET mtime = -1") }
         }
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_leak_origin ON hits(origin)")
@@ -182,8 +193,8 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
         var secrets = 0L
         var pending = 0
         val statement = db.compileStatement(
-            "INSERT INTO hits(hash, file_id, line, kind, mask, has_secret, password, origin) " +
-                "VALUES(?,?,?,?,?,?,?,?)"
+            "INSERT INTO hits(hash, file_id, line, kind, mask, has_secret, password, origin, " +
+                "service, leak_date, data_type, source_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
         )
 
         var failure: Throwable? = null
@@ -204,7 +215,8 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
 
                     val origin = file.name
                     for (email in emails) {
-                        val password = LeakRules.passwordIn(line, email)
+                        val record = LeakRules.parseRecord(line, email)
+                        val password = record.password
                         val secret = password != null || LeakRules.hasSecret(line, email)
                         if (secret) secrets++
                         statement.clearBindings()
@@ -216,6 +228,10 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
                         statement.bindLong(6, if (secret) 1L else 0L)
                         if (password != null) statement.bindString(7, password) else statement.bindNull(7)
                         statement.bindString(8, origin)
+                        statement.bindString(9, record.service.ifBlank { origin })
+                        statement.bindString(10, record.date)
+                        statement.bindString(11, record.dataType.ifBlank { if (password != null) "Email+Password" else "Email" })
+                        statement.bindString(12, record.sourceUrl)
                         statement.executeInsert()
                         if (++pending >= LeakRules.CHUNK) {
                             db.setTransactionSuccessful()
@@ -234,6 +250,10 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
                         statement.bindLong(6, 0L)
                         statement.bindNull(7)
                         statement.bindString(8, origin)
+                        statement.bindString(9, origin)
+                        statement.bindString(10, "")
+                        statement.bindString(11, "Phone")
+                        statement.bindString(12, "")
                         statement.executeInsert()
                         if (++pending >= LeakRules.CHUNK) {
                             db.setTransactionSuccessful()
@@ -287,7 +307,8 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
         val hash = LeakRules.hash(subject)
         val out = ArrayList<LeakHit>()
         readableDatabase.rawQuery(
-            "SELECT h.mask, h.line, h.kind, h.has_secret, f.path, h.password, h.origin FROM hits h " +
+            "SELECT h.mask, h.line, h.kind, h.has_secret, f.path, h.password, h.origin, " +
+                "h.service, h.leak_date, h.data_type, h.source_url FROM hits h " +
                 "JOIN files f ON f.id = h.file_id WHERE h.hash = ? ORDER BY h.line LIMIT ?",
             arrayOf(hash, LeakRules.MAX_HITS.toString())
         ).use { cursor ->
@@ -299,7 +320,11 @@ class LeakStore(context: Context) : SQLiteOpenHelper(
                     mask = cursor.getString(0),
                     hasSecret = cursor.getInt(3) == 1,
                     password = cursor.getString(5),
-                    origin = cursor.getString(6)
+                    origin = cursor.getString(6),
+                    service = cursor.getString(7).orEmpty(),
+                    leakDate = cursor.getString(8).orEmpty(),
+                    dataType = cursor.getString(9).orEmpty(),
+                    sourceUrl = cursor.getString(10).orEmpty()
                 )
             }
         }

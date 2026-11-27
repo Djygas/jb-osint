@@ -112,6 +112,16 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean("show_leak_passwords", false)
         set(value) = prefs.edit().putBoolean("show_leak_passwords", value).apply()
 
+    /** Всегда маскировать пароли, даже если общий показ включён. */
+    var alwaysMaskLeakPasswords: Boolean
+        get() = prefs.getBoolean("leak_always_mask", false)
+        set(value) = prefs.edit().putBoolean("leak_always_mask", value).apply()
+
+    /** Сколько дней хранить кэш ответов API по утечкам (1–7). */
+    var leakCacheDays: Int
+        get() = prefs.getInt("leak_cache_days", 1).coerceIn(1, 7)
+        set(value) = prefs.edit().putInt("leak_cache_days", value.coerceIn(1, 7)).apply()
+
     // ------------------------------------------------------- GitHub-лаборатория
 
     var labRepoUrl: String

@@ -30,6 +30,7 @@ object VaultCrypto {
 
     const val FORMAT_KEYS = "jb-osint/keys/1.0"
     const val FORMAT_CONFIG = "jb-osint/config/1.0"
+    const val FORMAT_LEAK = "jb-osint/leak-scan/2.0"
     const val DEFAULT_ITERATIONS = 210_000
     const val MIN_PASSWORD = 8
 

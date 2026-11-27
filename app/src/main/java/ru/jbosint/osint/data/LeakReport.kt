@@ -96,7 +96,8 @@ object LeakRows {
             attrs["Пароли"]?.isNotBlank() == true
 
         val resource = if (isIndex) {
-            attrs["where"].orEmpty()
+            attrs["service"].orEmpty()
+                .ifBlank { attrs["where"].orEmpty() }
                 .ifBlank { attrs["Файл"].orEmpty() }
                 .ifBlank { attrs["file"].orEmpty() }
         } else {
@@ -109,7 +110,13 @@ object LeakRows {
         }
 
         val baseTypes = if (isIndex) {
-            listOf(if (fact.kind.contains("телефон", ignoreCase = true)) "телефон" else "email")
+            val parsed = attrs["Типы данных"].orEmpty()
+                .split(',', ';')
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+            parsed.ifEmpty {
+                listOf(if (fact.kind.contains("телефон", ignoreCase = true)) "телефон" else "email")
+            }
         } else {
             val raw = attrs["Данные"] ?: attrs["Ещё"] ?: attrs["fields"]
                 ?: if (fact.sourceId == "dyxless") {
@@ -117,7 +124,10 @@ object LeakRows {
                 } else ""
             raw.split(',', ';').map { it.trim() }.filter { it.isNotBlank() }
         }
-        val dataTypes = (baseTypes + if (rawPassword != null) listOf("пароль") else emptyList())
+        val hasPasswordType = baseTypes.any {
+            it.contains("password", ignoreCase = true) || it.contains("парол", ignoreCase = true)
+        }
+        val dataTypes = (baseTypes + if (rawPassword != null && !hasPasswordType) listOf("пароль") else emptyList())
             .distinct()
 
         val paywalled = sourceStatus?.let {

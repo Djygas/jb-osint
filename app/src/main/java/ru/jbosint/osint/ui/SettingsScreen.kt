@@ -5,6 +5,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -145,6 +146,38 @@ fun SettingsScreen(state: UiState, vm: AppViewModel) {
                         if (enabled) confirmLeakPasswords = true else vm.setLeakShowPasswords(false)
                     }
                 )
+                Spacer(Modifier.height(8.dp))
+                GradientDivider()
+                Spacer(Modifier.height(10.dp))
+                ToggleRow(
+                    title = "Всегда маскировать пароли",
+                    subtitle = "Даже при включённом показе пароли остаются под маской.",
+                    checked = state.leak.alwaysMask,
+                    onCheckedChange = vm::setLeakAlwaysMask
+                )
+                Spacer(Modifier.height(10.dp))
+                GradientDivider()
+                Spacer(Modifier.height(12.dp))
+                Text("Срок хранения кэша дампов", style = MaterialTheme.typography.titleSmall, color = JbText)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    "Ответы API утечек кэшируются на 1–7 дней; пароли в кэш не пишутся.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = JbMuted
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    (1..7).forEach { days ->
+                        DayChip(
+                            text = "$days дн",
+                            selected = state.leak.cacheDays == days,
+                            onClick = { vm.setLeakCacheDays(days) }
+                        )
+                    }
+                }
             }
         }
 

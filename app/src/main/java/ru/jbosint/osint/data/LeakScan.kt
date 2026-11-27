@@ -121,6 +121,79 @@ object LeakRules {
     }
 
     /**
+     * Разбор строки дампа: CSV (`email;password;service;date;url`), TXT
+     * (`email:password@service`, `email|password|service`) и JSON-строки.
+     */
+    fun parseRecord(line: String, email: String): LeakDumpRecord {
+        if (line.isBlank()) return LeakDumpRecord()
+        val text = if (line.length > MAX_LINE) line.substring(0, MAX_LINE) else line
+        val jsonPassword = jsonField(text, "password")
+        if (jsonPassword != null) {
+            return LeakDumpRecord(
+                password = jsonPassword,
+                service = jsonField(text, "service") ?: jsonField(text, "site") ?: "",
+                date = jsonField(text, "date") ?: jsonField(text, "breach_date") ?: "",
+                dataType = jsonField(text, "data_type") ?: "Email+Password",
+                sourceUrl = jsonField(text, "source_url") ?: jsonField(text, "url") ?: ""
+            )
+        }
+        val delimiter = when {
+            text.contains(';') -> ';'
+            text.contains('\t') -> '\t'
+            text.contains('|') -> '|'
+            text.contains(',') -> ','
+            else -> ':'
+        }
+        val parts = text.split(delimiter)
+            .map { it.trim().trim('"', '\'', ' ') }
+            .filter { it.isNotEmpty() }
+        val at = parts.indexOfFirst { it.equals(email, ignoreCase = true) }
+        if (at < 0) return LeakDumpRecord()
+        val after = parts.drop(at + 1)
+        var password: String? = null
+        var service = ""
+        var date = ""
+        var sourceUrl = ""
+        var consumed = 0
+        val first = after.firstOrNull()
+        if (first != null && !emailRe.matches(first)) {
+            if (first.contains('@') && !first.contains(' ')) {
+                val candidate = first.substringBeforeLast('@')
+                val tail = first.substringAfterLast('@')
+                if (candidate.isNotBlank() && tail.contains('.') && !tail.contains('@')) {
+                    password = candidate
+                    service = tail
+                } else if (candidate.isNotBlank()) {
+                    password = first
+                }
+            } else {
+                password = first
+            }
+            if (password != null) consumed = 1
+        }
+        after.drop(consumed).forEach { token ->
+            when {
+                (token.startsWith("http://") || token.startsWith("https://")) && sourceUrl.isEmpty() ->
+                    sourceUrl = token
+                date.isEmpty() && Regex("\\d{4}(-\\d{2}){0,2}").matches(token) -> date = token
+                service.isEmpty() && !token.contains('@') && !phoneRe.matches(token) &&
+                    token.length in 2..80 -> service = token
+            }
+        }
+        return LeakDumpRecord(
+            password = password,
+            service = service,
+            date = date,
+            dataType = if (password != null) "Email+Password" else "Email",
+            sourceUrl = sourceUrl
+        )
+    }
+
+    private fun jsonField(text: String, name: String): String? =
+        Regex("\"" + Regex.escape(name) + "\"\\s*:\\s*\"([^\"]*)\"", RegexOption.IGNORE_CASE)
+            .find(text)?.groupValues?.get(1)?.takeIf { it.isNotBlank() }
+
+    /**
      * Эвристика «в строке есть пароль»: рядом с адресом стоит токен не из букв
      * (обычно с цифрами), не похожий на почту. Сам токен не возвращаем и не храним.
      */
@@ -138,6 +211,15 @@ object LeakRules {
     }
 }
 
+/** Разобранная строка дампа: пароль и метаданные записи. */
+data class LeakDumpRecord(
+    val password: String? = null,
+    val service: String = "",
+    val date: String = "",
+    val dataType: String = "",
+    val sourceUrl: String = ""
+)
+
 /** Одно совпадение в локальном индексе. */
 data class LeakHit(
     val file: String,
@@ -148,7 +230,11 @@ data class LeakHit(
     /** Пароль из строки `email:password`; null, если его нет или он не распознан. */
     val password: String? = null,
     /** Происхождение записи: имя файла-дампа. */
-    val origin: String? = null
+    val origin: String? = null,
+    val service: String = "",
+    val leakDate: String = "",
+    val dataType: String = "",
+    val sourceUrl: String = ""
 )
 
 data class LeakIndexStats(
@@ -255,6 +341,7 @@ class LeakScan(private val store: LeakStore, private val keys: KeySource) {
         subject: String,
         useIndex: Boolean,
         useApi: Boolean,
+        ttlMs: Long = LeakRules.TTL_MS,
         onStage: (String) -> Unit = {}
     ): Result = withContext(Dispatchers.IO) {
         val started = System.currentTimeMillis()
@@ -280,6 +367,7 @@ class LeakScan(private val store: LeakStore, private val keys: KeySource) {
             hits.forEach { hit ->
                 val origin = hit.origin?.takeIf { it.isNotBlank() }
                     ?: hit.file.substringAfterLast('/')
+                val service = hit.service.ifBlank { origin }
                 val password = hit.password?.takeIf { it.isNotBlank() }
                 val seenPassword = password != null || hit.hasSecret
                 add(
@@ -289,14 +377,19 @@ class LeakScan(private val store: LeakStore, private val keys: KeySource) {
                         value = query,
                         subject = query,
                         attributes = buildMap {
-                            put("where", origin)
+                            put("where", service)
+                            put("service", service)
                             put("Файл", hit.file.substringAfterLast('/'))
                             put("Строка", hit.line.toString())
                             put("Маска", hit.mask)
                             put("hadPassword", seenPassword.toString())
+                            if (hit.leakDate.isNotBlank()) put("Дата", hit.leakDate)
+                            if (hit.dataType.isNotBlank()) put("Типы данных", hit.dataType)
+                            if (hit.sourceUrl.isNotBlank()) put("source_url", hit.sourceUrl)
                             if (password != null) put("password", password)
                         },
-                        sourceId = INDEX_ID
+                        sourceId = INDEX_ID,
+                        sourceUrl = hit.sourceUrl
                     ),
                     key = "index|${hit.file}|${hit.line}|${hit.kind}|${sequence++}"
                 )
@@ -312,7 +405,7 @@ class LeakScan(private val store: LeakStore, private val keys: KeySource) {
         // Шаг 2 — кэш: 24 часа на тот же запрос.
         if (useApi) {
             val cacheKey = "leak:" + LeakRules.hash(query)
-            val cachedBody = runCatching { store.cacheGet(cacheKey, LeakRules.TTL_MS) }.getOrNull()
+            val cachedBody = runCatching { store.cacheGet(cacheKey, ttlMs) }.getOrNull()
             if (cachedBody != null) {
                 onStage("Кэш за сутки…")
                 val cachedFacts = decodeFacts(cachedBody, query)
