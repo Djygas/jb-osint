@@ -4154,7 +4154,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     showPasswords = settings.showLeakPasswords,
                     noticeShown = settings.leakPlaintextNoticeShown,
                     cacheDays = settings.leakCacheDays,
-                    rawScan = settings.leakRaw,
                     note = null
                 )
             )
