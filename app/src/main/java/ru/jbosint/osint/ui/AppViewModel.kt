@@ -434,10 +434,10 @@ data class LeakUi(
     val rowCount: Long = 0,
     val secretRows: Long = 0,
     val sizeMb: Int = 0,
-    /** Показывать пароли из локального индекса (по умолчанию выключено). */
-    val showPasswords: Boolean = false,
-    /** Всегда маскировать пароли, даже при включённом показе. */
-    val alwaysMask: Boolean = false,
+    /** Открытые пароли из локального индекса (включено по умолчанию). */
+    val showPasswords: Boolean = true,
+    /** Показано ли однократное предупреждение о plaintext-паролях. */
+    val noticeShown: Boolean = false,
     /** Срок хранения кэша ответов API, дней (1–7). */
     val cacheDays: Int = 1,
     /** Фильтр по источнику: пустая строка — все источники. */
@@ -655,7 +655,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             ),
             leak = LeakUi(
                 showPasswords = settings.showLeakPasswords,
-                alwaysMask = settings.alwaysMaskLeakPasswords,
+                noticeShown = settings.leakPlaintextNoticeShown,
                 cacheDays = settings.leakCacheDays
             ),
             lab = LabUi(
@@ -4152,8 +4152,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     useIndex = settings.leakUseIndex,
                     rawScan = settings.leakRaw,
                     showPasswords = settings.showLeakPasswords,
-                    alwaysMask = settings.alwaysMaskLeakPasswords,
+                    noticeShown = settings.leakPlaintextNoticeShown,
                     cacheDays = settings.leakCacheDays,
+                    rawScan = settings.leakRaw,
                     note = null
                 )
             )
@@ -4167,9 +4168,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(leak = it.leak.copy(showPasswords = enabled)) }
     }
 
-    fun setLeakAlwaysMask(enabled: Boolean) {
-        settings.alwaysMaskLeakPasswords = enabled
-        _state.update { it.copy(leak = it.leak.copy(alwaysMask = enabled)) }
+    /** Однократное подтверждение: пароли хранятся и показываются открыто. */
+    fun acknowledgeLeakPlaintextNotice() {
+        settings.leakPlaintextNoticeShown = true
+        settings.showLeakPasswords = true
+        _state.update { it.copy(leak = it.leak.copy(noticeShown = true, showPasswords = true)) }
     }
 
     fun setLeakCacheDays(days: Int) {
@@ -4492,15 +4495,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * Экспорт JSON в схеме `jb-osint/leak-scan/2.0`.
      * Пароль попадает в файл только при включённом показе паролей.
      */
-    fun exportLeakJson(password: String? = null) {
+    fun exportLeakJson() {
         val leak = _state.value.leak
         if (leak.sources.isEmpty()) {
             _state.update { it.copy(toast = "Сначала выполните поиск") }
-            return
-        }
-        val includePasswords = leak.showPasswords && !leak.alwaysMask
-        if (includePasswords && password.isNullOrBlank()) {
-            _state.update { it.copy(toast = "Для экспорта с паролями задайте пароль шифрования") }
             return
         }
         viewModelScope.launch {
@@ -4510,28 +4508,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 offline = leak.offline,
                 cached = leak.cached,
                 note = leak.note.orEmpty(),
-                sources = leak.sources,
-                showPasswords = includePasswords
+                sources = leak.sources
             )
-            val bytes = if (includePasswords) {
-                try {
-                    VaultCrypto.encrypt(
-                        text.toByteArray(Charsets.UTF_8),
-                        password.orEmpty().toCharArray(),
-                        VaultCrypto.FORMAT_LEAK
-                    )
-                } catch (t: Throwable) {
-                    _state.update { it.copy(toast = "Шифрование не удалось: ${t.message ?: "ошибка"}") }
-                    return@launch
-                }
-            } else {
-                text.toByteArray(Charsets.UTF_8)
-            }
-            val name = "leak-scan-${leakStamp()}.json" + if (includePasswords) ".enc" else ""
             deliverLeak(
-                name,
-                bytes,
-                if (includePasswords) "application/octet-stream" else "application/json"
+                "leak-scan-${leakStamp()}.json",
+                text.toByteArray(Charsets.UTF_8),
+                "application/json"
             )
         }
     }

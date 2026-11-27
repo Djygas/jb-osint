@@ -99,23 +99,24 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean("leak_use_index", true)
         set(value) = prefs.edit().putBoolean("leak_use_index", value).apply()
 
-    /** Полная переиндексация перед поиском (долго, сажает батарею). */
+    /** Глубокий поиск: перечитывать файлы дампов перед каждым поиском (по умолчанию включён). */
     var leakRaw: Boolean
-        get() = prefs.getBoolean("leak_raw", false)
+        get() = prefs.getBoolean("leak_raw", true)
         set(value) = prefs.edit().putBoolean("leak_raw", value).apply()
 
     /**
      * Показывать пароли из локального индекса дампов в отчётах утечек.
      * По умолчанию выключено: пароль маскируется, в экспорт не попадает.
      */
+    /** Открытые пароли из дампов. Включено по умолчанию после предупреждения. */
     var showLeakPasswords: Boolean
-        get() = prefs.getBoolean("show_leak_passwords", false)
+        get() = prefs.getBoolean("show_leak_passwords", true)
         set(value) = prefs.edit().putBoolean("show_leak_passwords", value).apply()
 
-    /** Всегда маскировать пароли, даже если общий показ включён. */
-    var alwaysMaskLeakPasswords: Boolean
-        get() = prefs.getBoolean("leak_always_mask", false)
-        set(value) = prefs.edit().putBoolean("leak_always_mask", value).apply()
+    /** Однократное предупреждение о хранении паролей в открытом виде. */
+    var leakPlaintextNoticeShown: Boolean
+        get() = prefs.getBoolean("leak_plaintext_notice", false)
+        set(value) = prefs.edit().putBoolean("leak_plaintext_notice", value).apply()
 
     /** Сколько дней хранить кэш ответов API по утечкам (1–7). */
     var leakCacheDays: Int

@@ -120,6 +120,30 @@ fun LeakScanDialog(state: UiState, vm: AppViewModel) {
         vm.openLeakInLab(ref)
     }
 
+    var notice by remember { mutableStateOf(!leak.noticeShown) }
+    if (notice) {
+        AlertDialog(
+            onDismissRequest = {
+                notice = false
+                vm.acknowledgeLeakPlaintextNotice()
+            },
+            containerColor = JbSurfaceHigh,
+            title = { Text("Пароли в открытом виде") },
+            text = {
+                Text(
+                    "Внимание: пароли будут храниться и отображаться в открытом виде. " +
+                        "Убедитесь, что вы проверяете только свои данные или данные с согласия владельца."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    notice = false
+                    vm.acknowledgeLeakPlaintextNotice()
+                }) { Text("Понятно", color = JbAccent2) }
+            }
+        )
+    }
+
     if (githubOpen) {
         AlertDialog(
             onDismissRequest = { githubOpen = false },
@@ -171,7 +195,7 @@ fun LeakScanDialog(state: UiState, vm: AppViewModel) {
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(color = JbBg, modifier = Modifier.fillMaxSize()) {
-            val show = leak.showPasswords && !leak.alwaysMask
+            val show = true
             val selected = leak.selected
             if (selected != null) {
                 LeakDetailScreen(
@@ -200,18 +224,7 @@ fun LeakScanDialog(state: UiState, vm: AppViewModel) {
                     ) {
                         Text("УТЕЧКИ", style = MaterialTheme.typography.labelSmall, color = JbAccent2)
                         Spacer(Modifier.weight(1f))
-                        Pill(
-                            when {
-                                leak.alwaysMask -> "Пароли: всегда скрыты"
-                                leak.showPasswords -> "Пароли: вкл"
-                                else -> "Пароли: выкл"
-                            },
-                            when {
-                                leak.alwaysMask -> JbFaint
-                                leak.showPasswords -> JbAmber
-                                else -> JbFaint
-                            }
-                        )
+                        Pill("Пароли: открыто", JbAmber)
                         Spacer(Modifier.width(6.dp))
                         if (leak.fileCount > 0) {
                             Pill("${leak.fileCount} файл(ов)", JbFaint)
@@ -315,15 +328,15 @@ fun LeakScanDialog(state: UiState, vm: AppViewModel) {
                                     onOpenLab = openLab
                                 )
                             }
-                            item { ExportRow(vm, show) }
+                            item { ExportRow(vm) }
                         }
 
                         item {
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                "Пароль берётся только из локального индекса дампов и по умолчанию " +
-                                    "маскируется. В JSON он попадает лишь при включённом режиме; CSV и HTML " +
-                                    "не содержат пароль никогда, только факт наличия. Кэш ответов API живёт 24 часа.",
+                                "Пароли из локальных дампов хранятся и отображаются в открытом виде " +
+                                    "и попадают во все экспорты. Проверяйте только свои данные или данные " +
+                                    "с согласия владельца. Кэш ответов API живёт 1–7 дней.",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = JbFaint
                             )
@@ -337,16 +350,12 @@ fun LeakScanDialog(state: UiState, vm: AppViewModel) {
 }
 
 @Composable
-private fun ExportRow(vm: AppViewModel, includePasswords: Boolean) {
-    var askPassword by remember { mutableStateOf(false) }
-    var password by remember { mutableStateOf("") }
+private fun ExportRow(vm: AppViewModel) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        TextButton(onClick = {
-            if (includePasswords) askPassword = true else vm.exportLeakJson(null)
-        }) {
+        TextButton(onClick = { vm.exportLeakJson() }) {
             Icon(Icons.Filled.Share, null, tint = JbAccent2, modifier = Modifier.size(16.dp))
             Spacer(Modifier.width(6.dp))
-            Text(if (includePasswords) "JSON (шифр.)" else "JSON 2.0", color = JbAccent2)
+            Text("JSON 2.0", color = JbAccent2)
         }
         TextButton(onClick = vm::exportLeakCsv) {
             Text("CSV", color = JbMuted)
@@ -354,44 +363,6 @@ private fun ExportRow(vm: AppViewModel, includePasswords: Boolean) {
         TextButton(onClick = vm::exportLeakHtml) {
             Text("HTML", color = JbMuted)
         }
-    }
-    if (askPassword) {
-        AlertDialog(
-            onDismissRequest = { askPassword = false },
-            containerColor = JbSurfaceHigh,
-            title = { Text("Зашифровать экспорт?") },
-            text = {
-                Column {
-                    Text(
-                        "JSON содержит пароли. Задайте пароль (минимум 8 символов) — " +
-                            "файл будет зашифрован AES-256-GCM (PBKDF2).",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = JbMuted
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { password = it },
-                        singleLine = true,
-                        label = { Text("Пароль шифрования") },
-                        visualTransformation = PasswordVisualTransformation()
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = password.length >= 8,
-                    onClick = {
-                        vm.exportLeakJson(password)
-                        askPassword = false
-                        password = ""
-                    }
-                ) { Text("Экспорт", color = JbAccent2) }
-            },
-            dismissButton = {
-                TextButton(onClick = { askPassword = false }) { Text("Отмена", color = JbMuted) }
-            }
-        )
     }
 }
 
@@ -542,65 +513,7 @@ private fun PasswordLine(
     onOpenSettings: () -> Unit
 ) {
     if (row.password != null) {
-        if (!showPasswords) {
-            LabeledValue("Пароль", "••••••••")
-            TextButton(
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-                onClick = onOpenSettings
-            ) {
-                Text("Пароли скрыты — включите показ в настройках", color = JbAmber)
-            }
-            return
-        }
-        var revealed by remember(row.recordId, row.value) { mutableStateOf(false) }
-        var confirm by remember(row.recordId, row.value) { mutableStateOf(false) }
-        LaunchedEffect(revealed) {
-            if (revealed) {
-                delay(60_000)
-                revealed = false
-            }
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            LabeledValue(
-                "Пароль",
-                if (revealed) row.password.orEmpty() else "••••••••",
-                modifier = Modifier.weight(1f)
-            )
-            TextButton(onClick = {
-                if (revealed) revealed = false else confirm = true
-            }) {
-                Icon(
-                    if (revealed) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                    contentDescription = if (revealed) "Скрыть" else "Показать",
-                    tint = JbAccent2,
-                    modifier = Modifier.size(15.dp)
-                )
-                Spacer(Modifier.width(5.dp))
-                Text(if (revealed) "Скрыть" else "Показать", color = JbAccent2)
-            }
-        }
-        if (confirm) {
-            AlertDialog(
-                onDismissRequest = { confirm = false },
-                containerColor = JbSurfaceHigh,
-                title = { Text("Это ваши данные?") },
-                text = {
-                    Text(
-                        "Показывать пароль можно только для собственных данных " +
-                            "или данных с согласия владельца."
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        confirm = false
-                        revealed = true
-                    }) { Text("Да, это мои данные", color = JbAccent2) }
-                },
-                dismissButton = {
-                    TextButton(onClick = { confirm = false }) { Text("Нет", color = JbMuted) }
-                }
-            )
-        }
+        LabeledValue("Пароль", row.password.orEmpty())
     } else {
         LabeledValue("Пароль", passwordReason(row.passwordStatus), color = statusColor(row.passwordStatus))
     }

@@ -220,8 +220,7 @@ object LeakReportCodec {
         offline: Boolean,
         cached: Boolean,
         note: String,
-        sources: List<LeakReportSource>,
-        showPasswords: Boolean
+        sources: List<LeakReportSource>
     ): String {
         val root = JSONObject()
             .put("schema", SCHEMA_V2)
@@ -230,7 +229,7 @@ object LeakReportCodec {
             .put("offline", offline)
             .put("cached", cached)
             .put("note", note)
-            .put("passwordMode", showPasswords)
+            .put("passwordMode", true)
         val array = JSONArray()
         sources.forEach { source ->
             val rows = JSONArray()
@@ -249,11 +248,7 @@ object LeakReportCodec {
                     .put("source_ref", row.sourceRef)
                     .put("record_id", row.recordId)
                     .put("url", row.url)
-                if (showPasswords && !row.password.isNullOrBlank()) {
-                    obj.put("password", row.password)
-                } else {
-                    obj.put("password", JSONObject.NULL)
-                }
+                obj.put("password", row.password ?: JSONObject.NULL)
                 rows.put(obj)
             }
             array.put(
@@ -332,13 +327,14 @@ object LeakReportCodec {
     fun toCsv(sources: List<LeakReportSource>): String {
         val rows = ArrayList<List<String>>()
         rows += listOf(
-            "Значение", "Есть пароль", "Ресурс утечки", "Дата утечки", "Типы данных",
+            "Значение", "Пароль", "Есть пароль", "Ресурс утечки", "Дата утечки", "Типы данных",
             "Статус пароля", "Источник пароля", "Источник", "Ссылка", "URL"
         )
         sources.forEach { source ->
             source.rows.forEach { row ->
                 rows += listOf(
                     formulaSafe(row.value),
+                    formulaSafe(row.password.orEmpty()),
                     (row.hadPassword || row.password != null).toString(),
                     formulaSafe(row.resource),
                     formulaSafe(row.breachDate),
@@ -386,7 +382,7 @@ object LeakReportCodec {
                     append("<td>").append(esc(row.resource.ifBlank { "источник не указан" })).append("</td>")
                     append("<td>").append(esc(row.breachDate)).append("</td>")
                     append("<td>").append(esc(row.dataTypesText)).append("</td>")
-                    append("<td>").append(if (row.hadPassword || row.password != null) "есть" else "—").append("</td>")
+                    append("<td>").append(esc(row.password.orEmpty().ifBlank { "—" })).append("</td>")
                     append("<td>").append(esc(row.passwordStatus.title)).append("</td>")
                     append("<td>")
                     if (row.url.startsWith("http")) {

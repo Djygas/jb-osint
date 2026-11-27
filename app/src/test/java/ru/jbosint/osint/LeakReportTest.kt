@@ -152,7 +152,7 @@ class LeakReportTest {
     }
 
     @Test
-    fun exportHidesPasswordWhenDisabled() {
+    fun exportIncludesPasswordByDefault() {
         val sources = listOf(
             LeakReportSource(
                 id = "leak_index",
@@ -169,41 +169,16 @@ class LeakReportTest {
                 )
             )
         )
-        val json = JSONObject(LeakReportCodec.encode("a@x.ru", 1L, false, false, "", sources, false))
+        val json = JSONObject(LeakReportCodec.encode("a@x.ru", 1L, false, false, "", sources))
         assertEquals("jb-osint/leak-scan/2.0", json.getString("schema"))
         val row = json.getJSONArray("sources").getJSONObject(0)
             .getJSONArray("rows").getJSONObject(0)
-        assertTrue(row.isNull("password"))
-        assertTrue(row.getBoolean("hadPassword"))
-        assertFalse(json.toString().contains("topsecret"))
-    }
-
-    @Test
-    fun exportIncludesPasswordWhenEnabled() {
-        val sources = listOf(
-            LeakReportSource(
-                id = "leak_index",
-                title = "Локальный индекс",
-                hits = 1,
-                rows = listOf(
-                    LeakReportRow(
-                        value = "a@x.ru",
-                        password = "topsecret",
-                        where = "dump.txt",
-                        source = "leak_index",
-                        hadPassword = true
-                    )
-                )
-            )
-        )
-        val json = JSONObject(LeakReportCodec.encode("a@x.ru", 1L, false, false, "", sources, true))
-        val row = json.getJSONArray("sources").getJSONObject(0)
-            .getJSONArray("rows").getJSONObject(0)
         assertEquals("topsecret", row.getString("password"))
-        assertTrue(json.getBoolean("passwordMode"))
+        assertTrue(row.getBoolean("hadPassword"))
         assertTrue(row.has("password_status"))
         assertTrue(row.has("resource"))
         assertTrue(row.has("breach_date"))
+        assertTrue(json.getBoolean("passwordMode"))
     }
 
     @Test
@@ -223,7 +198,7 @@ class LeakReportTest {
     }
 
     @Test
-    fun csvAndHtmlNeverContainPassword() {
+    fun csvAndHtmlContainPassword() {
         val sources = listOf(
             LeakReportSource(
                 id = "leak_index",
@@ -241,14 +216,13 @@ class LeakReportTest {
             )
         )
         val csv = LeakReportCodec.toCsv(sources)
-        assertFalse(csv.contains("TOP_SECRET_VALUE"))
-        assertTrue(csv.contains("true"))
+        assertTrue(csv.contains("TOP_SECRET_VALUE"))
+        assertTrue(csv.contains("Пароль"))
         assertTrue(csv.contains("Ресурс утечки"))
         assertTrue(csv.contains("Статус пароля"))
         val html = LeakReportCodec.toHtml("a@x.ru", 1L, sources)
-        assertFalse(html.contains("TOP_SECRET_VALUE"))
+        assertTrue(html.contains("TOP_SECRET_VALUE"))
         assertTrue(html.contains("Ресурс утечки"))
-        assertTrue(html.contains("Статус пароля"))
     }
 
     @Test
