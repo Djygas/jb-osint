@@ -162,6 +162,6 @@ object ReportSections {
     fun noteFor(fact: Fact, meta: ReportMeta): String {
         meta.aiNotes[fact.value]?.let { return it }
         if (fact.attributes.isEmpty()) return ""
-        return fact.attributes.entries.take(3).joinToString("; ") { "${it.key}: ${it.value}" }.take(300)
+        return fact.attributes.entries.take(6).joinToString("; ") { "${it.key}: ${it.value}" }.take(400)
     }
 }

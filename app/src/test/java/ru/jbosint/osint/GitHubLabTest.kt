@@ -88,6 +88,30 @@ class GitHubLabTest {
     }
 
     @Test
+    fun findsModuleTemplatesInRepoText() {
+        val text = """
+            # API
+            https://api.example.com/v1/search?q={query}
+            `curl 'https://api.example.com/v1/search?q={query}'`
+            https://example.com/docs
+        """.trimIndent()
+        val found = GitHubLabSpec.moduleTemplates(text)
+        assertEquals(1, found.size)
+        assertEquals("https://api.example.com/v1/search?q={query}", found.first())
+        assertTrue(GitHubLabSpec.moduleTemplates("no addresses here").isEmpty())
+    }
+
+    @Test
+    fun inspectScriptIsReadOnly() {
+        val project = GitHubLabSpec.projectFor(config, "https://github.com/a/b", "")!!
+        val script = GitHubLabSpec.inspectScript(config, project)
+        assertTrue(script.contains("JB_LAB_MODULE_URL="))
+        assertTrue(script.contains("JB_LAB_INSPECT_OK"))
+        assertFalse(script.contains("bash -lc"))
+        assertFalse(script.contains("pip install"))
+    }
+
+    @Test
     fun setupScriptWritesConfigWithSafePermissions() {
         val script = GitHubLabSpec.setupScript(config)
         assertTrue(script.contains("github_lab.json"))

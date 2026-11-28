@@ -106,9 +106,8 @@ class SettingsStore(context: Context) {
 
     /**
      * Показывать пароли из локального индекса дампов в отчётах утечек.
-     * По умолчанию выключено: пароль маскируется, в экспорт не попадает.
+     * Включено по умолчанию; при выключении пароль маскируется и в экспорт не попадает.
      */
-    /** Открытые пароли из дампов. Включено по умолчанию после предупреждения. */
     var showLeakPasswords: Boolean
         get() = prefs.getBoolean("show_leak_passwords", true)
         set(value) = prefs.edit().putBoolean("show_leak_passwords", value).apply()

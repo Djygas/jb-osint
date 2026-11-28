@@ -67,6 +67,9 @@ class HtmlReportTest {
         assertTrue(html.contains("TeleSINT"))
         assertTrue(html.contains("Подписчиков: 42"))
         assertTrue(html.contains("Требует проверки"))
+        assertTrue(html.contains("Методология и ограничения"))
+        assertTrue(html.contains("<th>Источник</th>"))
+        assertTrue(html.contains("TeleSINT (https://telesint.dev)"))
     }
 
     @Test

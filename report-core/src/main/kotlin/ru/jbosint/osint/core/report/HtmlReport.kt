@@ -91,6 +91,15 @@ class HtmlReport(
             append("</section>")
         }
 
+        append("<section><h2>Методология и ограничения</h2>")
+        append("<p class=\"muted\">Онлайн-сервисы утечек передают только метаданные записи: название набора, " +
+            "дату и состав полей. Значения паролей они не отдают; пароль в отчёте может быть только " +
+            "из локального индекса дампов, импортированного аналитиком.</p>")
+        append("<p class=\"muted\">Совпадение по изображению или лицу показывает сходство страницы, " +
+            "но не доказывает тождество личности. Такие находки требуют ручной сверки, а ссылки на " +
+            "сервисы без публичного API приведены как направления проверки, не как найденные совпадения.</p>")
+        append("</section>")
+
         if (data.sources.isNotEmpty()) {
             append("<section><h2>Источники</h2><table><thead><tr><th>№</th><th>Модуль</th><th>Ресурс</th></tr></thead><tbody>")
             data.sources.forEachIndexed { index, source ->
@@ -108,13 +117,14 @@ class HtmlReport(
 
     private fun StringBuilder.categoryBlock(category: FactCategory, facts: List<Fact>) {
         append("<h3>").append(esc(category.title)).append(" <span class=\"count\">").append(facts.size).append("</span></h3>")
-        append("<table><thead><tr><th>Сведение</th><th>Значение</th><th>Детали</th><th>Достоверность</th></tr></thead><tbody>")
+        append("<table><thead><tr><th>Сведение</th><th>Значение</th><th>Детали</th><th>Достоверность</th><th>Источник</th></tr></thead><tbody>")
         facts.forEach { fact ->
             append("<tr><td>").append(esc(fact.kind)).append("</td>")
             append("<td class=\"value\">").append(link(fact)).append("</td>")
             append("<td class=\"details\">").append(esc(details(fact))).append("</td>")
             append("<td><span class=\"badge ").append(badgeClass(fact.confidence)).append("\">")
-            append(esc(fact.confidence.title)).append("</span></td></tr>")
+            append(esc(fact.confidence.title)).append("</span></td>")
+            append("<td class=\"url\">").append(esc(ReportSections.sourceLine(fact))).append("</td></tr>")
         }
         append("</tbody></table>")
     }

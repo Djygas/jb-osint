@@ -196,6 +196,48 @@ fun GitHubLabScreen(state: UiState, vm: AppViewModel) {
             }
         }
 
+        if (project != null) {
+            Spacer(Modifier.height(10.dp))
+            GlowCard(modifier = Modifier.fillMaxWidth(), padding = 14) {
+                Text(
+                    "Поисковый модуль из репозитория",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = JbText
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Осмотр только читает файлы репозитория и ищет HTTPS-адреса с {query}. " +
+                        "Код репозитория не запускается; ключ и способ передачи задаёте вы сами.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = JbMuted
+                )
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = vm::inspectLabModule, enabled = !lab.busy) {
+                    Text("Найти шаблон модуля", color = JbAccent2)
+                }
+                lab.moduleCandidates.forEach { candidate ->
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            candidate,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = JbText,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        TextButton(onClick = { vm.openLabModuleCandidate(candidate) }) {
+                            Text("Настроить", color = JbAccent2)
+                        }
+                    }
+                }
+            }
+        }
+
         Spacer(Modifier.height(10.dp))
         GlowCard(modifier = Modifier.fillMaxWidth(), padding = 14) {
             Row(verticalAlignment = Alignment.CenterVertically) {

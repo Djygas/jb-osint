@@ -1,6 +1,8 @@
 package ru.jbosint.osint.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -58,10 +60,16 @@ fun LeaksScreen(state: UiState, vm: AppViewModel) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Pill(
-                    if (state.leak.showPasswords) "Пароли: вкл" else "Пароли: выкл",
-                    if (state.leak.showPasswords) JbAmber else JbFaint
-                )
+                Box(
+                    modifier = Modifier.clickable {
+                        vm.setLeakShowPasswords(!state.leak.showPasswords)
+                    }
+                ) {
+                    Pill(
+                        if (state.leak.showPasswords) "Пароли: вкл" else "Пароли: выкл",
+                        if (state.leak.showPasswords) JbAmber else JbFaint
+                    )
+                }
                 Spacer(Modifier.weight(1f))
                 TextButton(onClick = vm::openLeakScan) {
                     Text("Глубокий поиск по дампам", color = JbAccent2)
@@ -125,9 +133,10 @@ fun LeaksScreen(state: UiState, vm: AppViewModel) {
                         Spacer(Modifier.height(4.dp))
                         Text(
                             "Официальные API Have I Been Pwned и LeakCheck паролей не отдают. " +
-                                "Пароли из локального индекса дампов видны только в «Глубоком поиске» и по " +
-                                "умолчанию скрыты; в JSON они попадают лишь при включённом режиме, " +
-                                "CSV и HTML — никогда. Проверяйте только свои данные или данные с согласия владельца.",
+                                "Пароль берётся только из локального индекса, который создаётся в «Глубоком " +
+                                "поиске по дампам». При включённом режиме он показывается здесь и попадает " +
+                                "в PDF, XLSX, JSON и HTML; при выключенном — маскируется и в экспорт не идёт. " +
+                                "Проверяйте только свои данные или данные с согласия владельца.",
                             style = MaterialTheme.typography.bodySmall,
                             color = JbMuted
                         )

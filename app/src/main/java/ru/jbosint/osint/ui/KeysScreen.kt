@@ -84,7 +84,8 @@ import ru.jbosint.osint.data.ProviderGroup
 @Composable
 fun KeysScreen(state: UiState, vm: AppViewModel) {
     val context = LocalContext.current
-    var editorOpen by remember { mutableStateOf(false) }
+    // Черновик из GitHub-лаборатории должен сразу открывать редактор модуля.
+    var editorOpen by remember { mutableStateOf(state.manualDraft != null) }
     var editing by remember { mutableStateOf<CustomModule?>(null) }
     var raeOpen by remember { mutableStateOf(false) }
     LazyColumn(
