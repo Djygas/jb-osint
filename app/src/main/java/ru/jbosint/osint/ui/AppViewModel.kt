@@ -471,9 +471,7 @@ data class LabUi(
     val installDeps: Boolean = false,
     val verifyGpg: Boolean = false,
     val configured: Boolean = false,
-    val setupOpen: Boolean = false,
-    /** Кандидаты в поисковые модули, найденные в клонированном репозитории. */
-    val moduleCandidates: List<String> = emptyList()
+    val setupOpen: Boolean = false
 )
 
 /** Шаг мастера настройки модулей. */
@@ -4509,7 +4507,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 offline = leak.offline,
                 cached = leak.cached,
                 note = leak.note.orEmpty(),
-                sources = leak.sources
+                sources = leak.sources,
+                includePasswords = settings.showLeakPasswords
             )
             deliverLeak(
                 "leak-scan-${leakStamp()}.json",
@@ -4519,7 +4518,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** CSV без паролей: только значение, факт наличия, происхождение и источник. */
+    /** CSV: пароль включается только при включённом показе паролей. */
     fun exportLeakCsv() {
         val leak = _state.value.leak
         if (leak.sources.isEmpty()) {
@@ -4527,7 +4526,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         viewModelScope.launch {
-            val text = LeakReportCodec.toCsv(leak.sources)
+            val text = LeakReportCodec.toCsv(leak.sources, settings.showLeakPasswords)
             deliverLeak(
                 "leak-scan-${leakStamp()}.csv",
                 ("\uFEFF" + text).toByteArray(Charsets.UTF_8),
@@ -4536,7 +4535,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** HTML без паролей: показываем только «есть/нет». */
+    /** HTML: пароль включается только при включённом показе паролей. */
     fun exportLeakHtml() {
         val leak = _state.value.leak
         if (leak.sources.isEmpty()) {
@@ -4544,7 +4543,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         viewModelScope.launch {
-            val text = LeakReportCodec.toHtml(leak.query, System.currentTimeMillis(), leak.sources)
+            val text = LeakReportCodec.toHtml(
+                leak.query,
+                System.currentTimeMillis(),
+                leak.sources,
+                settings.showLeakPasswords
+            )
             deliverLeak("leak-scan-${leakStamp()}.html", text.toByteArray(Charsets.UTF_8), "text/html")
         }
     }
@@ -4724,19 +4728,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         startLab("export", "Экспорт…", GitHubLabSpec.exportScript(project))
     }
 
-    /** Найти в клонированном репозитории HTTPS-шаблоны поисковых модулей. */
-    fun inspectLabModule() {
-        val current = _state.value.lab
-        if (current.busy) return
-        val project = current.project ?: run {
-            _state.update { it.copy(toast = "Сначала клонируйте репозиторий") }
-            return
-        }
-        if (!labPermissionOk()) return
-        appendLabLog("Ищу в репозитории адреса с маркером {query}…")
-        startLab("inspect", "Ищу шаблоны модулей…", GitHubLabSpec.inspectScript(labConfig(), project))
-    }
-
     /** Открыть найденный адрес в редакторе модулей: ключ и метод задаёт пользователь. */
     fun openLabModuleCandidate(url: String) {
         val template = GitHubLabSpec.moduleTemplates(url, limit = 1).firstOrNull() ?: url.trim()
@@ -4852,7 +4843,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
         var project = _state.value.lab.project
         var configured = _state.value.lab.configured
-        var moduleCandidates = _state.value.lab.moduleCandidates
         var note: String? = null
         var autoInstall: LabProject? = null
         var next: (() -> Unit)? = null
@@ -4877,7 +4867,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     val type = GitHubLabSpec.typeFromMarker(markerOf(result.stdout, "JB_LAB_TYPE="))
                     val dir = markerOf(result.stdout, "JB_LAB_DIR=").ifBlank { pending.dir }
                     project = pending.copy(dir = dir, type = type)
-                    moduleCandidates = emptyList()
                     val gpg = markerOf(result.stdout, "JB_LAB_GPG=")
                     note = buildString {
                         append("Готово: ").append(type.title)
@@ -4891,21 +4880,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             append("Клонирование не удалось (код ").append(result.exitCode).append(")")
                             if (!failureTail.isNullOrBlank()) append(": ").append(failureTail)
                         }
-                }
-            }
-            "inspect" -> {
-                val found = result.stdout.lineSequence()
-                    .filter { it.startsWith("JB_LAB_MODULE_URL=") }
-                    .map { it.removePrefix("JB_LAB_MODULE_URL=").trim() }
-                    .filter { it.startsWith("https://") && it.contains(CustomModuleSpec.PLACEHOLDER) }
-                    .distinct()
-                    .toList()
-                moduleCandidates = found
-                note = labErrorHint(result.stdout) ?: if (found.isEmpty()) {
-                    "В документации репозитория не найдено адресов с ${CustomModuleSpec.PLACEHOLDER}. " +
-                        "Задайте шаблон вручную в «Ключи → Свой модуль»."
-                } else {
-                    "Найдено кандидатов: ${found.size}. Откройте нужный, чтобы задать ключ и метод."
                 }
             }
             "install" -> {
@@ -4922,7 +4896,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
             "clear" -> {
                 project = null
-                moduleCandidates = emptyList()
                 note = labErrorHint(result.stdout) ?: "Среда удалена"
             }
             "export" -> {
@@ -4944,8 +4917,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     stage = "",
                     note = note,
                     project = project,
-                    configured = configured,
-                    moduleCandidates = moduleCandidates
+                    configured = configured
                 )
             )
         }

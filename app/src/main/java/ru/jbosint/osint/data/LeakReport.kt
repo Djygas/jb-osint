@@ -207,7 +207,8 @@ object LeakRows {
 
 /**
  * Кодек отчёта утечек. Экспорт всегда в схему 2.0; пароль включается только при
- * включённом режиме. CSV и HTML пароль не содержат никогда.
+ * [includePasswords] = true (настройка «Показывать пароли открыто»). При false
+ * значение пароля не попадает ни в JSON, ни в CSV, ни в HTML.
  */
 object LeakReportCodec {
 
@@ -220,7 +221,8 @@ object LeakReportCodec {
         offline: Boolean,
         cached: Boolean,
         note: String,
-        sources: List<LeakReportSource>
+        sources: List<LeakReportSource>,
+        includePasswords: Boolean = true
     ): String {
         val root = JSONObject()
             .put("schema", SCHEMA_V2)
@@ -229,7 +231,7 @@ object LeakReportCodec {
             .put("offline", offline)
             .put("cached", cached)
             .put("note", note)
-            .put("passwordMode", true)
+            .put("passwordMode", includePasswords)
         val array = JSONArray()
         sources.forEach { source ->
             val rows = JSONArray()
@@ -248,7 +250,7 @@ object LeakReportCodec {
                     .put("source_ref", row.sourceRef)
                     .put("record_id", row.recordId)
                     .put("url", row.url)
-                obj.put("password", row.password ?: JSONObject.NULL)
+                obj.put("password", if (includePasswords) (row.password ?: JSONObject.NULL) else JSONObject.NULL)
                 rows.put(obj)
             }
             array.put(
@@ -323,8 +325,8 @@ object LeakReportCodec {
         )
     }
 
-    /** CSV без паролей: значение, ресурс, дата, типы, статус, источник, ссылка. */
-    fun toCsv(sources: List<LeakReportSource>): String {
+    /** CSV: значение, ресурс, дата, типы, статус, источник, ссылка; пароль — по настройке. */
+    fun toCsv(sources: List<LeakReportSource>, includePasswords: Boolean = true): String {
         val rows = ArrayList<List<String>>()
         rows += listOf(
             "Значение", "Пароль", "Есть пароль", "Ресурс утечки", "Дата утечки", "Типы данных",
@@ -334,7 +336,7 @@ object LeakReportCodec {
             source.rows.forEach { row ->
                 rows += listOf(
                     formulaSafe(row.value),
-                    formulaSafe(row.password.orEmpty()),
+                    formulaSafe(if (includePasswords) row.password.orEmpty() else ""),
                     (row.hadPassword || row.password != null).toString(),
                     formulaSafe(row.resource),
                     formulaSafe(row.breachDate),
@@ -350,11 +352,12 @@ object LeakReportCodec {
         return rows.joinToString("\r\n") { line -> line.joinToString(";") { cell(it) } } + "\r\n"
     }
 
-    /** HTML без паролей: показываем «есть/нет» и статус, но не значение. */
+    /** HTML: показываем «есть/нет» и статус; значение пароля — по настройке. */
     fun toHtml(
         query: String,
         createdAt: Long,
-        sources: List<LeakReportSource>
+        sources: List<LeakReportSource>,
+        includePasswords: Boolean = true
     ): String = buildString {
         append("<!DOCTYPE html><html lang=\"ru\"><head><meta charset=\"utf-8\">")
         append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
@@ -368,7 +371,10 @@ object LeakReportCodec {
         append("<h1>JB OSINT — отчёт об утечках</h1>")
         append("<p>Объект: <b>").append(esc(query)).append("</b><br>")
         append("Сформировано: ").append(esc(stamp(createdAt))).append("</p>")
-        append("<p>Пароли в этом файле не выводятся — показан только статус.</p>")
+        append(
+            if (includePasswords) "<p>Значения паролей включены по настройке приложения.</p>"
+            else "<p>Пароли в этом файле не выводятся — показан только статус.</p>"
+        )
         sources.forEach { source ->
             append("<h2>").append(esc(source.title)).append("</h2>")
             source.status?.let { append("<p class=\"muted\">").append(esc(it)).append("</p>") }
@@ -382,7 +388,9 @@ object LeakReportCodec {
                     append("<td>").append(esc(row.resource.ifBlank { "источник не указан" })).append("</td>")
                     append("<td>").append(esc(row.breachDate)).append("</td>")
                     append("<td>").append(esc(row.dataTypesText)).append("</td>")
-                    append("<td>").append(esc(row.password.orEmpty().ifBlank { "—" })).append("</td>")
+                    append("<td>").append(
+                        esc(if (includePasswords) row.password.orEmpty().ifBlank { "—" } else "скрыт")
+                    ).append("</td>")
                     append("<td>").append(esc(row.passwordStatus.title)).append("</td>")
                     append("<td>")
                     if (row.url.startsWith("http")) {

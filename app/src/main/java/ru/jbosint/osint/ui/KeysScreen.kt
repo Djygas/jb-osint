@@ -53,6 +53,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -88,6 +89,10 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
     var editorOpen by remember { mutableStateOf(state.manualDraft != null) }
     var editing by remember { mutableStateOf<CustomModule?>(null) }
     var raeOpen by remember { mutableStateOf(false) }
+    // Черновик может прийти, когда экран уже открыт (например, из лаборатории).
+    LaunchedEffect(state.manualDraft) {
+        if (state.manualDraft != null) editorOpen = true
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize().imePadding().padding(horizontal = 20.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 12.dp, bottom = 28.dp),
@@ -257,6 +262,7 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
             },
             onQuick = { title, key, link ->
                 editorOpen = false
+                vm.clearManualDraft()
                 vm.createModuleQuick(title, key, link)
             },
             onSave = { title, url, auth, header, param, key, rules, method ->
@@ -272,6 +278,7 @@ fun KeysScreen(state: UiState, vm: AppViewModel) {
                     method = method
                 )
                 editorOpen = false
+                vm.clearManualDraft()
             }
         )
     }

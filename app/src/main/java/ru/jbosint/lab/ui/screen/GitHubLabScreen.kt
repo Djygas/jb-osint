@@ -51,6 +51,8 @@ import ru.jbosint.lab.model.LabResultParser
 import ru.jbosint.lab.model.LabRuntime
 import ru.jbosint.lab.model.LabScript
 import ru.jbosint.lab.repository.GitHubLabRepository
+import ru.jbosint.lab.server.LabModuleScan
+import ru.jbosint.osint.ui.AppViewModel
 import ru.jbosint.osint.ui.GlowCard
 import ru.jbosint.osint.ui.JbAccent
 import ru.jbosint.osint.ui.JbAccent2
@@ -79,6 +81,8 @@ fun GitHubLabScreen() {
     val context = LocalContext.current
     val repository = remember { GitHubLabRepository(context) }
     val labVm: LabViewModel = viewModel()
+    // Тот же экземпляр, что и в AppRoot: черновик модуля откроет редактор в «Ключах».
+    val appVm: AppViewModel = viewModel()
     val server by labVm.state.collectAsState()
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
@@ -95,6 +99,7 @@ fun GitHubLabScreen() {
     var params by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var history by remember { mutableStateOf<List<LabHistoryItem>>(emptyList()) }
     var runtimes by remember { mutableStateOf<List<LabRuntime>>(emptyList()) }
+    var moduleCandidates by remember { mutableStateOf<List<String>>(emptyList()) }
     var lastOutput by remember { mutableStateOf("") }
 
     val cards = remember(lastOutput) { LabResultParser.parse(lastOutput) }
@@ -119,6 +124,7 @@ fun GitHubLabScreen() {
                 type = LabProjectType.OTHER
             )
             command = ""
+            moduleCandidates = emptyList()
             lastOutput = ""
             note = "Открыт дамп в лаборатории: ${request.title}"
         }
@@ -146,6 +152,7 @@ fun GitHubLabScreen() {
                 note = null
                 logs = emptyList()
                 project = null
+                moduleCandidates = emptyList()
                 lastOutput = ""
                 scope.launch {
                     try {
@@ -168,6 +175,37 @@ fun GitHubLabScreen() {
                     } catch (t: Throwable) {
                         note = t.message ?: "Ошибка загрузки"
                         addLog(t.message ?: "Ошибка загрузки", true)
+                    } finally {
+                        busy = false
+                        stage = ""
+                    }
+                }
+            }
+        }
+    }
+
+    val inspectModules: () -> Unit = {
+        val target = project
+        when {
+            busy -> Unit
+            target == null -> note = "Сначала скачайте репозиторий"
+            !server.running -> note = "Сначала включите лабораторию"
+            else -> {
+                busy = true
+                stage = "Ищу шаблоны модулей…"
+                note = null
+                scope.launch {
+                    try {
+                        val result = repository.run(target.dir, LabModuleScan.command(), 90)
+                        moduleCandidates = LabModuleScan.candidates(result.stdout)
+                        note = if (moduleCandidates.isEmpty()) {
+                            "Адресов с {query} не найдено — создайте модуль вручную в «Ключах»"
+                        } else {
+                            "Найдено кандидатов: ${moduleCandidates.size}"
+                        }
+                    } catch (t: Throwable) {
+                        note = t.message ?: "Ошибка осмотра репозитория"
+                        addLog(note ?: "", true)
                     } finally {
                         busy = false
                         stage = ""
@@ -246,6 +284,7 @@ fun GitHubLabScreen() {
                     repository.clear(target.dir)
                     addLog("Среда удалена: ${target.dir}", false)
                     project = null
+                    moduleCandidates = emptyList()
                     lastOutput = ""
                     note = "Среда удалена"
                 } catch (t: Throwable) {
@@ -499,6 +538,48 @@ fun GitHubLabScreen() {
                 Spacer(Modifier.height(6.dp))
                 TextButton(onClick = installDeps, enabled = !busy && current.scripts.isNotEmpty()) {
                     Text("Установить зависимости", color = JbAccent2)
+                }
+            }
+        }
+
+        if (project != null) {
+            Spacer(Modifier.height(10.dp))
+            GlowCard(modifier = Modifier.fillMaxWidth(), padding = 14) {
+                Text(
+                    "Поисковый модуль из репозитория",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = JbText
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Осмотр только читает документацию и конфиги и ищет HTTPS-адреса с {query}. " +
+                        "Код репозитория не запускается; ключ и способ передачи задаёте вы сами.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = JbMuted
+                )
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = inspectModules, enabled = !busy && server.running) {
+                    Text("Найти шаблон модуля", color = JbAccent2)
+                }
+                moduleCandidates.forEach { candidate ->
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            candidate,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = JbText,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        TextButton(onClick = { appVm.openLabModuleCandidate(candidate) }) {
+                            Text("Настроить", color = JbAccent2)
+                        }
+                    }
                 }
             }
         }

@@ -226,6 +226,39 @@ class LeakReportTest {
     }
 
     @Test
+    fun exportsHidePasswordsWhenModeOff() {
+        val sources = listOf(
+            LeakReportSource(
+                id = "leak_index",
+                title = "Локальный индекс",
+                hits = 1,
+                rows = listOf(
+                    LeakReportRow(
+                        value = "a@x.ru",
+                        password = "TOP_SECRET_VALUE",
+                        where = "dump.txt",
+                        source = "leak_index",
+                        hadPassword = true
+                    )
+                )
+            )
+        )
+        val json = JSONObject(
+            LeakReportCodec.encode("a@x.ru", 1L, false, false, "", sources, false)
+        )
+        assertFalse(json.getBoolean("passwordMode"))
+        val row = json.getJSONArray("sources").getJSONObject(0).getJSONArray("rows").getJSONObject(0)
+        assertTrue(row.isNull("password"))
+        assertTrue(row.getBoolean("hadPassword"))
+
+        val csv = LeakReportCodec.toCsv(sources, false)
+        assertFalse(csv.contains("TOP_SECRET_VALUE"))
+        val html = LeakReportCodec.toHtml("a@x.ru", 1L, sources, false)
+        assertFalse(html.contains("TOP_SECRET_VALUE"))
+        assertTrue(html.contains("скрыт"))
+    }
+
+    @Test
     fun originPrefersWhereThenDatasets() {
         assertEquals(
             "Collection #1",

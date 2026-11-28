@@ -195,7 +195,7 @@ fun LeakScanDialog(state: UiState, vm: AppViewModel) {
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(color = JbBg, modifier = Modifier.fillMaxSize()) {
-            val show = true
+            val show = leak.showPasswords
             val selected = leak.selected
             if (selected != null) {
                 LeakDetailScreen(
@@ -512,10 +512,11 @@ private fun PasswordLine(
     showPasswords: Boolean,
     onOpenSettings: () -> Unit
 ) {
-    if (row.password != null) {
-        LabeledValue("Пароль", row.password.orEmpty())
-    } else {
-        LabeledValue("Пароль", passwordReason(row.passwordStatus), color = statusColor(row.passwordStatus))
+    val password = row.password
+    when {
+        password != null && showPasswords -> LabeledValue("Пароль", password)
+        password != null -> LabeledValue("Пароль", "скрыт (пароли выключены)")
+        else -> LabeledValue("Пароль", passwordReason(row.passwordStatus), color = statusColor(row.passwordStatus))
     }
 }
 

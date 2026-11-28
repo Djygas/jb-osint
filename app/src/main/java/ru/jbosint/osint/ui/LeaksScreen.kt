@@ -33,6 +33,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -61,9 +64,9 @@ fun LeaksScreen(state: UiState, vm: AppViewModel) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Box(
-                    modifier = Modifier.clickable {
-                        vm.setLeakShowPasswords(!state.leak.showPasswords)
-                    }
+                    modifier = Modifier
+                        .clickable { vm.setLeakShowPasswords(!state.leak.showPasswords) }
+                        .semantics(mergeDescendants = true) { role = Role.Button }
                 ) {
                     Pill(
                         if (state.leak.showPasswords) "Пароли: вкл" else "Пароли: выкл",

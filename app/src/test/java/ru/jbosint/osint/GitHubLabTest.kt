@@ -102,16 +102,6 @@ class GitHubLabTest {
     }
 
     @Test
-    fun inspectScriptIsReadOnly() {
-        val project = GitHubLabSpec.projectFor(config, "https://github.com/a/b", "")!!
-        val script = GitHubLabSpec.inspectScript(config, project)
-        assertTrue(script.contains("JB_LAB_MODULE_URL="))
-        assertTrue(script.contains("JB_LAB_INSPECT_OK"))
-        assertFalse(script.contains("bash -lc"))
-        assertFalse(script.contains("pip install"))
-    }
-
-    @Test
     fun setupScriptWritesConfigWithSafePermissions() {
         val script = GitHubLabSpec.setupScript(config)
         assertTrue(script.contains("github_lab.json"))

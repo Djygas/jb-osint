@@ -339,31 +339,6 @@ object GitHubLabSpec {
         """.trimIndent()
     }
 
-    /**
-     * read-only осмотр репозитория: ищем в документации и конфигах адреса вида
-     * `https://…?q={query}`. Ничего не устанавливаем и не выполняем из репозитория.
-     */
-    fun inspectScript(config: GitHubLabConfig, project: LabProject): String = """
-        set -uo pipefail
-        PROJ=${q(project.dir)}
-        [ -d "${'$'}PROJ" ] || { echo "JB_LAB_ERROR=no_project"; exit 3; }
-        WORK=${q(safeWorkDir(config.workDir))}
-        case "${'$'}PROJ" in
-          "${'$'}WORK"/*) ;;
-          *) echo "JB_LAB_ERROR=bad_path"; exit 2;;
-        esac
-        find "${'$'}PROJ" -type f \
-          \( -iname 'readme*' -o -iname '*.md' -o -iname '*.json' -o -iname '*.yaml' \
-             -o -iname '*.yml' -o -iname '*.txt' -o -iname '*.py' -o -iname '*.js' -o -iname '*.ts' \) \
-          -not -path '*/.git/*' -not -path '*/.jb_venv/*' -not -path '*/node_modules/*' \
-          -size -512k 2>/dev/null | head -80 | while IFS= read -r f; do
-          grep -hEo 'https://[^[:space:]"<>)]+' "${'$'}f" 2>/dev/null || true
-        done | grep -F '{query}' | sort -u | head -12 | while IFS= read -r u; do
-          echo "JB_LAB_MODULE_URL=${'$'}u"
-        done
-        echo "JB_LAB_INSPECT_OK"
-    """.trimIndent()
-
     fun clearScript(config: GitHubLabConfig, project: LabProject): String = """
         set -uo pipefail
         WORK=${q(safeWorkDir(config.workDir))}
